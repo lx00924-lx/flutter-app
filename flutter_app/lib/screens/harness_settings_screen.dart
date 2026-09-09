@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
+import '../models/app_settings.dart';
 import '../utils/bridge_script_helper.dart';
 
 class HarnessSettingsScreen extends StatefulWidget {

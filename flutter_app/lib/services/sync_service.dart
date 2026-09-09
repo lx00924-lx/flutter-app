@@ -329,6 +329,31 @@ class SyncService {
     }
   }
 
+  /// 实时静默推送会话元数据到服务器（用于会话重命名或创建时同步）
+  Future<void> pushSessions({
+    required String userId,
+    required List<ChatSession> sessions,
+    String? clientSessionId,
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty || sessions.isEmpty) return;
+
+    try {
+      final url = '$serverBaseUrl/api/agent/sync-sessions';
+      await _dio.post(
+        url,
+        data: {
+          'userId': cleanUserId,
+          'sessions': sessions.map((s) => s.toMap()).toList(),
+        },
+        options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
+      );
+    } catch (e) {
+      _checkAndTriggerForceLogout(e);
+      debugPrint('[SyncService] Push sessions silent error: $e');
+    }
+  }
+
   /// 从云端拉取用户设置配置
   Future<AppSettings?> pullSettings({
     required String userId,
