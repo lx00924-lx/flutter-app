@@ -1,0 +1,385 @@
+import 'dart:async';
+import 'dart:typed_data';
+import 'package:flutter/material.dart';
+import 'package:uuid/uuid.dart';
+import '../models/app_settings.dart';
+import '../services/storage_service.dart';
+import '../services/sync_service.dart';
+import '../utils/image_picker_helper.dart';
+import '../main.dart' show rootNavigatorKey;
+
+class SettingsProvider extends ChangeNotifier {
+  late AppSettings _settings;
+  bool _isShowingKickDialog = false;
+  Timer? _cloudPushDebounceTimer;
+
+  Uint8List? _userAvatarBytes;
+  Uint8List? _aiAvatarBytes;
+  Uint8List? _customBackgroundBytes;
+
+  SettingsProvider() {
+    _settings = StorageService.instance.loadSettings();
+    _updateImageCache();
+
+    // 确保有唯一的 clientSessionId
+    if (_settings.clientSessionId.isEmpty) {
+      _settings.clientSessionId = const Uuid().v4();
+      _save(pushToCloud: false);
+    }
+
+    // 若已登录，立即启动多端互斥监听与云端设置静默同步
+    if (_settings.isLoggedIn && _settings.loginAccount.trim().isNotEmpty) {
+      _startSessionMonitoring();
+      pullCloudSettings();
+    }
+  }
+
+  AppSettings get settings => _settings;
+  bool get isLoggedIn => _settings.isLoggedIn;
+  bool get isDarkMode => _settings.isDarkMode;
+  bool get enableSplash => _settings.enableSplash;
+  String get activeModelDisplayName => _settings.activeModelDisplayName;
+  String get activeEndpointId => _settings.activeEndpointId;
+  ApiModelEndpoint? get activeEndpoint => _settings.activeEndpoint;
+  String get syncUserId => _settings.loginAccount.trim().isNotEmpty ? _settings.loginAccount.trim() : 'default_user';
+  String get clientSessionId => _settings.clientSessionId;
+
+  Uint8List? get userAvatarBytes => _userAvatarBytes;
+  Uint8List? get aiAvatarBytes => _aiAvatarBytes;
+  Uint8List? get customBackgroundBytes => _customBackgroundBytes;
+
+  void _updateImageCache() {
+    _userAvatarBytes = ImagePickerHelper.decodeBase64Image(_settings.userAvatar);
+    _aiAvatarBytes = ImagePickerHelper.decodeBase64Image(_settings.aiAvatar);
+    _customBackgroundBytes = ImagePickerHelper.decodeBase64Image(_settings.customBackground);
+  }
+
+  void toggleTheme() {
+    _settings.isDarkMode = !_settings.isDarkMode;
+    _save();
+  }
+
+  /// 在主界面下拉弹窗中切换选中的 API 卡片
+  void selectEndpoint(ApiModelEndpoint endpoint) {
+    _settings.activeEndpointId = endpoint.id;
+    _settings.activeModelDisplayName = endpoint.cardName;
+    _save();
+  }
+
+  /// 添加新的 API 模型卡片
+  void addApiEndpoint(ApiModelEndpoint endpoint) {
+    _settings.apiEndpoints.add(endpoint);
+    if (_settings.apiEndpoints.length == 1) {
+      _settings.activeEndpointId = endpoint.id;
+      _settings.activeModelDisplayName = endpoint.cardName;
+    }
+    _save();
+  }
+
+  /// 更新现有 API 模型卡片
+  void updateApiEndpoint(ApiModelEndpoint endpoint) {
+    final idx = _settings.apiEndpoints.indexWhere((e) => e.id == endpoint.id);
+    if (idx != -1) {
+      _settings.apiEndpoints[idx] = endpoint;
+      if (_settings.activeEndpointId == endpoint.id) {
+        _settings.activeModelDisplayName = endpoint.cardName;
+      }
+      _save();
+    }
+  }
+
+  /// 删除 API 模型卡片
+  void removeApiEndpoint(String endpointId) {
+    _settings.apiEndpoints.removeWhere((e) => e.id == endpointId);
+    if (_settings.activeEndpointId == endpointId && _settings.apiEndpoints.isNotEmpty) {
+      _settings.activeEndpointId = _settings.apiEndpoints.first.id;
+      _settings.activeModelDisplayName = _settings.apiEndpoints.first.cardName;
+    }
+    _save();
+  }
+
+  void updateSettings(AppSettings newSettings) {
+    _settings = newSettings;
+    _save();
+  }
+
+  /// 启动多端单点互斥监听（1台手机 + 1台电脑）
+  void _startSessionMonitoring() {
+    SyncService.instance.startSessionWatcher(
+      userId: _settings.loginAccount,
+      clientSessionId: _settings.clientSessionId,
+      deviceType: AppSettings.currentDeviceType,
+      onKicked: (reason) {
+        handleForceLogout(reason);
+      },
+    );
+  }
+
+  /// 处理顶号强制下线
+  void handleForceLogout(String reason) {
+    if (!_settings.isLoggedIn) return;
+
+    _settings.isLoggedIn = false;
+    _save();
+
+    if (_isShowingKickDialog) return;
+    _isShowingKickDialog = true;
+
+    final ctx = rootNavigatorKey.currentContext;
+    if (ctx != null) {
+      showDialog(
+        context: ctx,
+        barrierDismissible: false,
+        builder: (dialogCtx) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 26),
+                SizedBox(width: 8),
+                Text('账号已下线', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+              ],
+            ),
+            content: Text(
+              reason.isNotEmpty
+                  ? reason
+                  : '您的账号已在另一台${AppSettings.currentDeviceType == 'mobile' ? '手机' : '电脑'}上登录，当前设备已被下线。如非本人操作，请及时修改密码。',
+              style: const TextStyle(fontSize: 14, height: 1.5),
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () {
+                  _isShowingKickDialog = false;
+                  Navigator.of(dialogCtx).pop();
+                },
+                child: const Text('重新登录'),
+              ),
+            ],
+          ),
+        ),
+      ).then((_) {
+        _isShowingKickDialog = false;
+      });
+    } else {
+      _isShowingKickDialog = false;
+    }
+  }
+
+  /// 远程服务端登录（支持 1 手机 + 1 电脑互斥限制）
+  Future<Map<String, dynamic>> loginWithServer(String account, String password) async {
+    final cleanAccount = account.trim();
+    if (cleanAccount.isEmpty || password.isEmpty) {
+      return {'success': false, 'message': '请输入账号与密码'};
+    }
+
+    // 登录时生成全新唯一的 clientSessionId
+    final newSessionId = const Uuid().v4();
+    _settings.clientSessionId = newSessionId;
+
+    final res = await SyncService.instance.loginWithServer(
+      username: cleanAccount,
+      password: password,
+      clientSessionId: newSessionId,
+      deviceType: AppSettings.currentDeviceType,
+    );
+
+    if (res['success'] == true) {
+      _settings.loginAccount = cleanAccount;
+      _settings.accountPassword = password;
+      _settings.isLoggedIn = true;
+      _save(pushToCloud: false);
+
+      // 启动心跳多端互斥监听
+      _startSessionMonitoring();
+
+      // 异步拉取云端设置；若云端已有配置则合并，否则同步推送当前配置至云端
+      pullCloudSettings().then((_) {
+        _debouncePushSettings();
+      });
+
+      return {'success': true};
+    } else {
+      // 若服务器不可达，且本地已保存过同账号密码，允许本地离线登录
+      if (_settings.loginAccount == cleanAccount && _settings.accountPassword == password) {
+        _settings.isLoggedIn = true;
+        _save(pushToCloud: false);
+        _startSessionMonitoring();
+        return {'success': true};
+      }
+      return {
+        'success': false,
+        'message': res['message'] ?? '登录失败，请检查账号与密码',
+      };
+    }
+  }
+
+  /// 远程服务端注册
+  Future<Map<String, dynamic>> registerWithServer({
+    required String account,
+    required String userName,
+    required String password,
+  }) async {
+    final cleanAccount = account.trim();
+    if (cleanAccount.isEmpty || password.isEmpty) {
+      return {'success': false, 'message': '账号与密码不能为空'};
+    }
+
+    final res = await SyncService.instance.registerWithServer(
+      username: cleanAccount,
+      password: password,
+    );
+
+    if (res['success'] == true) {
+      _settings.userName = userName.trim().isNotEmpty ? userName.trim() : '用户_$cleanAccount';
+      // 注册成功后自动执行登录
+      return await loginWithServer(cleanAccount, password);
+    } else {
+      return {
+        'success': false,
+        'message': res['message'] ?? '注册失败，该用户名可能已被占用',
+      };
+    }
+  }
+
+  /// 本地兼容单机快速登录
+  bool login(String account, String password) {
+    if (_settings.loginAccount.isEmpty) {
+      return false;
+    }
+    if (_settings.loginAccount == account &&
+        (_settings.accountPassword.isEmpty || _settings.accountPassword == password)) {
+      _settings.isLoggedIn = true;
+      _save();
+      _startSessionMonitoring();
+      return true;
+    }
+    return false;
+  }
+
+  /// 用户注册 (兼容本地模式)
+  void register({
+    required String account,
+    required String userName,
+    required String password,
+  }) {
+    _settings.loginAccount = account.trim();
+    _settings.userName = userName.trim().isNotEmpty ? userName.trim() : '用户_${account.trim()}';
+    _settings.accountPassword = password;
+    _settings.isLoggedIn = true;
+    _save();
+    _startSessionMonitoring();
+  }
+
+  /// 退出登录
+  void logout() {
+    SyncService.instance.logoutServer(
+      username: _settings.loginAccount,
+      clientSessionId: _settings.clientSessionId,
+      deviceType: AppSettings.currentDeviceType,
+    );
+    SyncService.instance.stopSessionWatcher();
+
+    _settings.isLoggedIn = false;
+    _save();
+  }
+
+  /// 更新 Agent 执行配置
+  void updateAgentExecutionOptions({
+    String? reasoningEffort,
+    String? permission,
+    String? model,
+    String? workspace,
+    String? sessionId,
+  }) {
+    if (reasoningEffort != null) _settings.agentReasoningEffort = reasoningEffort;
+    if (permission != null) _settings.agentPermission = permission;
+    if (model != null) _settings.agentModel = model;
+    if (workspace != null) _settings.targetWorkspace = workspace;
+    if (sessionId != null) _settings.targetSessionId = sessionId;
+    _save();
+  }
+
+  /// 刷新本地 Agent 连接状态
+  Future<bool> refreshAgentStatus() async {
+    final isOnline = await SyncService.instance.checkAgentStatus(_settings.harnessToken);
+    if (_settings.isHarnessOnline != isOnline) {
+      _settings.isHarnessOnline = isOnline;
+      _save();
+    }
+    return isOnline;
+  }
+
+  /// 获取本地 Agent 工作区与会话列表
+  Future<Map<String, dynamic>> fetchAgentWorkspacesAndSessions() async {
+    final data = await SyncService.instance.getAgentSessions(_settings.harnessToken);
+    final isOnline = data['online'] == true;
+    if (_settings.isHarnessOnline != isOnline) {
+      _settings.isHarnessOnline = isOnline;
+      _save();
+    }
+    return data;
+  }
+
+  /// 从云端拉取配置并合并
+  Future<void> pullCloudSettings() async {
+    if (!_settings.isLoggedIn || _settings.loginAccount.trim().isEmpty || _settings.loginAccount.trim() == 'guest') {
+      return;
+    }
+    try {
+      final cloud = await SyncService.instance.pullSettings(
+        userId: _settings.loginAccount,
+        clientSessionId: _settings.clientSessionId,
+      );
+      if (cloud != null) {
+        cloud.isLoggedIn = true;
+        cloud.loginAccount = _settings.loginAccount;
+        cloud.accountPassword = _settings.accountPassword;
+        cloud.clientSessionId = _settings.clientSessionId;
+
+        // 保留本地私密 API Key 与语音 Key，避免云端脱敏空值覆盖本地凭证
+        for (final cloudEp in cloud.apiEndpoints) {
+          final localMatches = _settings.apiEndpoints.where(
+            (e) => e.id == cloudEp.id || e.modelName == cloudEp.modelName,
+          );
+          if (localMatches.isNotEmpty) {
+            final localEp = localMatches.first;
+            if (cloudEp.apiKey.trim().isEmpty && localEp.apiKey.trim().isNotEmpty) {
+              cloudEp.apiKey = localEp.apiKey;
+            }
+          }
+        }
+        if (cloud.asrApiKey.trim().isEmpty && _settings.asrApiKey.trim().isNotEmpty) {
+          cloud.asrApiKey = _settings.asrApiKey;
+        }
+
+        _settings = cloud;
+        _save(pushToCloud: false);
+      }
+    } catch (e) {
+      debugPrint('[SettingsProvider] pullCloudSettings error: $e');
+    }
+  }
+
+  /// 防抖推送配置至云端
+  void _debouncePushSettings() {
+    _cloudPushDebounceTimer?.cancel();
+    _cloudPushDebounceTimer = Timer(const Duration(milliseconds: 1200), () {
+      if (_settings.isLoggedIn && _settings.loginAccount.trim().isNotEmpty && _settings.loginAccount.trim() != 'guest') {
+        SyncService.instance.pushSettings(
+          userId: _settings.loginAccount,
+          settings: _settings,
+          clientSessionId: _settings.clientSessionId,
+        );
+      }
+    });
+  }
+
+  void _save({bool pushToCloud = true}) {
+    _updateImageCache();
+    StorageService.instance.saveSettings(_settings);
+    notifyListeners();
+    if (pushToCloud) {
+      _debouncePushSettings();
+    }
+  }
+}

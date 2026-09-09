@@ -1,0 +1,12 @@
+{
+  "name": "AI",
+  "description": "一个具有沉浸式 UI 的智能 AI 聊天应用，支持文本、图片和语音交互。",
+  "requestFramePermissions": [
+    "screen-wake-lock",
+    "microphone",
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

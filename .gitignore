@@ -1,0 +1,17 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+android/key.properties
+# android/app/*.jks
+# android/app/*.keystore
+
+# Local runtime data & caches (prevent sensitive data leak & git push rejection)
+messages_data/
+messages_media/
+__pycache__/
+*.pyc
