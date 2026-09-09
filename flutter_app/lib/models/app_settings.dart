@@ -180,8 +180,8 @@ class AppSettings {
     this.agentPermission = 'workspace-write',
     this.agentModel = 'deepseek-v4-flash',
     // 辅助
-    this.githubOwner = 'LX00924-LX',
-    this.githubRepo = 'ai-lmstudio',
+    this.githubOwner = 'lx00924-lx',
+    this.githubRepo = 'flutter-app',
     this.customDataPath = '',
     this.showDebugFab = false,
   }) : apiEndpoints = apiEndpoints ?? [
@@ -355,8 +355,8 @@ class AppSettings {
       agentReasoningEffort: map['agentReasoningEffort']?.toString() ?? 'high',
       agentPermission: map['agentPermission']?.toString() ?? 'workspace-write',
       agentModel: map['agentModel']?.toString() ?? 'deepseek-v4-flash',
-      githubOwner: map['githubOwner']?.toString() ?? 'LX00924-LX',
-      githubRepo: map['githubRepo']?.toString() ?? 'ai-lmstudio',
+      githubOwner: map['githubOwner']?.toString() ?? 'lx00924-lx',
+      githubRepo: map['githubRepo']?.toString() ?? 'flutter-app',
       customDataPath: map['customDataPath']?.toString() ?? '',
       showDebugFab: map['showDebugFab'] as bool? ?? false,
     );
