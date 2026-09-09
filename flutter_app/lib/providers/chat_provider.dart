@@ -483,11 +483,6 @@ class ChatProvider extends ChangeNotifier {
           },
         );
       }
-          _isGenerating = false;
-          _cancelToken = null;
-          notifyListeners();
-        },
-      );
     } catch (e) {
       if (e is DioException && CancelToken.isCancel(e)) {
         return;
