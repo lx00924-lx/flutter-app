@@ -111,6 +111,12 @@ class SettingsProvider extends ChangeNotifier {
     _save();
   }
 
+  /// 更新自定义存储与缓存路径
+  void updateCustomDataPath(String newPath) {
+    _settings.customDataPath = newPath;
+    _save();
+  }
+
   /// 启动多端单点互斥监听（1台手机 + 1台电脑）
   void _startSessionMonitoring() {
     SyncService.instance.startSessionWatcher(

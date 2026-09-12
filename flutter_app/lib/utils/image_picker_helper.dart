@@ -148,6 +148,34 @@ class ImagePickerHelper {
     }
   }
 
+  /// 选择图片并直接转为 Base64 字符串（用于头像、背景图、启动图等设置项）
+  static Future<String?> pickImageAsBase64({int maxDimension = 1024}) async {
+    try {
+      final XFile? photo = await _imagePicker.pickImage(
+        source: ImageSource.gallery,
+        imageQuality: 85,
+      );
+      if (photo == null) return null;
+
+      Uint8List bytes = await photo.readAsBytes();
+      if (maxDimension > 0) {
+        bytes = await resizeImageBytes(bytes, maxDimension: maxDimension);
+      }
+      final ext = photo.name.split('.').last.toLowerCase();
+      final mime = (ext == 'jpg' || ext == 'jpeg')
+          ? 'image/jpeg'
+          : ext == 'webp'
+              ? 'image/webp'
+              : ext == 'gif'
+                  ? 'image/gif'
+                  : 'image/png';
+      return 'data:$mime;base64,${base64Encode(bytes)}';
+    } catch (e) {
+      debugPrint('pickImageAsBase64 error: $e');
+      return null;
+    }
+  }
+
   /// 2. 调用手机硬件相机拍照
   static Future<ProcessedImageResult?> takePhotoFromCamera() async {
     try {
