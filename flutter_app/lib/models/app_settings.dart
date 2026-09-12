@@ -107,13 +107,23 @@ class AppSettings {
   // --- 3. 大模型 API 卡片列表 ---
   List<ApiModelEndpoint> apiEndpoints;
 
-  // --- 4. 语音转写设置 (ASR) ---
+  // --- 4. 语音转写 (ASR) 与 语音合成 (TTS) 设置 ---
   String asrProvider; // 'siliconflow', 'groq', 'openai', 'aliyun', 'funasr'
   String asrHttpEndpoint;
   String asrWsEndpoint;
   String asrModel;
   String asrApiKey;
   int asrContextLength;
+
+  // TTS 语音合成
+  String ttsEngine; // 'system' (手机自带) | 'cloud' (云端接口)
+  String ttsHttpEndpoint; // 云端 TTS 接口
+  String ttsModel; // 如 CosyVoice-300M, tts-1, speech-01
+  String ttsVoice; // 音色，如 alloy, echo, zh-CN-XiaoxiaoNeural, FunAudioLLM
+  String ttsApiKey;
+  double ttsSpeed; // 0.5 - 2.0 (语速)
+  double ttsPitch; // 0.5 - 2.0 (音调)
+  bool ttsAutoPlayInCall; // 语音通话中自动朗读
 
   // --- 5. DeepSeek Harness (本地电脑 Agent 桥接) ---
   bool defaultAgentMode;
@@ -167,6 +177,15 @@ class AppSettings {
     this.asrModel = 'FunAudioLLM/SenseVoiceSmall',
     this.asrApiKey = '',
     this.asrContextLength = 30000,
+    // TTS
+    this.ttsEngine = 'system',
+    this.ttsHttpEndpoint = '',
+    this.ttsModel = '',
+    this.ttsVoice = '',
+    this.ttsApiKey = '',
+    this.ttsSpeed = 1.0,
+    this.ttsPitch = 1.0,
+    this.ttsAutoPlayInCall = true,
     // Harness
     this.defaultAgentMode = false,
     this.harnessToken = 'sk-agent030efheg0z78491abcdef0123456789abcdef0123456789',
@@ -240,6 +259,14 @@ class AppSettings {
       'asrModel': asrModel,
       'asrApiKey': asrApiKey,
       'asrContextLength': asrContextLength,
+      'ttsEngine': ttsEngine,
+      'ttsHttpEndpoint': ttsHttpEndpoint,
+      'ttsModel': ttsModel,
+      'ttsVoice': ttsVoice,
+      'ttsApiKey': ttsApiKey,
+      'ttsSpeed': ttsSpeed,
+      'ttsPitch': ttsPitch,
+      'ttsAutoPlayInCall': ttsAutoPlayInCall,
       'defaultAgentMode': defaultAgentMode,
       'harnessToken': harnessToken,
       'harnessServiceUrl': harnessServiceUrl,
@@ -262,6 +289,7 @@ class AppSettings {
   Map<String, dynamic> toCloudMap() {
     final map = toMap();
     map['asrApiKey'] = '';
+    map['ttsApiKey'] = '';
     map['accountPassword'] = '';
     if (map['apiEndpoints'] is List) {
       map['apiEndpoints'] = (map['apiEndpoints'] as List).map((item) {
@@ -344,6 +372,14 @@ class AppSettings {
       asrModel: map['asrModel']?.toString() ?? 'FunAudioLLM/SenseVoiceSmall',
       asrApiKey: map['asrApiKey']?.toString() ?? '',
       asrContextLength: (map['asrContextLength'] as num?)?.toInt() ?? 30000,
+      ttsEngine: map['ttsEngine']?.toString() ?? 'system',
+      ttsHttpEndpoint: map['ttsHttpEndpoint']?.toString() ?? '',
+      ttsModel: map['ttsModel']?.toString() ?? '',
+      ttsVoice: map['ttsVoice']?.toString() ?? '',
+      ttsApiKey: map['ttsApiKey']?.toString() ?? '',
+      ttsSpeed: (map['ttsSpeed'] as num?)?.toDouble() ?? 1.0,
+      ttsPitch: (map['ttsPitch'] as num?)?.toDouble() ?? 1.0,
+      ttsAutoPlayInCall: map['ttsAutoPlayInCall'] as bool? ?? true,
       defaultAgentMode: map['defaultAgentMode'] as bool? ?? false,
       harnessToken: map['harnessToken']?.toString() ?? 'sk-agent030efheg0z78491abcdef0123456789abcdef0123456789',
       harnessServiceUrl: map['harnessServiceUrl']?.toString() ?? 'http://127.0.0.1:3080',

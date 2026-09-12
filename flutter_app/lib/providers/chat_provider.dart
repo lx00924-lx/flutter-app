@@ -214,49 +214,76 @@ class ChatProvider extends ChangeNotifier {
     }
 
     final online = await isNetworkOnline();
-    if (!online) {
-      // 无网络：将消息标记为 error 状态，落盘并上屏，不推送到后端，不触发大模型请求
+
+    // 分离图片附件与其他类型，支持图片+文字消息分两个消息框发送（先发图片，再发文字）
+    final hasAttachments = attachments != null && attachments.isNotEmpty;
+    final hasText = cleanText.isNotEmpty;
+    final List<ChatMessage> userMsgsToSend = [];
+
+    if (hasAttachments && hasText) {
+      // 拆分：第1个气泡发送附件，第2个气泡发送纯文字
+      final mediaMsg = ChatMessage(
+        id: const Uuid().v4(),
+        sessionId: _currentSession!.id,
+        role: MessageRole.user,
+        content: '',
+        attachments: List<String>.from(attachments),
+        status: online ? 'completed' : 'error',
+      );
+      final textMsg = ChatMessage(
+        id: const Uuid().v4(),
+        sessionId: _currentSession!.id,
+        role: MessageRole.user,
+        content: cleanText,
+        attachments: null,
+        status: online ? 'completed' : 'error',
+      );
+      userMsgsToSend.add(mediaMsg);
+      userMsgsToSend.add(textMsg);
+    } else {
       final userMsg = ChatMessage(
         id: const Uuid().v4(),
         sessionId: _currentSession!.id,
         role: MessageRole.user,
         content: cleanText,
         attachments: attachments,
-        status: 'error',
+        status: online ? 'completed' : 'error',
       );
+      userMsgsToSend.add(userMsg);
+    }
 
-      _messages.add(userMsg);
-      await _storage.saveMessage(userMsg);
+    if (!online) {
+      // 无网络：将消息标记为 error 状态，落盘并上屏，不推送到后端，不触发大模型请求
+      for (final msg in userMsgsToSend) {
+        _messages.add(msg);
+        await _storage.saveMessage(msg);
+      }
 
-      if (_messages.length == 1) {
-        _currentSession!.title = cleanText.length > 20 ? '${cleanText.substring(0, 20)}...' : cleanText;
+      if (_messages.isNotEmpty && _currentSession!.title == '新对话') {
+        final titleText = cleanText.isNotEmpty ? cleanText : '图片消息';
+        _currentSession!.title = titleText.length > 20 ? '${titleText.substring(0, 20)}...' : titleText;
         await _storage.saveSession(_currentSession!);
       }
       notifyListeners();
       return;
     }
 
-    final userMsg = ChatMessage(
-      id: const Uuid().v4(),
-      sessionId: _currentSession!.id,
-      role: MessageRole.user,
-      content: cleanText,
-      attachments: attachments,
-      status: 'completed',
-    );
+    for (final msg in userMsgsToSend) {
+      _messages.add(msg);
+      await _storage.saveMessage(msg);
+    }
 
-    _messages.add(userMsg);
-    await _storage.saveMessage(userMsg);
     // 静默实时推送到服务器
     SyncService.instance.pushMessages(
       userId: settingsProvider.syncUserId,
-      messages: [userMsg],
+      messages: userMsgsToSend,
       clientSessionId: settingsProvider.clientSessionId,
     );
 
-    // 自动更新会话标题（若为第一条消息）
-    if (_messages.length == 1) {
-      _currentSession!.title = cleanText.length > 20 ? '${cleanText.substring(0, 20)}...' : cleanText;
+    // 自动更新会话标题（若为第一轮消息）
+    if (_currentSession!.title == '新对话') {
+      final titleText = cleanText.isNotEmpty ? cleanText : '图片消息';
+      _currentSession!.title = titleText.length > 20 ? '${titleText.substring(0, 20)}...' : titleText;
       await _storage.saveSession(_currentSession!);
     }
 
@@ -290,6 +317,7 @@ class ChatProvider extends ChangeNotifier {
       'agentReasoningEffort': settingsProvider.settings.agentReasoningEffort,
       'agentPermission': settingsProvider.settings.agentPermission,
       'agentModel': settingsProvider.settings.agentModel,
+      'sessionSummary': _currentSession?.summary,
     };
 
     // 无论用户在生成过程中是否强杀 App，服务器均已收到托管生成任务，持续生成并落盘，下次启动自动同步
@@ -408,10 +436,11 @@ class ChatProvider extends ChangeNotifier {
           },
         );
       } else {
-        // --- 非 Agent 模式：直连模型接口流式输出 ---
+        // --- 非 Agent 模式：直连模型接口流式输出（结合固定前缀与历史增量摘要） ---
         final stream = _apiService.streamChatCompletion(
           history: _messages.where((m) => !m.isStreaming).toList(),
           settings: settingsProvider.settings,
+          sessionSummary: _currentSession?.summary,
           cancelToken: cancelToken,
         );
 
@@ -429,6 +458,9 @@ class ChatProvider extends ChangeNotifier {
               _isGenerating = false;
               _cancelToken = null;
               notifyListeners();
+
+              // 异步后台检测是否触发上下文滑动截断与自动摘要生成
+              _checkAndTriggerBackgroundSummary();
               return;
             }
 
@@ -649,6 +681,49 @@ class ChatProvider extends ChangeNotifier {
       return false;
     }
     return true;
+  }
+
+  /// 异步后台检测是否触发上下文滑动截断与自动摘要生成（稳固 KV 缓存前缀）
+  Future<void> _checkAndTriggerBackgroundSummary() async {
+    final session = _currentSession;
+    if (session == null || _messages.isEmpty) return;
+
+    final activeEp = settingsProvider.activeEndpoint;
+    final maxContext = activeEp?.contextLength ?? 30000;
+
+    // 计算当前所有消息的大致字符长度
+    int totalLen = settingsProvider.settings.systemPrompt.length;
+    for (final m in _messages) {
+      totalLen += m.content.length + 10;
+    }
+
+    // 当会话历史总长度超过上下文容量的 80% 或已产生滑动溢出时，触发增量摘要
+    if (totalLen > (maxContext * 0.8) && _messages.length > 8) {
+      // 提取前半部分消息进行增量浓缩（保留最近 6 条完整上下文）
+      final cutoffIndex = _messages.length - 6;
+      if (cutoffIndex > session.lastSummarizedIndex) {
+        final messagesToSummarize = _messages.sublist(session.lastSummarizedIndex, cutoffIndex);
+        if (messagesToSummarize.isNotEmpty) {
+          final newSummary = await _apiService.generateConversationSummary(
+            oldMessages: messagesToSummarize,
+            settings: settingsProvider.settings,
+            previousSummary: session.summary,
+          );
+
+          if (newSummary != null && newSummary.isNotEmpty) {
+            session.summary = newSummary;
+            session.lastSummarizedIndex = cutoffIndex;
+            session.updatedAt = DateTime.now();
+            await _storage.saveSession(session);
+            SyncService.instance.pushSessions(
+              userId: settingsProvider.syncUserId,
+              sessions: [session],
+              clientSessionId: settingsProvider.clientSessionId,
+            );
+          }
+        }
+      }
+    }
   }
 
   void stopGeneration() {

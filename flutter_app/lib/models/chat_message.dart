@@ -1,4 +1,7 @@
 import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
+import '../utils/image_picker_helper.dart';
 
 enum MessageRole { user, assistant, system }
 
@@ -61,6 +64,7 @@ class ChatMessage {
     this.agentExecution,
   }) : createdAt = createdAt ?? DateTime.now();
 
+  /// 本地持久化与云端极速同步数据结构（图片仅同步轻量缩略图与元数据，极速不占云端存储）
   Map<String, dynamic> toMap() {
     return {
       'id': id,
@@ -75,6 +79,57 @@ class ChatMessage {
       'timestamp': createdAt.toIso8601String(),
       'elapsedSeconds': elapsedSeconds,
       'attachments': attachments,
+      'status': status,
+      'isAgentMode': isAgentMode,
+      'agentExecution': agentExecution?.toMap(),
+    };
+  }
+
+  /// 转换给大模型 API 视觉推理使用的 Payload：
+  /// 若附件中带有本地原图路径且文件存在，自动读取本地最高 8K 超清原图传给大模型；
+  /// 若本地文件不存在，则自动降级使用缩略图 Base64 传给大模型。
+  Map<String, dynamic> toAiPayloadMap() {
+    List<String>? aiAttachments;
+    if (attachments != null && attachments!.isNotEmpty) {
+      aiAttachments = attachments!.map((att) {
+        if (att.startsWith('data:audio/') || att.startsWith('data:application/octet-stream')) {
+          return att;
+        }
+        final localPath = ImagePickerHelper.extractLocalPathFromAttachment(att);
+        if (localPath != null && localPath.isNotEmpty && !kIsWeb) {
+          try {
+            final f = File(localPath);
+            if (f.existsSync()) {
+              final bytes = f.readAsBytesSync();
+              final ext = localPath.split('.').last.toLowerCase();
+              final mime = (ext == 'jpg' || ext == 'jpeg') ? 'image/jpeg' : 'image/png';
+              return 'data:$mime;base64,${base64Encode(bytes)}';
+            }
+          } catch (e) {
+            debugPrint('读取超清原图传给大模型异常: $e');
+          }
+        }
+        // 降级使用缩略图
+        if (att.contains('#localPath=')) {
+          return att.split('#localPath=').first;
+        }
+        return att;
+      }).toList();
+    }
+
+    return {
+      'id': id,
+      'sessionId': sessionId,
+      'role': role.name,
+      'sender': role == MessageRole.user ? 'user' : 'ai',
+      'content': content,
+      'text': content,
+      'reasoningContent': reasoningContent,
+      'thought': reasoningContent,
+      'createdAt': createdAt.toIso8601String(),
+      'timestamp': createdAt.toIso8601String(),
+      'elapsedSeconds': elapsedSeconds,
+      'attachments': aiAttachments,
       'status': status,
       'isAgentMode': isAgentMode,
       'agentExecution': agentExecution?.toMap(),

@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -6,15 +7,38 @@ import 'package:provider/provider.dart';
 import '../models/chat_message.dart';
 import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
+import '../services/tts_service.dart';
 import '../utils/image_picker_helper.dart';
+import 'app_avatar.dart';
 import 'reasoning_view.dart';
+import 'text_selection_modal.dart';
+import 'voice_message_bubble.dart';
 
 class MessageBubble extends StatelessWidget {
   final ChatMessage message;
 
   static final Map<String, Uint8List> _attachmentBytesCache = {};
 
+  static bool isAudioAttachment(String att) {
+    return att.startsWith('data:audio/');
+  }
+
+  static bool isFileAttachment(String att) {
+    return att.startsWith('data:application/octet-stream');
+  }
+
+  static String getFileNameFromAttachment(String att) {
+    try {
+      final match = RegExp(r'name=([^;]+)').firstMatch(att);
+      if (match != null) {
+        return Uri.decodeComponent(match.group(1) ?? '文件');
+      }
+    } catch (_) {}
+    return '文件';
+  }
+
   static Uint8List? _getAttachmentBytes(String base64Str) {
+    if (isAudioAttachment(base64Str) || isFileAttachment(base64Str)) return null;
     if (_attachmentBytesCache.containsKey(base64Str)) {
       return _attachmentBytesCache[base64Str];
     }
@@ -28,100 +52,130 @@ class MessageBubble extends StatelessWidget {
     return bytes;
   }
 
-  static Widget _buildSelectionContextMenu(
-      BuildContext context, SelectableRegionState selectableRegionState) {
-    final List<ContextMenuButtonItem> buttonItems =
-        selectableRegionState.contextMenuButtonItems;
-    final List<ContextMenuButtonItem> customItems = [];
-    for (final item in buttonItems) {
-      if (item.type == ContextMenuButtonType.copy) {
-        customItems.add(
-          ContextMenuButtonItem(
-            label: '复制',
-            onPressed: item.onPressed,
-          ),
-        );
-      } else if (item.type == ContextMenuButtonType.selectAll) {
-        customItems.add(
-          ContextMenuButtonItem(
-            label: '全选',
-            onPressed: item.onPressed,
-          ),
-        );
-      }
-    }
-    return AdaptiveTextSelectionToolbar.buttonItems(
-      anchors: selectableRegionState.contextMenuAnchors,
-      buttonItems: customItems,
-    );
-  }
-
   const MessageBubble({super.key, required this.message});
 
-  void _showMessageActionSheet(BuildContext context) {
+  /// 类似 Windows 右键的就地气泡菜单（弹出：引用、删除、朗读、选取文字、复制）
+  void _showContextMenuAt(BuildContext context, Offset tapPosition) {
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (overlay == null) return;
+
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     final chat = context.read<ChatProvider>();
+    final settings = context.read<SettingsProvider>().settings;
 
-    showModalBottomSheet(
+    showMenu<String>(
       context: context,
-      backgroundColor: isDark ? const Color(0xFF1E293B) : Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      position: RelativeRect.fromRect(
+        tapPosition & const Size(40, 40),
+        Offset.zero & overlay.size,
       ),
-      builder: (ctx) {
-        return SafeArea(
-          child: Wrap(
+      elevation: 6,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      color: isDark ? const Color(0xFF1E293B) : Colors.white,
+      items: [
+        PopupMenuItem<String>(
+          value: 'quote',
+          height: 40,
+          child: Row(
             children: [
-              ListTile(
-                leading: const Icon(Icons.copy, color: Color(0xFF0284C7)),
-                title: const Text('复制文本'),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  Clipboard.setData(ClipboardData(text: message.content));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('已复制到剪贴板'),
-                      duration: Duration(seconds: 1),
-                    ),
-                  );
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.format_quote, color: Color(0xFF0284C7)),
-                title: const Text('引用此消息'),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  chat.setQuotedMessage(message);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('已引用该消息，输入回复后发送'),
-                      duration: Duration(seconds: 1),
-                    ),
-                  );
-                },
-              ),
-              ListTile(
-                leading: const Icon(Icons.delete_outline, color: Colors.redAccent),
-                title: const Text('删除此条消息', style: TextStyle(color: Colors.redAccent)),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  _confirmDeleteMessage(context, chat);
-                },
-              ),
+              Icon(Icons.reply, size: 18, color: isDark ? Colors.lightBlueAccent : const Color(0xFF0284C7)),
+              const SizedBox(width: 10),
+              const Text('引用', style: TextStyle(fontSize: 14)),
             ],
           ),
-        );
-      },
-    );
+        ),
+        PopupMenuItem<String>(
+          value: 'read',
+          height: 40,
+          child: Row(
+            children: [
+              Icon(Icons.volume_up_outlined, size: 18, color: isDark ? Colors.amberAccent : Colors.orange),
+              const SizedBox(width: 10),
+              const Text('朗读', style: TextStyle(fontSize: 14)),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'select',
+          height: 40,
+          child: Row(
+            children: [
+              Icon(Icons.format_shapes, size: 18, color: isDark ? Colors.tealAccent : Colors.teal),
+              const SizedBox(width: 10),
+              const Text('选取文字', style: TextStyle(fontSize: 14)),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'copy',
+          height: 40,
+          child: Row(
+            children: [
+              Icon(Icons.copy, size: 18, color: isDark ? Colors.greenAccent : Colors.green.shade700),
+              const SizedBox(width: 10),
+              const Text('复制', style: TextStyle(fontSize: 14)),
+            ],
+          ),
+        ),
+        const PopupMenuDivider(height: 1),
+        PopupMenuItem<String>(
+          value: 'delete',
+          height: 40,
+          child: Row(
+            children: const [
+              Icon(Icons.delete_outline, size: 18, color: Colors.redAccent),
+              SizedBox(width: 10),
+              Text('删除', style: TextStyle(fontSize: 14, color: Colors.redAccent)),
+            ],
+          ),
+        ),
+      ],
+    ).then((selected) {
+      if (selected == null) return;
+      switch (selected) {
+        case 'quote':
+          chat.setQuotedMessage(message);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('已引用该消息'),
+              duration: Duration(seconds: 1),
+            ),
+          );
+          break;
+        case 'read':
+          TtsService.instance.speak(message.content, settings);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('正在朗读消息...'),
+              duration: Duration(seconds: 1),
+            ),
+          );
+          break;
+        case 'select':
+          showModalBottomSheet(
+            context: context,
+            isScrollControlled: true,
+            backgroundColor: Colors.transparent,
+            builder: (ctx) => TextSelectionModal(text: message.content),
+          );
+          break;
+        case 'copy':
+          Clipboard.setData(ClipboardData(text: message.content));
+          break;
+        case 'delete':
+          _confirmDeleteMessage(context, chat);
+          break;
+      }
+    });
   }
 
   void _confirmDeleteMessage(BuildContext context, ChatProvider chat) {
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('删除单条消息'),
-        content: const Text('确定要从当前会话中删除这条消息记录吗？此操作不可逆。'),
+        title: const Text('删除确认'),
+        content: const Text('确定要删除这条消息吗？此操作无法撤销。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
@@ -149,6 +203,121 @@ class MessageBubble extends StatelessWidget {
     );
   }
 
+  /// 渲染单张图片附件（优先加载本地原图，原图被清理或不存在时优雅回显缩略图并标注状态）
+  Widget _buildImageAttachmentWidget(BuildContext context, String att, bool hasImagesOnly, bool isUser) {
+    final localPath = ImagePickerHelper.extractLocalPathFromAttachment(att);
+    final isLocalFilePresent = localPath != null && localPath.isNotEmpty && File(localPath).existsSync();
+    final imgBytes = _getAttachmentBytes(att);
+
+    if (!isLocalFilePresent && imgBytes == null) {
+      return const SizedBox.shrink();
+    }
+
+    final ImageProvider imgProvider = isLocalFilePresent
+        ? FileImage(File(localPath)) as ImageProvider
+        : MemoryImage(imgBytes!);
+
+    return GestureDetector(
+      onTap: () {
+        showDialog(
+          context: context,
+          builder: (ctx) => Dialog(
+            backgroundColor: Colors.transparent,
+            insetPadding: const EdgeInsets.all(12),
+            child: Stack(
+              alignment: Alignment.topRight,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: Image(
+                    image: imgProvider,
+                    fit: BoxFit.contain,
+                  ),
+                ),
+                Positioned(
+                  top: 10,
+                  left: 10,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.black.withOpacity(0.65),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          isLocalFilePresent ? Icons.hd_outlined : Icons.photo_outlined,
+                          color: Colors.white,
+                          size: 14,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          isLocalFilePresent ? '本地超清原图' : '缩略图 (原图已清理)',
+                          style: const TextStyle(color: Colors.white, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white, size: 28),
+                  onPressed: () => Navigator.pop(ctx),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+      child: Stack(
+        children: [
+          ClipRRect(
+            borderRadius: hasImagesOnly
+                ? BorderRadius.only(
+                    topLeft: const Radius.circular(16),
+                    topRight: const Radius.circular(16),
+                    bottomLeft: Radius.circular(isUser ? 16 : 4),
+                    bottomRight: Radius.circular(isUser ? 4 : 16),
+                  )
+                : BorderRadius.circular(10),
+            child: Image(
+              image: imgProvider,
+              width: double.infinity,
+              fit: BoxFit.cover,
+            ),
+          ),
+          // 状态标签
+          Positioned(
+            bottom: 6,
+            right: 6,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.55),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    isLocalFilePresent ? Icons.hd_outlined : Icons.broken_image_outlined,
+                    color: Colors.white70,
+                    size: 11,
+                  ),
+                  const SizedBox(width: 3),
+                  Text(
+                    isLocalFilePresent ? '原图' : '缩略图',
+                    style: const TextStyle(color: Colors.white70, fontSize: 10),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isUser = message.role == MessageRole.user;
@@ -161,6 +330,14 @@ class MessageBubble extends StatelessWidget {
     final userAvatarBytes = settingsProvider.userAvatarBytes;
     final aiAvatarBytes = settingsProvider.aiAvatarBytes;
 
+    final hasImagesOnly = (message.attachments != null &&
+        message.attachments!.isNotEmpty &&
+        message.attachments!.every((att) => !isAudioAttachment(att) && !isFileAttachment(att)) &&
+        message.content.isEmpty &&
+        (message.reasoningContent == null || message.reasoningContent!.isEmpty));
+
+    Offset? tapPosition;
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
@@ -168,23 +345,12 @@ class MessageBubble extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!isUser) ...[
-            CircleAvatar(
+            AppAvatar(
+              imageBytes: aiAvatarBytes,
               radius: 18,
-              backgroundColor: const Color(0xFF0284C7).withOpacity(0.15),
-              backgroundImage: aiAvatarBytes != null ? MemoryImage(aiAvatarBytes) : null,
-              child: aiAvatarBytes == null
-                  ? Container(
-                      width: 36,
-                      height: 36,
-                      decoration: BoxDecoration(
-                        gradient: const LinearGradient(
-                          colors: [Color(0xFF0284C7), Color(0xFF2563EB)],
-                        ),
-                        borderRadius: BorderRadius.circular(18),
-                      ),
-                      child: const Icon(Icons.smart_toy_outlined, color: Colors.white, size: 20),
-                    )
-                  : null,
+              fallbackIcon: Icons.smart_toy_outlined,
+              fallbackBgColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFE0F2FE),
+              fallbackIconColor: const Color(0xFF0284C7),
             ),
             const SizedBox(width: 10),
           ],
@@ -213,31 +379,35 @@ class MessageBubble extends StatelessWidget {
           ],
           Flexible(
             child: GestureDetector(
-              onLongPress: () => _showMessageActionSheet(context),
+              onTapDown: (details) {
+                tapPosition = details.globalPosition;
+              },
+              onLongPress: () {
+                final pos = tapPosition ??
+                    Offset(
+                      MediaQuery.of(context).size.width / 2,
+                      MediaQuery.of(context).size.height / 2,
+                    );
+                _showContextMenuAt(context, pos);
+              },
               child: Container(
                 constraints: BoxConstraints(
-                  maxWidth: MediaQuery.of(context).size.width * 0.8,
+                  maxWidth: MediaQuery.of(context).size.width * 0.78,
                 ),
-                padding: const EdgeInsets.all(14),
+                padding: hasImagesOnly ? EdgeInsets.zero : const EdgeInsets.all(14),
                 decoration: BoxDecoration(
                   color: isUser
-                      ? (isDark ? const Color(0xFF0284C7) : const Color(0xFF0284C7))
-                      : (isDark ? const Color(0xFF1E293B) : Colors.white),
+                      ? const Color(0xFF0284C7)
+                      : (isDark ? const Color(0xFF1E293B) : const Color(0xFFFFFFFF)),
                   borderRadius: BorderRadius.only(
                     topLeft: const Radius.circular(16),
                     topRight: const Radius.circular(16),
                     bottomLeft: Radius.circular(isUser ? 16 : 4),
                     bottomRight: Radius.circular(isUser ? 4 : 16),
                   ),
-                  border: isUser
-                      ? null
-                      : Border.all(
-                          color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
-                          width: 1,
-                        ),
                   boxShadow: [
                     BoxShadow(
-                      color: Colors.black.withOpacity(0.03),
+                      color: Colors.black.withOpacity(0.04),
                       blurRadius: 4,
                       offset: const Offset(0, 2),
                     ),
@@ -246,51 +416,72 @@ class MessageBubble extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // 图片附件展示 (完全脱离 SelectionArea，避免灰度蒙层与拦截手势)
+                    // 附件渲染 (语音、通用文件、图片)
                     if (message.attachments != null && message.attachments!.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 8.0),
-                        child: Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: message.attachments!.map((att) {
-                            final imgBytes = _getAttachmentBytes(att);
-                            if (imgBytes == null) return const SizedBox.shrink();
-                            return GestureDetector(
-                              onTap: () {
-                                showDialog(
-                                  context: context,
-                                  builder: (ctx) => Dialog(
-                                    backgroundColor: Colors.transparent,
-                                    insetPadding: const EdgeInsets.all(12),
-                                    child: Stack(
-                                      alignment: Alignment.topRight,
-                                      children: [
-                                        ClipRRect(
-                                          borderRadius: BorderRadius.circular(16),
-                                          child: Image.memory(imgBytes, fit: BoxFit.contain),
-                                        ),
-                                        IconButton(
-                                          icon: const Icon(Icons.close, color: Colors.white, size: 28),
-                                          onPressed: () => Navigator.pop(ctx),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                );
-                              },
-                              child: ClipRRect(
-                                borderRadius: BorderRadius.circular(10),
-                                child: Image.memory(
-                                  imgBytes,
-                                  width: 140,
-                                  height: 140,
-                                  fit: BoxFit.cover,
-                                ),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // 1. 语音附件
+                          ...message.attachments!.where((att) => isAudioAttachment(att)).map((att) {
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: VoiceMessageBubble(
+                                audioUri: att,
+                                isUser: isUser,
                               ),
                             );
-                          }).toList(),
-                        ),
+                          }),
+                          // 2. 通用文件附件
+                          ...message.attachments!.where((att) => isFileAttachment(att)).map((att) {
+                            final fileName = getFileNameFromAttachment(att);
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: isUser
+                                    ? Colors.white.withOpacity(0.18)
+                                    : (isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9)),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: isUser
+                                      ? Colors.white.withOpacity(0.3)
+                                      : (isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1)),
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.insert_drive_file_outlined,
+                                    size: 20,
+                                    color: isUser ? Colors.white : const Color(0xFF0284C7),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Flexible(
+                                    child: Text(
+                                      fileName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w500,
+                                        color: isUser
+                                            ? Colors.white
+                                            : (isDark ? const Color(0xFFF1F5F9) : const Color(0xFF1E293B)),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }),
+                          // 3. 图片附件 (支持原图优先与清理后缩略图降级回显)
+                          ...message.attachments!
+                              .where((att) => !isAudioAttachment(att) && !isFileAttachment(att))
+                              .map((att) => _buildImageAttachmentWidget(context, att, hasImagesOnly, isUser)),
+                          if (!hasImagesOnly && message.content.isNotEmpty)
+                            const SizedBox(height: 8),
+                        ],
                       ),
 
                     // 思考链展示
@@ -302,107 +493,47 @@ class MessageBubble extends StatelessWidget {
                         elapsedSeconds: message.elapsedSeconds,
                       ),
 
-                    // 正文渲染 (精确定位 SelectionArea 仅包裹纯文本，彻底解决灰度蒙层遮挡及滑动冲突)
+                    // 正文渲染
                     if (isUser)
                       if (message.content.isNotEmpty)
-                        SelectionArea(
-                          contextMenuBuilder: _buildSelectionContextMenu,
-                          child: Text(
-                            message.content,
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: settings.chatFontSize.toDouble(),
-                              height: 1.4,
-                            ),
+                        Text(
+                          message.content,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: settings.chatFontSize.toDouble(),
+                            height: 1.4,
                           ),
                         )
                       else
                         const SizedBox.shrink()
                     else
-                      SelectionArea(
-                        contextMenuBuilder: _buildSelectionContextMenu,
-                        child: MarkdownBody(
-                          data: message.content.isEmpty && message.isStreaming ? '正在思考中...' : message.content,
-                          selectable: false,
-                          styleSheet: MarkdownStyleSheet(
-                            p: TextStyle(
-                              fontSize: settings.chatFontSize.toDouble(),
-                              height: 1.6,
-                              color: isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
-                            ),
-                            listBullet: TextStyle(
-                              fontSize: settings.chatFontSize.toDouble(),
-                              color: isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
-                            ),
-                            code: TextStyle(
-                              backgroundColor: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9),
-                              fontFamily: 'monospace',
-                              fontSize: (settings.chatFontSize - 2).toDouble().clamp(11, 24),
-                            ),
-                            codeblockDecoration: BoxDecoration(
-                              color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(
-                                color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
-                              ),
+                      MarkdownBody(
+                        data: message.content.isEmpty && message.isStreaming ? '正在思考中...' : message.content,
+                        selectable: false,
+                        styleSheet: MarkdownStyleSheet(
+                          p: TextStyle(
+                            fontSize: settings.chatFontSize.toDouble(),
+                            height: 1.6,
+                            color: isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
+                          ),
+                          listBullet: TextStyle(
+                            fontSize: settings.chatFontSize.toDouble(),
+                            color: isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
+                          ),
+                          code: TextStyle(
+                            backgroundColor: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9),
+                            fontFamily: 'monospace',
+                            fontSize: (settings.chatFontSize - 2).toDouble().clamp(11, 24),
+                          ),
+                          codeblockDecoration: BoxDecoration(
+                            color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
                             ),
                           ),
                         ),
                       ),
-
-                    // 底部操作栏（复制、引用、删除）
-                    if (!isUser && !message.isStreaming && message.content.isNotEmpty) ...[
-                      const SizedBox(height: 8),
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            icon: const Icon(Icons.copy, size: 16),
-                            tooltip: '复制',
-                            padding: EdgeInsets.zero,
-                            constraints: const BoxConstraints(),
-                            color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
-                            onPressed: () {
-                              Clipboard.setData(ClipboardData(text: message.content));
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('已复制到剪贴板'),
-                                  duration: Duration(seconds: 1),
-                                ),
-                              );
-                            },
-                          ),
-                          const SizedBox(width: 14),
-                          IconButton(
-                            icon: const Icon(Icons.format_quote, size: 17),
-                            tooltip: '引用',
-                            padding: EdgeInsets.zero,
-                            constraints: const BoxConstraints(),
-                            color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
-                            onPressed: () {
-                              chat.setQuotedMessage(message);
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('已引用该消息'),
-                                  duration: Duration(seconds: 1),
-                                ),
-                              );
-                            },
-                          ),
-                          const SizedBox(width: 14),
-                          IconButton(
-                            icon: const Icon(Icons.delete_outline, size: 17),
-                            tooltip: '删除',
-                            padding: EdgeInsets.zero,
-                            constraints: const BoxConstraints(),
-                            color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
-                            onPressed: () {
-                              _confirmDeleteMessage(context, chat);
-                            },
-                          ),
-                        ],
-                      ),
-                    ],
                   ],
                 ),
               ),
@@ -410,25 +541,12 @@ class MessageBubble extends StatelessWidget {
           ),
           if (isUser) ...[
             const SizedBox(width: 10),
-            CircleAvatar(
+            AppAvatar(
+              imageBytes: userAvatarBytes,
               radius: 18,
-              backgroundColor: const Color(0xFF0284C7).withOpacity(0.15),
-              backgroundImage: userAvatarBytes != null ? MemoryImage(userAvatarBytes) : null,
-              child: userAvatarBytes == null
-                  ? Container(
-                      width: 36,
-                      height: 36,
-                      decoration: const BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: [Color(0xFF0284C7), Color(0xFF0EA5E9)],
-                          begin: Alignment.topLeft,
-                          end: Alignment.bottomRight,
-                        ),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(Icons.person, color: Colors.white, size: 20),
-                    )
-                  : null,
+              fallbackIcon: Icons.person,
+              fallbackBgColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFE0F2FE),
+              fallbackIconColor: const Color(0xFF0284C7),
             ),
           ],
         ],

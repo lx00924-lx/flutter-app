@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:file_picker/file_picker.dart';
+import 'web_download_stub.dart' if (dart.library.html) 'web_download_helper.dart' as web_download;
 
 class BridgeScriptHelper {
   /// 生成适配 Windows 一键启动的 run_bridge.bat 脚本内容
@@ -59,7 +61,7 @@ if %errorlevel% neq 0 (
   }) {
     return '''#!/usr/bin/env python3
 """
-DeepSeek Harness 本地安全反向桥接客户端 (DeepSeek Bridge v3.6)
+DeepSeek Harness 本地安全反向桥接客户端 (DeepSeek Bridge v3.6 - 工业增强/双模高可用版)
 ======================================================================
 核心特性：
 1. 本地主动向上发起连接至 App 调度服务器（免公网 IP，免端口映射）。
@@ -129,25 +131,41 @@ if __name__ == "__main__":
 ''';
   }
 
-  /// 保存文件到平台（支持移动端/桌面端保存与复制剪贴板双保障）
-  static Future<String?> saveFileToDevice({
+  /// 真实触发文件下载与保存（Web 端通过浏览器下载 Blob，原生端弹出文件保存或保存至 Downloads）
+  static Future<String?> downloadFile({
     required String fileName,
     required String content,
   }) async {
     try {
-      if (!kIsWeb) {
-        Directory? dir;
-        if (Platform.isAndroid) {
-          dir = await getExternalStorageDirectory();
+      final bytes = utf8.encode(content);
+      if (kIsWeb) {
+        web_download.downloadFileWeb(fileName, bytes);
+        return '浏览器下载已启动';
+      } else {
+        // 桌面端或移动端
+        String? savePath;
+        if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+          savePath = await FilePicker.platform.saveFile(
+            dialogTitle: '保存脚本文件',
+            fileName: fileName,
+          );
         }
-        dir ??= await getApplicationDocumentsDirectory();
-        final file = File('\${dir.path}/\$fileName');
-        await file.writeAsString(content, encoding: utf8);
-        return file.path;
+        
+        if (savePath == null) {
+          Directory? dir;
+          if (Platform.isAndroid) {
+            dir = await getExternalStorageDirectory();
+          }
+          dir ??= await getApplicationDocumentsDirectory();
+          savePath = '${dir.path}/$fileName';
+        }
+
+        final file = File(savePath);
+        await file.writeAsBytes(bytes);
+        return savePath;
       }
-      return null;
     } catch (e) {
-      debugPrint('[BridgeScriptHelper] 保存文件出错: \$e');
+      debugPrint('[BridgeScriptHelper] 下载文件出错: $e');
       return null;
     }
   }
