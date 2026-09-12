@@ -157,7 +157,7 @@ class MessageBubble extends StatelessWidget {
             context: context,
             isScrollControlled: true,
             backgroundColor: Colors.transparent,
-            builder: (ctx) => TextSelectionModal(text: message.content),
+            builder: (ctx) => TextSelectionModal(message: message),
           );
           break;
         case 'copy':
@@ -426,7 +426,7 @@ class MessageBubble extends StatelessWidget {
                             return Padding(
                               padding: const EdgeInsets.only(bottom: 8),
                               child: VoiceMessageBubble(
-                                audioUri: att,
+                                audioDataUri: att,
                                 isUser: isUser,
                               ),
                             );

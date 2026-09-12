@@ -482,8 +482,11 @@ class ChatProvider extends ChangeNotifier {
             final isConnErr = err is SocketException ||
                 (err is DioException && (err.type == DioExceptionType.connectionError || err.type == DioExceptionType.connectionTimeout));
             if (isConnErr && assistantMsg.content.isEmpty && (assistantMsg.reasoningContent?.isEmpty ?? true)) {
-              userMsg.status = 'error';
-              _storage.saveMessage(userMsg);
+              final lastUserMsg = userMsgsToSend.isNotEmpty ? userMsgsToSend.last : null;
+              if (lastUserMsg != null) {
+                lastUserMsg.status = 'error';
+                _storage.saveMessage(lastUserMsg);
+              }
               _messages.remove(assistantMsg);
               _storage.deleteMessage(assistantMsg.id);
               _isGenerating = false;
@@ -519,8 +522,11 @@ class ChatProvider extends ChangeNotifier {
       if (e is DioException && CancelToken.isCancel(e)) {
         return;
       }
-      userMsg.status = 'error';
-      await _storage.saveMessage(userMsg);
+      final lastUserMsg = userMsgsToSend.isNotEmpty ? userMsgsToSend.last : null;
+      if (lastUserMsg != null) {
+        lastUserMsg.status = 'error';
+        await _storage.saveMessage(lastUserMsg);
+      }
       _messages.remove(assistantMsg);
       await _storage.deleteMessage(assistantMsg.id);
       _isGenerating = false;
