@@ -114,9 +114,10 @@ class _TextSelectionModalState extends State<TextSelectionModal> {
                               final text = _getSelectedText();
                               final quoteMsg = ChatMessage(
                                 id: widget.message.id,
+                                sessionId: widget.message.sessionId,
                                 role: widget.message.role,
                                 content: text,
-                                timestamp: widget.message.timestamp,
+                                createdAt: widget.message.createdAt,
                               );
                               chat.setQuotedMessage(quoteMsg);
                               Navigator.pop(context);
