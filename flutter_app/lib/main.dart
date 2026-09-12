@@ -14,21 +14,27 @@ final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 初始化本地持久化 Hive 数据库 (增加异常捕获及自动修复机制，确保绝不发生启动秒退)
+  // 初始化本地持久化 Hive 数据库 (并发异步打开，大幅提升启动速度；增加异常自动恢复机制)
   try {
     await Hive.initFlutter();
-    await Hive.openBox('sessions_box');
-    await Hive.openBox('messages_box');
-    await Hive.openBox('settings_box');
+    await Future.wait([
+      Hive.openBox('sessions_box'),
+      Hive.openBox('messages_box'),
+      Hive.openBox('settings_box'),
+    ]);
   } catch (e, stack) {
     debugPrint('Hive init warning: $e\n$stack');
     try {
-      await Hive.deleteBoxFromDisk('sessions_box');
-      await Hive.deleteBoxFromDisk('messages_box');
-      await Hive.deleteBoxFromDisk('settings_box');
-      await Hive.openBox('sessions_box');
-      await Hive.openBox('messages_box');
-      await Hive.openBox('settings_box');
+      await Future.wait([
+        Hive.deleteBoxFromDisk('sessions_box'),
+        Hive.deleteBoxFromDisk('messages_box'),
+        Hive.deleteBoxFromDisk('settings_box'),
+      ]);
+      await Future.wait([
+        Hive.openBox('sessions_box'),
+        Hive.openBox('messages_box'),
+        Hive.openBox('settings_box'),
+      ]);
     } catch (fallbackError) {
       debugPrint('Hive fallback failed: $fallbackError');
     }

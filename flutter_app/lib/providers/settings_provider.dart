@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import '../models/app_settings.dart';
 import '../services/storage_service.dart';
+import '../services/storage_path_service.dart';
 import '../services/sync_service.dart';
 import '../utils/image_picker_helper.dart';
 import '../main.dart' show rootNavigatorKey;
@@ -20,6 +21,7 @@ class SettingsProvider extends ChangeNotifier {
   SettingsProvider() {
     _settings = StorageService.instance.loadSettings();
     _updateImageCache();
+    StoragePathService.instance.setCustomPath(_settings.customDataPath);
 
     // 确保有唯一的 clientSessionId
     if (_settings.clientSessionId.isEmpty) {
@@ -27,12 +29,18 @@ class SettingsProvider extends ChangeNotifier {
       _save(pushToCloud: false);
     }
 
+    // 异步拉取服务端维护的模型上下文上限表
+    fetchAndApplyModelLimits();
+
     // 若已登录，立即启动多端互斥监听与云端设置静默同步
     if (_settings.isLoggedIn && _settings.loginAccount.trim().isNotEmpty) {
       _startSessionMonitoring();
       pullCloudSettings();
     }
   }
+
+  Map<String, int> _serverModelLimits = {};
+  Map<String, int> get serverModelLimits => _serverModelLimits;
 
   AppSettings get settings => _settings;
   bool get isLoggedIn => _settings.isLoggedIn;
@@ -374,8 +382,59 @@ class SettingsProvider extends ChangeNotifier {
     });
   }
 
+  /// 从服务端获取模型限制表并自动校验修正当前已配置的端点
+  Future<void> fetchAndApplyModelLimits() async {
+    try {
+      final limits = await SyncService.instance.fetchModelLimits();
+      if (limits.isNotEmpty) {
+        _serverModelLimits = limits;
+        bool changed = false;
+        for (final ep in _settings.apiEndpoints) {
+          final maxAllowed = findEffectiveLimit(ep.modelName);
+          if (maxAllowed != null && maxAllowed > 0 && ep.contextLength > maxAllowed) {
+            ep.contextLength = maxAllowed;
+            changed = true;
+          }
+        }
+        if (changed) {
+          _save();
+        } else {
+          notifyListeners();
+        }
+      }
+    } catch (e) {
+      debugPrint('[SettingsProvider] fetchAndApplyModelLimits error: $e');
+    }
+  }
+
+  /// 查找指定模型在服务端限制表中的有效上限（支持全字、小写与模糊匹配）
+  int? findEffectiveLimit(String? modelName) {
+    if (modelName == null || modelName.trim().isEmpty || _serverModelLimits.isEmpty) return null;
+    final clean = modelName.trim().toLowerCase();
+
+    // 1. 精确匹配
+    if (_serverModelLimits.containsKey(clean)) {
+      return _serverModelLimits[clean];
+    }
+    for (final entry in _serverModelLimits.entries) {
+      if (entry.key.toLowerCase() == clean) {
+        return entry.value;
+      }
+    }
+
+    // 2. 模糊匹配
+    for (final entry in _serverModelLimits.entries) {
+      final k = entry.key.toLowerCase();
+      if (clean.contains(k) || k.contains(clean)) {
+        return entry.value;
+      }
+    }
+    return null;
+  }
+
   void _save({bool pushToCloud = true}) {
     _updateImageCache();
+    StoragePathService.instance.setCustomPath(_settings.customDataPath);
     StorageService.instance.saveSettings(_settings);
     notifyListeners();
     if (pushToCloud) {

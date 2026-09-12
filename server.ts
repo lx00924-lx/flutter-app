@@ -14,10 +14,13 @@ const generationEvents = new EventEmitter();
 generationEvents.setMaxListeners(500);
 
 const PORT = 3000;
-const MESSAGES_FILE = path.join(process.cwd(), "messages_data", "messages_v2.json"); // Use v2 to avoid conflicts
-const USERS_FILE = path.join(process.cwd(), "messages_data", "users.json");
-const SETTINGS_FILE = path.join(process.cwd(), "messages_data", "settings.json");
-const ACTIVE_SESSIONS_FILE = path.join(process.cwd(), "messages_data", "active_sessions.json");
+const DATA_DIR = path.join(process.cwd(), "messages_data");
+const MESSAGES_FILE = path.join(DATA_DIR, "messages_v2.json"); // Use v2 to avoid conflicts
+const USERS_FILE = path.join(DATA_DIR, "users.json");
+const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
+const ACTIVE_SESSIONS_FILE = path.join(DATA_DIR, "active_sessions.json");
+const MODEL_LIMITS_FILE = path.join(DATA_DIR, "model_limits.json");
+const MODEL_LIMITS_EXAMPLE = path.join(process.cwd(), "model_limits.example.json");
 const UPLOADS_DIR = path.join(process.cwd(), "messages_media");
 
 interface DeviceSession {
@@ -46,6 +49,8 @@ async function withFileLock<T>(filePath: string, fn: () => Promise<T>): Promise<
 
 // Atomic file write using a temporary file and rename
 async function safeWriteJSON(filePath: string, data: any): Promise<void> {
+  const dir = path.dirname(filePath);
+  await fs.mkdir(dir, { recursive: true }).catch(() => {});
   const tempPath = `${filePath}.tmp.${Math.random().toString(36).substring(2, 9)}`;
   const content = JSON.stringify(data, null, 2);
   await fs.writeFile(tempPath, content, "utf-8");
@@ -59,7 +64,12 @@ async function safeReadJSON<T>(filePath: string, fallback: T): Promise<T> {
     const trimmed = raw.trim();
     if (!trimmed) return fallback;
     return JSON.parse(trimmed) as T;
-  } catch (error) {
+  } catch (error: any) {
+    // If the file simply doesn't exist yet (ENOENT), return fallback gracefully without spamming error logs
+    if (error && (error.code === 'ENOENT' || error.errno === -4058 || error.errno === -2)) {
+      return fallback;
+    }
+
     console.error(`[JSON Read Error] Failed to parse ${filePath}:`, error);
     try {
       const raw = await fs.readFile(filePath, "utf-8");
@@ -171,6 +181,65 @@ function normalizeApiBaseUrl(rawEndpoint: string): string {
 function getChatCompletionsUrl(endpoint: string): string {
   const base = normalizeApiBaseUrl(endpoint);
   return `${base}/chat/completions`;
+}
+
+// Ensure model_limits.json exists in messages_data/ (initialized from template if absent, NEVER overwriting existing local edits)
+async function ensureModelLimitsInitialized(): Promise<void> {
+  try {
+    const exists = await fs.stat(MODEL_LIMITS_FILE).then(() => true).catch(() => false);
+    if (!exists) {
+      let initialData: Record<string, number> = {};
+      try {
+        const exampleContent = await fs.readFile(MODEL_LIMITS_EXAMPLE, "utf-8");
+        initialData = JSON.parse(exampleContent);
+      } catch {
+        initialData = {
+          "deepseek-chat": 64000,
+          "deepseek-reasoner": 64000,
+          "gpt-4o": 128000,
+          "gpt-4o-mini": 128000,
+          "claude-3-7-sonnet": 200000,
+          "gemini-2.0-flash": 1000000,
+          "qwen-max": 128000
+        };
+      }
+      await safeWriteJSON(MODEL_LIMITS_FILE, initialData);
+      console.log(`[Model Limits] Initialized ${MODEL_LIMITS_FILE} from template.`);
+    }
+  } catch (err) {
+    console.error("[Model Limits] Failed to initialize model limits file:", err);
+  }
+}
+
+// Get maximum allowed context length for a given model from local server table (supports exact & fuzzy wildcard matches)
+async function getEffectiveModelContextLimit(modelName?: string): Promise<number | null> {
+  if (!modelName || !modelName.trim()) return null;
+  const rawModel = modelName.trim().toLowerCase();
+  try {
+    const limits = await safeReadJSON<Record<string, number>>(MODEL_LIMITS_FILE, {});
+    // 1. Exact match
+    if (typeof limits[rawModel] === 'number') {
+      return limits[rawModel];
+    }
+    // 2. Exact match on raw lowercase keys
+    for (const [pattern, limit] of Object.entries(limits)) {
+      if (typeof limit === 'number' && pattern.toLowerCase() === rawModel) {
+        return limit;
+      }
+    }
+    // 3. Substring / Prefix fuzzy match (e.g., "deepseek" matches "deepseek-chat" or vice versa)
+    for (const [pattern, limit] of Object.entries(limits)) {
+      if (typeof limit === 'number') {
+        const p = pattern.toLowerCase();
+        if (rawModel.includes(p) || p.includes(rawModel)) {
+          return limit;
+        }
+      }
+    }
+  } catch (e) {
+    console.error("[Model Limits] Error reading limits:", e);
+  }
+  return null;
 }
 
 interface ActiveGeneration {
@@ -468,16 +537,28 @@ async function runServerSideGeneration({
     const apiKey = settings?.apiKey || process.env.GEMINI_API_KEY || "";
     const modelName = settings?.modelName;
     const systemInstruction = settings?.systemInstruction;
-    const contextLength = settings?.contextLength || 30000;
+    let contextLength = settings?.contextLength || 30000;
+    const sessionSummary = settings?.sessionSummary;
+
+    // 自动结合服务端维护的 model_limits.json 校验与修正上限，若用户填写的数值超过限制则自动更正
+    const serverModelLimit = await getEffectiveModelContextLimit(modelName);
+    if (serverModelLimit && serverModelLimit > 0 && contextLength > serverModelLimit) {
+      console.log(`[Server Context Safe Guard] Context length ${contextLength} exceeds model limit ${serverModelLimit} for ${modelName}. Auto-corrected to ${serverModelLimit}.`);
+      contextLength = serverModelLimit;
+    }
 
     if (apiEndpoint) {
       // OpenAI compatible flow
       const url = getChatCompletionsUrl(apiEndpoint);
       console.log(`[Server Background Gen] Calling OpenAI compatible API: ${url} (model: ${modelName || 'default'})`);
       
-      const systemMessage = systemInstruction 
-        ? [{ role: 'system', content: systemInstruction }] 
-        : [];
+      const systemMessage: any[] = [];
+      if (systemInstruction) {
+        systemMessage.push({ role: 'system', content: systemInstruction });
+      }
+      if (sessionSummary && typeof sessionSummary === 'string' && sessionSummary.trim()) {
+        systemMessage.push({ role: 'system', content: `【📜 前文对话核心背景摘要】:\n${sessionSummary.trim()}` });
+      }
 
       const mapMessageToContent = (msg: any) => {
         let text = msg.content;
@@ -1196,6 +1277,35 @@ async function startServer() {
     } catch (error) {
       console.error("Failed to sync settings:", error);
       res.status(500).json({ error: "Failed to sync settings" });
+    }
+  });
+
+  // 获取服务端维护的全部模型上下文上限列表
+  app.get("/api/model-limits", async (req, res) => {
+    try {
+      await ensureModelLimitsInitialized();
+      const limits = await safeReadJSON<Record<string, number>>(MODEL_LIMITS_FILE, {});
+      res.json({ success: true, limits });
+    } catch (error) {
+      console.error("Failed to read model limits:", error);
+      res.status(500).json({ error: "Failed to read model limits", limits: {} });
+    }
+  });
+
+  // 更新/维护服务端模型上下文上限列表 (支持在线直接修改或后台写入)
+  app.post("/api/model-limits", async (req, res) => {
+    try {
+      const { limits } = req.body || {};
+      if (limits && typeof limits === 'object') {
+        await withFileLock(MODEL_LIMITS_FILE, async () => {
+          await safeWriteJSON(MODEL_LIMITS_FILE, limits);
+        });
+        return res.json({ success: true, message: "Model limits updated successfully" });
+      }
+      res.status(400).json({ error: "Invalid limits object" });
+    } catch (error) {
+      console.error("Failed to write model limits:", error);
+      res.status(500).json({ error: "Failed to write model limits" });
     }
   });
 
@@ -2655,6 +2765,13 @@ if %errorlevel% neq 0 (
       res.sendFile(path.join(distPath, "index.html"));
     });
   }
+
+  // Ensure essential directories exist on startup
+  await fs.mkdir(DATA_DIR, { recursive: true }).catch(() => {});
+  await fs.mkdir(UPLOADS_DIR, { recursive: true }).catch(() => {});
+
+  // Initialize model limits file on startup
+  await ensureModelLimitsInitialized();
 
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running at http://0.0.0.0:${PORT}`);

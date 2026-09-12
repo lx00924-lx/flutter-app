@@ -7,6 +7,7 @@ import 'personalization_settings_screen.dart';
 import 'api_settings_screen.dart';
 import 'asr_settings_screen.dart';
 import 'harness_settings_screen.dart';
+import 'storage_settings_screen.dart';
 import 'log_console_screen.dart';
 
 class SettingsScreen extends StatelessWidget {
@@ -85,10 +86,10 @@ class SettingsScreen extends StatelessWidget {
           ),
           _buildCategoryCard(
             context,
-            icon: Icons.mic_none_outlined,
+            icon: Icons.record_voice_over_outlined,
             iconColor: Colors.amber.shade800,
-            title: '语音转写设置 (ASR)',
-            subtitle: '商用预设(SenseVoice/Groq/OpenAI/阿里)、HTTP/WS 测试、模型、Key',
+            title: '语音转写与合成设置 (ASR/TTS)',
+            subtitle: '语音识别(SenseVoice/Groq)与语音朗读(手机自带/CosyVoice/OpenAI/微软)',
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const AsrSettingsScreen()),
@@ -105,6 +106,19 @@ class SettingsScreen extends StatelessWidget {
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const HarnessSettingsScreen()),
+            ),
+          ),
+          _buildCategoryCard(
+            context,
+            icon: Icons.folder_open_outlined,
+            iconColor: const Color(0xFF0284C7),
+            title: '数据与缓存存储路径',
+            subtitle: s.customDataPath.isNotEmpty ? s.customDataPath : '打开系统资源管理器选择本地录音与临时缓存目录',
+            trailingBadge: s.customDataPath.isNotEmpty ? '自定义' : '默认沙盒',
+            badgeColor: s.customDataPath.isNotEmpty ? Colors.blue : Colors.grey,
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const StorageSettingsScreen()),
             ),
           ),
           const SizedBox(height: 16),
@@ -145,7 +159,7 @@ class SettingsScreen extends StatelessWidget {
                   Row(
                     children: [
                       const Icon(Icons.cloud_sync_outlined, color: Color(0xFF0284C7)),
-                      const SizedBox(width: 8),
+                      SizedBox(width: 8),
                       const Text('GitHub 更新设置', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
                       const Spacer(),
                       ElevatedButton(
@@ -174,66 +188,6 @@ class SettingsScreen extends StatelessWidget {
                             color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 10),
-
-          // 3. 数据与缓存目录
-          Card(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Row(
-                    children: [
-                      Icon(Icons.folder_open_outlined, color: Color(0xFF0284C7)),
-                      SizedBox(width: 8),
-                      Text('桌面端数据与缓存目录', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      s.customDataPath.isNotEmpty ? s.customDataPath : '默认应用沙盒目录 (%APPDATA% / Documents)',
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Row(
-                    children: [
-                      OutlinedButton.icon(
-                        icon: const Icon(Icons.edit_outlined, size: 14),
-                        label: const Text('更改目录', style: TextStyle(fontSize: 12)),
-                        onPressed: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('已选择指定数据沙盒路径')),
-                          );
-                        },
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton.icon(
-                        icon: const Icon(Icons.restart_alt, size: 14),
-                        label: const Text('恢复默认', style: TextStyle(fontSize: 12)),
-                        onPressed: () {
-                          s.customDataPath = '';
-                          settingsProvider.updateSettings(s);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('已恢复默认数据沙盒')),
-                          );
-                        },
                       ),
                     ],
                   ),

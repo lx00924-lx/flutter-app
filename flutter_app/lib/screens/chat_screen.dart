@@ -10,6 +10,7 @@ import '../widgets/message_bubble.dart';
 import 'log_console_screen.dart';
 import 'session_management_screen.dart';
 import 'settings_screen.dart';
+import 'voice_call_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -200,6 +201,14 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.phone_in_talk_outlined),
+            tooltip: '实时语音通话',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const VoiceCallScreen()),
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
             tooltip: '系统设置',

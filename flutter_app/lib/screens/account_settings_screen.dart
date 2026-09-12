@@ -7,6 +7,7 @@ import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/storage_service.dart';
 import '../utils/image_picker_helper.dart';
+import '../widgets/app_avatar.dart';
 import 'chat_search_screen.dart';
 import 'login_screen.dart';
 import 'session_management_screen.dart';
@@ -319,27 +320,12 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
                     const SizedBox(height: 14),
                     Row(
                       children: [
-                        CircleAvatar(
+                        AppAvatar(
+                          imageBytes: sp.userAvatarBytes,
                           radius: 22,
-                          backgroundColor: Colors.transparent,
-                          backgroundImage: ImagePickerHelper.decodeBase64Image(s.userAvatar) != null
-                              ? MemoryImage(ImagePickerHelper.decodeBase64Image(s.userAvatar)!)
-                              : null,
-                          child: ImagePickerHelper.decodeBase64Image(s.userAvatar) == null
-                              ? Container(
-                                  width: 44,
-                                  height: 44,
-                                  decoration: const BoxDecoration(
-                                    gradient: LinearGradient(
-                                      colors: [Color(0xFF0284C7), Color(0xFF0EA5E9)],
-                                      begin: Alignment.topLeft,
-                                      end: Alignment.bottomRight,
-                                    ),
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: const Icon(Icons.person, color: Colors.white, size: 24),
-                                )
-                              : null,
+                          fallbackIcon: Icons.person,
+                          fallbackBgColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFE0F2FE),
+                          fallbackIconColor: const Color(0xFF0284C7),
                         ),
                         const SizedBox(width: 12),
                         const Text('用户头像', style: TextStyle(fontSize: 14)),
@@ -383,15 +369,12 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
                   const SizedBox(height: 12),
                   Row(
                     children: [
-                      CircleAvatar(
+                      AppAvatar(
+                        imageBytes: sp.aiAvatarBytes,
                         radius: 22,
-                        backgroundColor: const Color(0xFF0284C7).withOpacity(0.15),
-                        backgroundImage: ImagePickerHelper.decodeBase64Image(s.aiAvatar) != null
-                            ? MemoryImage(ImagePickerHelper.decodeBase64Image(s.aiAvatar)!)
-                            : null,
-                        child: ImagePickerHelper.decodeBase64Image(s.aiAvatar) == null
-                            ? const Icon(Icons.smart_toy_outlined, color: Color(0xFF0284C7))
-                            : null,
+                        fallbackIcon: Icons.smart_toy_outlined,
+                        fallbackBgColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFE0F2FE),
+                        fallbackIconColor: const Color(0xFF0284C7),
                       ),
                       const SizedBox(width: 12),
                       const Text('AI 头像', style: TextStyle(fontSize: 14)),

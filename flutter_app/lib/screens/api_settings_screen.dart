@@ -213,12 +213,21 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
 
                     final settingsProvider = context.read<SettingsProvider>();
 
+                    // 自动匹配服务端模型上限，若填写的数值超过限制则自动更正为支持的最高值
+                    final serverMaxLimit = settingsProvider.findEffectiveLimit(modelName);
+                    int finalContextLength = contextLength;
+                    bool wasClamped = false;
+                    if (serverMaxLimit != null && serverMaxLimit > 0 && contextLength > serverMaxLimit) {
+                      finalContextLength = serverMaxLimit;
+                      wasClamped = true;
+                    }
+
                     if (isEditing) {
                       existing.cardName = cardName;
                       existing.endpoint = endpoint;
                       existing.apiKey = apiKey;
                       existing.modelName = modelName;
-                      existing.contextLength = contextLength;
+                      existing.contextLength = finalContextLength;
                       settingsProvider.updateApiEndpoint(existing);
                     } else {
                       final newEndpoint = ApiModelEndpoint(
@@ -226,12 +235,22 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
                         endpoint: endpoint,
                         apiKey: apiKey,
                         modelName: modelName,
-                        contextLength: contextLength,
+                        contextLength: finalContextLength,
                       );
                       settingsProvider.addApiEndpoint(newEndpoint);
                     }
 
                     Navigator.pop(dialogCtx);
+
+                    if (wasClamped && mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('💡 检测到 $modelName 上限为 $serverMaxLimit，上下文长度已自动更正为 $serverMaxLimit'),
+                          backgroundColor: const Color(0xFF0284C7),
+                          duration: const Duration(seconds: 4),
+                        ),
+                      );
+                    }
                   },
                   child: const Text('保存'),
                 ),

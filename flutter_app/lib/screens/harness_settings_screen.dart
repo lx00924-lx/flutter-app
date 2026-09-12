@@ -31,6 +31,22 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   List<String> _filteredSessions = ['智能选择 / 自动新建会话 (推荐)'];
   String _selectedSession = '智能选择 / 自动新建会话 (推荐)';
 
+  /// 对 Token 进行脱敏展示（例如: sk-1234******************）
+  static String _maskToken(String token) {
+    final t = token.trim();
+    if (t.isEmpty) return '';
+    if (t.startsWith('sk-')) {
+      final prefix = t.substring(0, t.length >= 7 ? 7 : t.length); // 保留 sk- 及前4位
+      return '$prefix${'*' * 18}';
+    } else if (t.startsWith('agent_')) {
+      final prefix = t.substring(0, t.length >= 10 ? 10 : t.length);
+      return '$prefix${'*' * 18}';
+    } else {
+      final prefix = t.substring(0, t.length >= 4 ? 4 : t.length);
+      return '$prefix${'*' * 18}';
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -222,7 +238,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('当前配对 Token: $token', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                  Text('当前配对 Token: ${_maskToken(token)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                   const SizedBox(height: 4),
                   Text('Harness 地址: http://$url', style: const TextStyle(fontSize: 12, color: Colors.grey)),
                   const SizedBox(height: 4),
@@ -244,9 +260,6 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
             onPressed: () {
               Clipboard.setData(ClipboardData(text: 'TOKEN=$token;URL=http://$url'));
               Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('配对配置参数已复制到剪贴板')),
-              );
             },
             child: const Text('复制配对参数'),
           ),
@@ -345,31 +358,43 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                       },
                     ),
                     const SizedBox(height: 8),
+                    // 配对 Token（非文本选取，仅支持纯随机生成，支持长按复制完整真实 Token）
                     Row(
                       children: [
                         Expanded(
-                          child: TextField(
-                            controller: _tokenCtrl,
-                            focusNode: _tokenFocus,
-                            decoration: const InputDecoration(
-                              labelText: '配对 Token',
-                              border: OutlineInputBorder(),
-                              isDense: true,
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(8),
+                            onLongPress: () {
+                              Clipboard.setData(ClipboardData(text: _tokenCtrl.text.trim()));
+                            },
+                            child: InputDecorator(
+                              decoration: const InputDecoration(
+                                labelText: '配对 Token (长按复制)',
+                                border: OutlineInputBorder(),
+                                isDense: true,
+                                helperText: '系统高强度随机生成，长按可直接复制真实凭证',
+                              ),
+                              child: Text(
+                                _maskToken(_tokenCtrl.text.trim()),
+                                style: const TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
                             ),
                           ),
                         ),
                         const SizedBox(width: 8),
                         IconButton(
                           icon: const Icon(Icons.refresh),
-                          tooltip: '重置注销',
+                          tooltip: '重新生成',
                           onPressed: () {
                             final newToken = AppSettings.generateOpenAiStyleKey();
                             _tokenCtrl.text = newToken;
                             s.harnessToken = newToken;
                             sp.updateSettings(s);
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('已重新生成配对 Token')),
-                            );
+                            setState(() {});
                           },
                         ),
                         IconButton(
@@ -377,9 +402,6 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                           tooltip: '复制',
                           onPressed: () {
                             Clipboard.setData(ClipboardData(text: _tokenCtrl.text.trim()));
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Token 已复制到剪贴板')),
-                            );
                           },
                         ),
                       ],
@@ -649,11 +671,12 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                     TextField(
                       controller: _localAgentTokenCtrl,
                       focusNode: _localAgentTokenFocus,
+                      obscureText: true,
                       decoration: const InputDecoration(
                         labelText: '直连安全 Token (可选)',
                         hintText: '留空或输入本地安全口令',
                         border: OutlineInputBorder(),
-                        helperText: '局域网握手鉴权 Token，未配置可留空',
+                        helperText: '局域网握手鉴权 Token，未配置可留空 (已启用安全隐藏)',
                         isDense: true,
                       ),
                     ),
@@ -673,93 +696,196 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                   children: [
                     const Text('电脑端启动命令 (免公网 IP，安全长连接)', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 8),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.grey.withOpacity(0.3)),
-                      ),
-                      child: Text(
-                        'python deepseek_bridge.py --token "${_tokenCtrl.text.trim()}" --harness-url "${_harnessUrlCtrl.text.trim()}"',
-                        style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                    InkWell(
+                      borderRadius: BorderRadius.circular(8),
+                      onLongPress: () {
+                        Clipboard.setData(ClipboardData(
+                          text: 'python deepseek_bridge.py --token "${_tokenCtrl.text.trim()}" --harness-url "${_harnessUrlCtrl.text.trim()}"',
+                        ));
+                      },
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.grey.withOpacity(0.3)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'python deepseek_bridge.py --token "${_maskToken(_tokenCtrl.text.trim())}" --harness-url "${_harnessUrlCtrl.text.trim()}"',
+                              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '💡 长按命令框可直接复制完整命令',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey.shade500,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    // 一键工具组：下载 py 脚本、下载 bat 脚本、复制命令
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      alignment: WrapAlignment.end,
-                      children: [
-                        OutlinedButton.icon(
-                          icon: const Icon(Icons.code, size: 16, color: Color(0xFF0284C7)),
-                          label: const Text('下载 py 脚本', style: TextStyle(fontSize: 13)),
-                          onPressed: () async {
-                            final pyContent = BridgeScriptHelper.generatePyContent();
-                            final path = await BridgeScriptHelper.saveFileToDevice(
-                              fileName: 'deepseek_bridge.py',
-                              content: pyContent,
-                            );
-                            if (mounted) {
-                              if (path != null) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(content: Text('已成功保存 deepseek_bridge.py 到：$path')),
+                    const SizedBox(height: 14),
+                    // 一键工具组：手机端与电脑端完美响应式三等分对齐，不突兀折行
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final isNarrow = constraints.maxWidth < 460;
+                        if (isNarrow) {
+                          return Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton(
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                  ),
+                                  onPressed: () async {
+                                    final pyContent = BridgeScriptHelper.generatePyContent();
+                                    await BridgeScriptHelper.downloadFile(
+                                      fileName: 'deepseek_bridge.py',
+                                      content: pyContent,
+                                    );
+                                  },
+                                  child: const Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.download, size: 15, color: Color(0xFF0284C7)),
+                                      SizedBox(width: 4),
+                                      Flexible(
+                                        child: Text(
+                                          '下载 py',
+                                          style: TextStyle(fontSize: 12),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: OutlinedButton(
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                  ),
+                                  onPressed: () async {
+                                    final batContent = BridgeScriptHelper.generateBatContent(
+                                      token: _tokenCtrl.text.trim(),
+                                      serverUrl: 'https://www.lx00924ai.top',
+                                      harnessUrl: 'http://${_harnessUrlCtrl.text.trim()}',
+                                    );
+                                    await BridgeScriptHelper.downloadFile(
+                                      fileName: 'run_bridge.bat',
+                                      content: batContent,
+                                    );
+                                  },
+                                  child: const Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.download, size: 15, color: Color(0xFF0284C7)),
+                                      SizedBox(width: 4),
+                                      Flexible(
+                                        child: Text(
+                                          '下载 bat',
+                                          style: TextStyle(fontSize: 12),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF0284C7),
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                  ),
+                                  onPressed: () {
+                                    Clipboard.setData(ClipboardData(
+                                      text: 'python deepseek_bridge.py --token "${_tokenCtrl.text.trim()}" --harness-url "${_harnessUrlCtrl.text.trim()}"',
+                                    ));
+                                  },
+                                  child: const Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.copy, size: 15),
+                                      SizedBox(width: 4),
+                                      Flexible(
+                                        child: Text(
+                                          '复制命令',
+                                          style: TextStyle(fontSize: 12),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          );
+                        }
+
+                        // 宽屏 / 电脑端布局
+                        return Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            OutlinedButton.icon(
+                              icon: const Icon(Icons.download, size: 16, color: Color(0xFF0284C7)),
+                              label: const Text('下载 py 脚本', style: TextStyle(fontSize: 13)),
+                              onPressed: () async {
+                                final pyContent = BridgeScriptHelper.generatePyContent();
+                                await BridgeScriptHelper.downloadFile(
+                                  fileName: 'deepseek_bridge.py',
+                                  content: pyContent,
                                 );
-                              } else {
-                                Clipboard.setData(ClipboardData(text: pyContent));
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('已将 deepseek_bridge.py 完整代码复制到剪贴板')),
+                              },
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton.icon(
+                              icon: const Icon(Icons.download, size: 16, color: Color(0xFF0284C7)),
+                              label: const Text('下载 bat 脚本', style: TextStyle(fontSize: 13)),
+                              onPressed: () async {
+                                final batContent = BridgeScriptHelper.generateBatContent(
+                                  token: _tokenCtrl.text.trim(),
+                                  serverUrl: 'https://www.lx00924ai.top',
+                                  harnessUrl: 'http://${_harnessUrlCtrl.text.trim()}',
                                 );
-                              }
-                            }
-                          },
-                        ),
-                        OutlinedButton.icon(
-                          icon: const Icon(Icons.terminal, size: 16, color: Color(0xFF0284C7)),
-                          label: const Text('下载 bat 脚本', style: TextStyle(fontSize: 13)),
-                          onPressed: () async {
-                            final batContent = BridgeScriptHelper.generateBatContent(
-                              token: _tokenCtrl.text.trim(),
-                              serverUrl: 'https://www.lx00924ai.top',
-                              harnessUrl: 'http://${_harnessUrlCtrl.text.trim()}',
-                            );
-                            final path = await BridgeScriptHelper.saveFileToDevice(
-                              fileName: 'run_bridge.bat',
-                              content: batContent,
-                            );
-                            if (mounted) {
-                              if (path != null) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(content: Text('已成功保存 run_bridge.bat 到：$path')),
+                                await BridgeScriptHelper.downloadFile(
+                                  fileName: 'run_bridge.bat',
+                                  content: batContent,
                                 );
-                              } else {
-                                Clipboard.setData(ClipboardData(text: batContent));
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('已将 run_bridge.bat 完整脚本复制到剪贴板')),
-                                );
-                              }
-                            }
-                          },
-                        ),
-                        ElevatedButton.icon(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF0284C7),
-                            foregroundColor: Colors.white,
-                          ),
-                          icon: const Icon(Icons.copy, size: 16),
-                          label: const Text('复制命令', style: TextStyle(fontSize: 13)),
-                          onPressed: () {
-                            Clipboard.setData(ClipboardData(
-                              text: 'python deepseek_bridge.py --token "${_tokenCtrl.text.trim()}" --harness-url "${_harnessUrlCtrl.text.trim()}"',
-                            ));
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('启动命令已复制')),
-                            );
-                          },
-                        ),
-                      ],
+                              },
+                            ),
+                            const SizedBox(width: 8),
+                            ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF0284C7),
+                                foregroundColor: Colors.white,
+                              ),
+                              icon: const Icon(Icons.copy, size: 16),
+                              label: const Text('复制命令', style: TextStyle(fontSize: 13)),
+                              onPressed: () {
+                                Clipboard.setData(ClipboardData(
+                                  text: 'python deepseek_bridge.py --token "${_tokenCtrl.text.trim()}" --harness-url "${_harnessUrlCtrl.text.trim()}"',
+                                ));
+                              },
+                            ),
+                          ],
+                        );
+                      },
                     ),
                   ],
                 ),

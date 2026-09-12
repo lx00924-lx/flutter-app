@@ -7,6 +7,8 @@ class ChatSession {
   DateTime updatedAt;
   String? model;
   String? workspace;
+  String? summary; // 会话历史增量摘要 (KV 缓存前缀压缩基石)
+  int lastSummarizedIndex; // 上次已摘要的历史消息截止索引
 
   ChatSession({
     required this.id,
@@ -15,6 +17,8 @@ class ChatSession {
     DateTime? updatedAt,
     this.model,
     this.workspace,
+    this.summary,
+    this.lastSummarizedIndex = 0,
   })  : createdAt = createdAt ?? DateTime.now(),
         updatedAt = updatedAt ?? DateTime.now();
 
@@ -26,6 +30,8 @@ class ChatSession {
       'updatedAt': updatedAt.toIso8601String(),
       'model': model,
       'workspace': workspace,
+      'summary': summary,
+      'lastSummarizedIndex': lastSummarizedIndex,
     };
   }
 
@@ -37,6 +43,8 @@ class ChatSession {
       updatedAt: DateTime.parse(map['updatedAt'] as String),
       model: map['model'] as String?,
       workspace: map['workspace'] as String?,
+      summary: map['summary'] as String?,
+      lastSummarizedIndex: (map['lastSummarizedIndex'] as num?)?.toInt() ?? 0,
     );
   }
 

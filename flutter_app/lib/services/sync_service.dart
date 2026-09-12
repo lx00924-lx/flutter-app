@@ -635,4 +635,27 @@ class SyncService {
       }
     }
   }
+
+  /// 从服务端拉取最新维护的模型上下文上限配置表
+  Future<Map<String, int>> fetchModelLimits() async {
+    try {
+      final url = '$serverBaseUrl/api/model-limits';
+      final response = await _dio.get(url);
+      if (response.statusCode == 200 && response.data is Map) {
+        final rawLimits = response.data['limits'];
+        if (rawLimits is Map) {
+          final Map<String, int> result = {};
+          rawLimits.forEach((k, v) {
+            if (v is num) {
+              result[k.toString()] = v.toInt();
+            }
+          });
+          return result;
+        }
+      }
+    } catch (e) {
+      debugPrint('[SyncService] fetchModelLimits failed (using offline fallback): $e');
+    }
+    return {};
+  }
 }
