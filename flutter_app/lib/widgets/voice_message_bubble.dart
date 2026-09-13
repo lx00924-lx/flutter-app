@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:path_provider/path_provider.dart';
@@ -28,7 +27,6 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
   String? _tempFilePath;
-  bool _isPrepared = false;
 
   @override
   void initState() {
@@ -165,7 +163,6 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: List.generate(12, (index) {
                   final h = ((index % 4) + 2) * 3.5;
-                  final active = isPlaying && (_position.inMilliseconds > 0);
                   return AnimatedContainer(
                     duration: const Duration(milliseconds: 150),
                     width: 3,

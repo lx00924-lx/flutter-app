@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import '../models/app_settings.dart';
 import '../providers/settings_provider.dart';
 import 'account_settings_screen.dart';
 import 'personalization_settings_screen.dart';
