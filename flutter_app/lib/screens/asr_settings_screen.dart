@@ -411,13 +411,6 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
             Tab(icon: Icon(Icons.record_voice_over), text: '语音合成 (TTS)'),
           ],
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.check),
-            tooltip: '保存全部',
-            onPressed: _saveAll,
-          ),
-        ],
       ),
       body: TabBarView(
         controller: _tabController,
