@@ -45,6 +45,7 @@ dependencies:
   record: ^5.2.0
   audioplayers: ^6.0.0
   flutter_tts: ^4.2.2
+  mobile_scanner: ^5.2.3
 
 dev_dependencies:
   flutter_test:

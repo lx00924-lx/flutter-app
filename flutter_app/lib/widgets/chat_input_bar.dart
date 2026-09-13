@@ -425,8 +425,8 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                         if (!hasLocalFile && previewBytes == null) return const SizedBox.shrink();
 
                         final ImageProvider imgProvider = hasLocalFile
-                            ? FileImage(File(localPath))
-                            : MemoryImage(previewBytes!);
+                            ? FileImage(File(localPath)) as ImageProvider
+                            : MemoryImage(previewBytes!) as ImageProvider;
 
                         return Container(
                           margin: const EdgeInsets.only(right: 8),

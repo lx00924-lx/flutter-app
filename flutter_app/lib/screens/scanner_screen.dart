@@ -2,8 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
-import 'package:provider/provider.dart';
-import '../providers/settings_provider.dart';
+import '../services/sync_service.dart';
 
 class ScannerScreen extends StatefulWidget {
   const ScannerScreen({super.key});
@@ -77,10 +76,7 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
     }
 
     try {
-      final settings = context.read<SettingsProvider>().settings;
-      final serverUrl = settings.customServerUrl.isNotEmpty
-          ? settings.customServerUrl
-          : 'https://www.lx00924ai.top';
+      final serverUrl = SyncService().serverBaseUrl;
 
       final uri = Uri.parse('$serverUrl/api/bridge/auth-confirm');
       final res = await http.post(
