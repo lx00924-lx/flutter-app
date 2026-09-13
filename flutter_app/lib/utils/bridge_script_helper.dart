@@ -1,11 +1,26 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'web_download_stub.dart' if (dart.library.html) 'web_download_helper.dart' as web_download;
 
 class BridgeScriptHelper {
+  /// 从应用内置 Assets 中读取完整的工业级生产 deepseek_bridge.py
+  static Future<String> getFullBridgeScriptContent() async {
+    try {
+      final content = await rootBundle.loadString('assets/scripts/deepseek_bridge.py');
+      if (content.trim().isNotEmpty) {
+        return content;
+      }
+    } catch (e) {
+      debugPrint('[BridgeScriptHelper] 读取内置 assets/scripts/deepseek_bridge.py 失败: $e');
+    }
+    // 降级兜底方案
+    return generatePyContent();
+  }
+
   /// 生成适配 Windows 一键启动的 run_bridge.bat 脚本内容
   static String generateBatContent({
     required String token,
@@ -131,7 +146,10 @@ if __name__ == "__main__":
 ''';
   }
 
-  /// 真实触发文件下载与保存（Web 端通过浏览器下载 Blob，原生端弹出文件保存或保存至 Downloads）
+  /// 真实触发文件下载与保存：
+  /// - Web 端：通过浏览器 Blob 下载；
+  /// - 电脑桌面端（Windows / macOS / Linux）：正常弹出系统文件选择器由用户挑选保存位置；
+  /// - 手机端（Android / iOS）：直接复制/保存至系统公共 Download 目录，方便文件管理器或社交软件即刻查看与分享。
   static Future<String?> downloadFile({
     required String fileName,
     required String content,
@@ -141,29 +159,49 @@ if __name__ == "__main__":
       if (kIsWeb) {
         web_download.downloadFileWeb(fileName, bytes);
         return '浏览器下载已启动';
-      } else {
-        // 桌面端或移动端
-        String? savePath;
-        if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
-          savePath = await FilePicker.platform.saveFile(
-            dialogTitle: '保存脚本文件',
-            fileName: fileName,
-          );
-        }
-        
-        if (savePath == null) {
-          Directory? dir;
-          if (Platform.isAndroid) {
-            dir = await getExternalStorageDirectory();
-          }
-          dir ??= await getApplicationDocumentsDirectory();
-          savePath = '${dir.path}/$fileName';
-        }
+      }
 
+      // 电脑桌面端（Windows / macOS / Linux）：正常弹出系统文件保存窗口
+      if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) {
+        final savePath = await FilePicker.platform.saveFile(
+          dialogTitle: '保存脚本文件',
+          fileName: fileName,
+        );
+        if (savePath == null) {
+          // 用户主动在弹窗中点击取消
+          return null;
+        }
         final file = File(savePath);
         await file.writeAsBytes(bytes);
         return savePath;
       }
+
+      // 手机移动端（Android / iOS）：优先直接存入系统公共 Download 目录
+      String targetPath = '';
+      if (Platform.isAndroid) {
+        // 安卓公共系统下载目录
+        const publicDownloadDir = '/storage/emulated/0/Download';
+        final pDir = Directory(publicDownloadDir);
+        if (await pDir.exists()) {
+          targetPath = '$publicDownloadDir/$fileName';
+        } else {
+          // 降级使用外部私有存储
+          final extDir = await getExternalStorageDirectory();
+          if (extDir != null) {
+            targetPath = '${extDir.path}/$fileName';
+          }
+        }
+      }
+
+      // iOS 或其它平台的兜底路径
+      if (targetPath.isEmpty) {
+        final docsDir = await getApplicationDocumentsDirectory();
+        targetPath = '${docsDir.path}/$fileName';
+      }
+
+      final file = File(targetPath);
+      await file.writeAsBytes(bytes);
+      return targetPath;
     } catch (e) {
       debugPrint('[BridgeScriptHelper] 下载文件出错: $e');
       return null;

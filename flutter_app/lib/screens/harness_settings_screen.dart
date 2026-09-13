@@ -228,11 +228,10 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     setState(() => _isStartingBridge = true);
     try {
       final scriptPath = 'deepseek_bridge.py';
-      // 检查当前目录下是否存在脚本
+      // 检查当前目录下是否存在脚本，不存在或需更新时从安装包内置资产读取完整工业级脚本
       final fileExists = await File(scriptPath).exists();
       if (!fileExists) {
-        // 自动将脚本释放至当前执行工作目录
-        final pyContent = BridgeScriptHelper.generatePyContent();
+        final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
         await File(scriptPath).writeAsString(pyContent);
       }
 
@@ -897,14 +896,17 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('电脑端启动命令 (免公网 IP，安全长连接)', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                    const Text('电脑端启动命令 (免公网 IP，扫码即连)', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
                     const SizedBox(height: 8),
                     InkWell(
                       borderRadius: BorderRadius.circular(8),
                       onLongPress: () {
                         Clipboard.setData(ClipboardData(
-                          text: 'python deepseek_bridge.py --token "${_tokenCtrl.text.trim()}" --harness-url "${_harnessUrlCtrl.text.trim()}"',
+                          text: 'python deepseek_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
                         ));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('已复制电脑端启动命令')),
+                        );
                       },
                       child: Container(
                         width: double.infinity,
@@ -918,15 +920,15 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'python deepseek_bridge.py --token "${_maskToken(_tokenCtrl.text.trim())}" --harness-url "${_harnessUrlCtrl.text.trim()}"',
+                              'python deepseek_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
                               style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              '💡 长按命令框可直接复制完整命令',
+                              '💡 免输入 Token：运行后终端自动生成配对二维码，手机扫码即可极速完成授权！',
                               style: TextStyle(
                                 fontSize: 11,
-                                color: Colors.grey.shade500,
+                                color: isDark ? Colors.lightBlueAccent.shade100 : const Color(0xFF0284C7),
                               ),
                             ),
                           ],
@@ -948,11 +950,21 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                                   ),
                                   onPressed: () async {
-                                    final pyContent = BridgeScriptHelper.generatePyContent();
-                                    await BridgeScriptHelper.downloadFile(
+                                    final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
+                                    final savedPath = await BridgeScriptHelper.downloadFile(
                                       fileName: 'deepseek_bridge.py',
                                       content: pyContent,
                                     );
+                                    if (context.mounted) {
+                                      if (savedPath != null) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          SnackBar(
+                                            content: Text('已保存至: $savedPath'),
+                                            backgroundColor: Colors.green,
+                                          ),
+                                        );
+                                      }
+                                    }
                                   },
                                   child: const Row(
                                     mainAxisAlignment: MainAxisAlignment.center,
@@ -984,10 +996,18 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                       serverUrl: 'https://www.lx00924ai.top',
                                       harnessUrl: 'http://${_harnessUrlCtrl.text.trim()}',
                                     );
-                                    await BridgeScriptHelper.downloadFile(
+                                    final savedPath = await BridgeScriptHelper.downloadFile(
                                       fileName: 'run_bridge.bat',
                                       content: batContent,
                                     );
+                                    if (context.mounted && savedPath != null) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(
+                                          content: Text('已保存至: $savedPath'),
+                                          backgroundColor: Colors.green,
+                                        ),
+                                      );
+                                    }
                                   },
                                   child: const Row(
                                     mainAxisAlignment: MainAxisAlignment.center,
@@ -1017,8 +1037,11 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                   ),
                                   onPressed: () {
                                     Clipboard.setData(ClipboardData(
-                                      text: 'python deepseek_bridge.py --token "${_tokenCtrl.text.trim()}" --harness-url "${_harnessUrlCtrl.text.trim()}"',
+                                      text: 'python deepseek_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
                                     ));
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('已复制免 Token 启动命令')),
+                                    );
                                   },
                                   child: const Row(
                                     mainAxisAlignment: MainAxisAlignment.center,
@@ -1049,11 +1072,19 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                               icon: const Icon(Icons.download, size: 16, color: Color(0xFF0284C7)),
                               label: const Text('下载 py 脚本', style: TextStyle(fontSize: 13)),
                               onPressed: () async {
-                                final pyContent = BridgeScriptHelper.generatePyContent();
-                                await BridgeScriptHelper.downloadFile(
+                                final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
+                                final savedPath = await BridgeScriptHelper.downloadFile(
                                   fileName: 'deepseek_bridge.py',
                                   content: pyContent,
                                 );
+                                if (context.mounted && savedPath != null) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text('已保存至: $savedPath'),
+                                      backgroundColor: Colors.green,
+                                    ),
+                                  );
+                                }
                               },
                             ),
                             const SizedBox(width: 8),
@@ -1066,10 +1097,18 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                   serverUrl: 'https://www.lx00924ai.top',
                                   harnessUrl: 'http://${_harnessUrlCtrl.text.trim()}',
                                 );
-                                await BridgeScriptHelper.downloadFile(
+                                final savedPath = await BridgeScriptHelper.downloadFile(
                                   fileName: 'run_bridge.bat',
                                   content: batContent,
                                 );
+                                if (context.mounted && savedPath != null) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text('已保存至: $savedPath'),
+                                      backgroundColor: Colors.green,
+                                    ),
+                                  );
+                                }
                               },
                             ),
                             const SizedBox(width: 8),
@@ -1082,8 +1121,11 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                               label: const Text('复制命令', style: TextStyle(fontSize: 13)),
                               onPressed: () {
                                 Clipboard.setData(ClipboardData(
-                                  text: 'python deepseek_bridge.py --token "${_tokenCtrl.text.trim()}" --harness-url "${_harnessUrlCtrl.text.trim()}"',
+                                  text: 'python deepseek_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
                                 ));
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('已复制免 Token 启动命令')),
+                                );
                               },
                             ),
                           ],

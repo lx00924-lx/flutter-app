@@ -10,6 +10,7 @@ import '../providers/settings_provider.dart';
 import '../services/audio_recorder_service.dart';
 import '../utils/image_picker_helper.dart';
 import '../screens/voice_call_screen.dart';
+import '../screens/scanner_screen.dart';
 
 class ChatInputBar extends StatefulWidget {
   final Function(String text, {List<String>? attachments}) onSend;
@@ -567,15 +568,18 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                     onTap: _handlePickFile,
                   ),
                   _buildToolItem(
-                    icon: Icons.phone_in_talk_outlined,
-                    label: '实时通话',
+                    icon: Icons.qr_code_scanner_rounded,
+                    label: '扫一扫',
                     color: const Color(0xFF8B5CF6),
                     isDark: isDark,
                     onTap: () {
                       setState(() => _isMenuOpen = false);
                       Navigator.push(
                         context,
-                        MaterialPageRoute(builder: (_) => const VoiceCallScreen()),
+                        MaterialPageRoute(
+                          builder: (_) => const ScannerScreen(),
+                          fullscreenDialog: true,
+                        ),
                       );
                     },
                   ),
