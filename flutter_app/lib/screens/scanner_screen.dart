@@ -76,7 +76,7 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
     }
 
     try {
-      final serverUrl = SyncService().serverBaseUrl;
+      final serverUrl = SyncService.instance.serverBaseUrl;
 
       final uri = Uri.parse('$serverUrl/api/bridge/auth-confirm');
       final res = await http.post(
