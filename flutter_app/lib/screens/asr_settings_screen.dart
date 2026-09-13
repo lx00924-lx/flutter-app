@@ -710,6 +710,17 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
                       const Divider(height: 24),
                       SwitchListTile(
                         contentPadding: EdgeInsets.zero,
+                        title: const Text('常规聊天中 AI 回复自动朗读'),
+                        subtitle: const Text('开启后文字对话生成完毕自动朗读，亦可在顶部栏随时开关/打断'),
+                        value: s.autoSpeakResponse,
+                        onChanged: (val) {
+                          s.autoSpeakResponse = val;
+                          sp.updateSettings(s);
+                          setState(() {});
+                        },
+                      ),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
                         title: const Text('实时语音通话中自动朗读回复'),
                         subtitle: const Text('AI 生成文字后自动通过选定 TTS 播报人声'),
                         value: s.ttsAutoPlayInCall,

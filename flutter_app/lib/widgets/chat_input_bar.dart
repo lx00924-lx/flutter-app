@@ -133,36 +133,63 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   // 1. 发送图片：调用原生相册
   Future<void> _handlePickImage() async {
     setState(() => _isMenuOpen = false);
-    final result = await ImagePickerHelper.pickImageFromGallery();
-    if (result != null && mounted) {
-      setState(() {
-        _pendingAttachments.add(result.toAttachmentString());
-        _pendingFileDisplayNames.add('图片');
-      });
+    try {
+      final result = await ImagePickerHelper.pickImageFromGallery();
+      if (result != null && mounted) {
+        setState(() {
+          _pendingAttachments.add(result.toAttachmentString());
+          _pendingFileDisplayNames.add('图片');
+        });
+      }
+    } catch (e) {
+      debugPrint('选择图片异常: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('选择图片失败: $e')),
+        );
+      }
     }
   }
 
   // 2. 拍照：调用手机相机
   Future<void> _handleTakePhoto() async {
     setState(() => _isMenuOpen = false);
-    final result = await ImagePickerHelper.takePhotoFromCamera();
-    if (result != null && mounted) {
-      setState(() {
-        _pendingAttachments.add(result.toAttachmentString());
-        _pendingFileDisplayNames.add('拍照');
-      });
+    try {
+      final result = await ImagePickerHelper.takePhotoFromCamera();
+      if (result != null && mounted) {
+        setState(() {
+          _pendingAttachments.add(result.toAttachmentString());
+          _pendingFileDisplayNames.add('拍照');
+        });
+      }
+    } catch (e) {
+      debugPrint('拍照异常: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('拍照失败: $e')),
+        );
+      }
     }
   }
 
   // 3. 发送文件：打开系统文件管理器
   Future<void> _handlePickFile() async {
     setState(() => _isMenuOpen = false);
-    final file = await ImagePickerHelper.pickGenericFile();
-    if (file != null && mounted) {
-      setState(() {
-        _pendingAttachments.add(file.base64Data);
-        _pendingFileDisplayNames.add(file.name);
-      });
+    try {
+      final file = await ImagePickerHelper.pickGenericFile();
+      if (file != null && mounted) {
+        setState(() {
+          _pendingAttachments.add(file.base64Data);
+          _pendingFileDisplayNames.add(file.name);
+        });
+      }
+    } catch (e) {
+      debugPrint('选择文件异常: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('选择文件失败: $e')),
+        );
+      }
     }
   }
 
@@ -391,8 +418,15 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                       final isImg = !isFile && !att.startsWith('data:audio/');
 
                       if (isImg) {
-                        final previewBytes = ImagePickerHelper.decodeBase64Image(att);
-                        if (previewBytes == null) return const SizedBox.shrink();
+                        final localPath = ImagePickerHelper.extractLocalPathFromAttachment(att);
+                        final hasLocalFile = localPath != null && localPath.isNotEmpty && File(localPath).existsSync();
+                        final previewBytes = hasLocalFile ? null : ImagePickerHelper.decodeBase64Image(att);
+                        if (!hasLocalFile && previewBytes == null) return const SizedBox.shrink();
+
+                        final ImageProvider imgProvider = hasLocalFile
+                            ? FileImage(File(localPath))
+                            : MemoryImage(previewBytes!);
+
                         return Container(
                           margin: const EdgeInsets.only(right: 8),
                           child: Stack(
@@ -404,7 +438,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                                   borderRadius: BorderRadius.circular(10),
                                   border: Border.all(color: const Color(0xFF0284C7), width: 1.5),
                                   image: DecorationImage(
-                                    image: MemoryImage(previewBytes),
+                                    image: imgProvider,
                                     fit: BoxFit.cover,
                                   ),
                                 ),
@@ -549,42 +583,62 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
               ),
             ),
 
-          // 4. 正在录音中的动态上滑取消提示栏
+          // 4. 正在录音中的动态提示栏（支持点击横条停止或取消）
           if (_isRecording)
-            Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              decoration: BoxDecoration(
-                color: _isSlideCancelling
-                    ? const Color(0xFFEF4444).withOpacity(0.15)
-                    : const Color(0xFF0284C7).withOpacity(0.12),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(
-                  color: _isSlideCancelling ? const Color(0xFFEF4444) : const Color(0xFF0284C7),
-                ),
-              ),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    _isSlideCancelling ? Icons.cancel : Icons.mic,
+            GestureDetector(
+              onTap: () => _stopRecording(cancelled: false),
+              child: Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                decoration: BoxDecoration(
+                  color: _isSlideCancelling
+                      ? const Color(0xFFEF4444).withOpacity(0.15)
+                      : const Color(0xFF0284C7).withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
                     color: _isSlideCancelling ? const Color(0xFFEF4444) : const Color(0xFF0284C7),
-                    size: 18,
                   ),
-                  const SizedBox(width: 8),
-                  Text(
-                    _isSlideCancelling
-                        ? '松开手指，取消发送'
-                        : '录音中 $_recordDurationSeconds" · ${_isLongPress ? "上滑取消" : "再次点击结束"}',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: _isSlideCancelling
-                          ? const Color(0xFFEF4444)
-                          : (isDark ? Colors.white : const Color(0xFF0F172A)),
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      _isSlideCancelling ? Icons.cancel : Icons.mic,
+                      color: _isSlideCancelling ? const Color(0xFFEF4444) : const Color(0xFF0284C7),
+                      size: 18,
                     ),
-                  ),
-                ],
+                    const SizedBox(width: 8),
+                    Text(
+                      _isSlideCancelling
+                          ? '松开手指，取消发送'
+                          : '🔴 录音中 $_recordDurationSeconds" · ${_isLongPress ? "上滑取消" : "点击完成"}',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: _isSlideCancelling
+                            ? const Color(0xFFEF4444)
+                            : (isDark ? Colors.white : const Color(0xFF0F172A)),
+                      ),
+                    ),
+                    if (!_isLongPress) ...[
+                      const SizedBox(width: 8),
+                      InkWell(
+                        onTap: () => _stopRecording(cancelled: true),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                          child: Text(
+                            '取消',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: Color(0xFFEF4444),
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
               ),
             ),
 
@@ -687,44 +741,57 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                         ),
                       ),
 
-                      // 麦克风录音控制 (支持点按录制/停止 与 长按上滑取消即发)
-                      GestureDetector(
-                        onTap: _toggleClickRecording,
-                        onLongPressStart: (details) {
-                          _longPressStartY = details.globalPosition.dy;
-                          _startRecording(isLongPress: true);
-                        },
-                        onLongPressMoveUpdate: (details) {
-                          if (_isRecording && _isLongPress) {
-                            final deltaY = _longPressStartY - details.globalPosition.dy;
-                            final cancelling = deltaY > 50; // 向上滑动超过 50 像素触发取消
-                            if (cancelling != _isSlideCancelling) {
-                              setState(() => _isSlideCancelling = cancelling);
-                            }
-                          }
-                        },
-                        onLongPressEnd: (_) => _stopRecording(cancelled: _isSlideCancelling),
-                        onLongPressCancel: () => _stopRecording(cancelled: true),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
-                          child: AnimatedContainer(
-                            duration: const Duration(milliseconds: 200),
-                            padding: const EdgeInsets.all(6),
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: _isRecording
-                                  ? const Color(0xFFEF4444).withOpacity(0.18)
-                                  : Colors.transparent,
-                            ),
-                            child: Icon(
-                              _isRecording ? Icons.stop_circle : Icons.mic_none_outlined,
-                              size: 22,
-                              color: _isRecording
-                                  ? const Color(0xFFEF4444)
-                                  : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
-                            ),
-                          ),
-                        ),
+                      // 麦克风录音控制 (在同一个按钮中无缝融合长按与点按双模式)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                        child: _isRecording
+                            ? InkResponse(
+                                onTap: () => _stopRecording(cancelled: false),
+                                radius: 24,
+                                child: Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: const BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: Color(0xFFEF4444),
+                                  ),
+                                  child: const Icon(
+                                    Icons.stop_rounded,
+                                    size: 20,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              )
+                            : GestureDetector(
+                                behavior: HitTestBehavior.opaque,
+                                onTap: _toggleClickRecording,
+                                onLongPressStart: (details) {
+                                  _longPressStartY = details.globalPosition.dy;
+                                  _startRecording(isLongPress: true);
+                                },
+                                onLongPressMoveUpdate: (details) {
+                                  if (_isRecording && _isLongPress) {
+                                    final deltaY = _longPressStartY - details.globalPosition.dy;
+                                    final cancelling = deltaY > 50; // 向上滑动超过 50 像素触发取消
+                                    if (cancelling != _isSlideCancelling) {
+                                      setState(() => _isSlideCancelling = cancelling);
+                                    }
+                                  }
+                                },
+                                onLongPressEnd: (_) => _stopRecording(cancelled: _isSlideCancelling),
+                                onLongPressCancel: () => _stopRecording(cancelled: true),
+                                child: Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: const BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: Colors.transparent,
+                                  ),
+                                  child: Icon(
+                                    Icons.mic_none_outlined,
+                                    size: 22,
+                                    color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+                                  ),
+                                ),
+                              ),
                       ),
                     ],
                   ),

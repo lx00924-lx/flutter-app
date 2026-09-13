@@ -25,26 +25,22 @@ class TextSelectionModal extends StatefulWidget {
 }
 
 class _TextSelectionModalState extends State<TextSelectionModal> {
-  late TextEditingController _controller;
+  TextSelection? _currentSelection;
 
-  @override
-  void initState() {
-    super.initState();
-    _controller = TextEditingController(text: widget.message.content);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  String _getSelectedText() {
-    final selection = _controller.selection;
-    if (selection.isValid && !selection.isCollapsed) {
-      return _controller.text.substring(selection.start, selection.end);
+  String _getSelectedText([EditableTextState? editableTextState]) {
+    // 优先从 EditableTextState 获取真实高亮选区
+    if (editableTextState != null) {
+      final sel = editableTextState.textEditingValue.selection;
+      if (sel.isValid && !sel.isCollapsed) {
+        return sel.textInside(widget.message.content);
+      }
     }
-    return _controller.text;
+    // 其次从 onSelectionChanged 缓存选区获取
+    if (_currentSelection != null && _currentSelection!.isValid && !_currentSelection!.isCollapsed) {
+      return _currentSelection!.textInside(widget.message.content);
+    }
+    // 兜底返回完整内容
+    return widget.message.content;
   }
 
   @override
@@ -106,12 +102,15 @@ class _TextSelectionModalState extends State<TextSelectionModal> {
                         height: 1.6,
                         color: isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
                       ),
+                      onSelectionChanged: (selection, cause) {
+                        _currentSelection = selection;
+                      },
                       contextMenuBuilder: (context, editableTextState) {
                         final buttonItems = [
                           ContextMenuButtonItem(
                             label: '引用',
                             onPressed: () {
-                              final text = _getSelectedText();
+                              final text = _getSelectedText(editableTextState);
                               final quoteMsg = ChatMessage(
                                 id: widget.message.id,
                                 sessionId: widget.message.sessionId,
@@ -132,11 +131,12 @@ class _TextSelectionModalState extends State<TextSelectionModal> {
                           ContextMenuButtonItem(
                             label: '朗读',
                             onPressed: () {
-                              final text = _getSelectedText();
+                              final text = _getSelectedText(editableTextState);
+                              context.read<SettingsProvider>().setAutoSpeakResponse(true);
                               TtsService.instance.speak(text, settings);
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
-                                  content: Text('正在朗读所选文字...'),
+                                  content: Text('已开始朗读所选文字'),
                                   duration: Duration(seconds: 1),
                                 ),
                               );
@@ -176,6 +176,7 @@ class _TextSelectionModalState extends State<TextSelectionModal> {
                     icon: const Icon(Icons.volume_up_outlined, size: 16),
                     label: const Text('全部朗读'),
                     onPressed: () {
+                      context.read<SettingsProvider>().setAutoSpeakResponse(true);
                       TtsService.instance.speak(widget.message.content, settings);
                     },
                   ),

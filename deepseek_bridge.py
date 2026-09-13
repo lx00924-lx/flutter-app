@@ -1752,27 +1752,98 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             poll_fail_count += 1
             await asyncio.sleep(3)
 
+async def request_device_auth_session(server_base: str):
+    """向云端中继申请一次性扫码授权临时 Session Code"""
+    api_url = f"{server_base}/api/bridge/auth-session"
+    loop = asyncio.get_running_loop()
+    
+    def _do():
+        return GLOBAL_HTTP_CLIENT.request(
+            api_url,
+            data=json.dumps({}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+            timeout=10
+        )
+    try:
+        raw = await loop.run_in_executor(None, _do)
+        data = json.loads(raw)
+        if data.get("success"):
+            return data.get("sessionCode"), data.get("expiresIn", 120)
+    except Exception as e:
+        logger.error(f"申请扫码授权会话异常: {e}")
+    return None, 0
+
+async def poll_device_auth_token(server_base: str, session_code: str, timeout_seconds: int = 120):
+    """轮询云端等待手机 App 扫码确认并获取真实 Token"""
+    poll_url = f"{server_base}/api/bridge/auth-poll?sessionCode={urllib.parse.quote(session_code)}"
+    loop = asyncio.get_running_loop()
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout_seconds:
+        def _do():
+            return GLOBAL_HTTP_CLIENT.request(
+                poll_url,
+                method="GET",
+                timeout=10
+            )
+        try:
+            raw = await loop.run_in_executor(None, _do)
+            data = json.loads(raw)
+            status = data.get("status")
+            if status == "confirmed":
+                token = data.get("token")
+                account = data.get("account")
+                return token, account
+            elif status == "expired":
+                return None, "expired"
+        except Exception:
+            pass
+        await asyncio.sleep(1.8)
+    return None, "timeout"
+
 async def run_bridge_client(args):
     token = (args.token or "").strip()
-    if not token or token in ("default_agent_token", "YOUR_AGENT_TOKEN_HERE", "<YOUR_AGENT_TOKEN>"):
-        print("\033[91m" + "=" * 70)
-        print("❌ [连接失败] 未检测到有效的 App 配对密钥 (Token)！")
-        print("   原因：当前未配置 --token 参数，或使用了默认占位符。")
-        print("   排查方案：")
-        print("   1. 打开手机/网页端 App ➔ 进入【设置 ➔ 🤖 本地 Agent (Harness)】；")
-        print("   2. 查看您的【专属配对 Token】；")
-        print("   3. 重新运行命令，例如：python deepseek_bridge.py --token \"您的真实Token\"")
-        print("=" * 70 + "\033[0m")
-        sys.exit(1)
-
     server_base = normalize_server_url(args.server)
     concurrency_limit = max(1, args.concurrency)
     init_global_http_client(force_no_proxy=args.no_proxy, custom_proxy=args.proxy, primary_server=server_base)
 
+    # 如果未传入 Token 或为占位符：进入高安全【扫码动态授权模式】(OAuth 2.0 Device Flow)
+    if not token or token in ("default_agent_token", "YOUR_AGENT_TOKEN_HERE", "<YOUR_AGENT_TOKEN>"):
+        print("=" * 70)
+        print("\033[96m[动态扫码配对] 未指定 --token，已自动进入免记忆安全扫码授权模式...\033[0m")
+        print("正在向服务器申请一次性临时授权配对码...")
+        session_code, expires_in = await request_device_auth_session(server_base)
+        
+        if not session_code:
+            print("\033[91m❌ [申请失败] 无法连接到调度服务器申请配对码，请检查网络或使用 --token 手动指定！\033[0m")
+            sys.exit(1)
+
+        # 构造手机 App 扫码识别专用的协议链接 (带 authSession 参数)
+        scan_url = f"{server_base}?authSession={session_code}"
+        print_terminal_qr(scan_url)
+        print(f" • 临时配对码     : \033[93m{session_code}\033[0m (有效期约 {expires_in} 秒)")
+        print(f" • 云端调度中心   : \033[94m{server_base}\033[0m")
+        print("\033[92m[⏳ 等待手机扫码] 请打开手机 App ➔ 进入【设置 ➔ 🤖 本地 Agent (Harness)】点击「扫码配对」扫描上方二维码...\033[0m")
+        print("-" * 70)
+
+        auth_token, auth_info = await poll_device_auth_token(server_base, session_code, expires_in)
+        if not auth_token:
+            if auth_info == "expired" or auth_info == "timeout":
+                print("\033[91m❌ [扫码超时] 本次临时授权二维码已过期。请重新运行命令进行扫码。\033[0m")
+            else:
+                print("\033[91m❌ [授权失败] 未能成功完成扫码握手。\033[0m")
+            sys.exit(1)
+
+        token = auth_token
+        account_tip = f" (用户: {auth_info})" if auth_info and auth_info != "expired" else ""
+        print(f"\n\033[92m🎉 [授权成功!] 已成功获取手机端授权 Token{account_tip}！\033[0m")
+        print("\033[90m[安全声明] 本次会话为纯内存即时连接，关闭终端即刻失效，不落盘持久化任何文件。\033[0m\n")
+
     proxy_mode_desc = "强制 Direct 直连" if args.no_proxy else (f"自定义代理 ({args.proxy})" if args.proxy else "自适应系统/VPN代理")
     print("=" * 70)
-    print("\033[96m 正在启动 DeepSeek Harness 本地反向桥接客户端 (v3.6 安全版)...\033[0m")
-    print(f" • 配对 Token     : \033[96m{token}\033[0m")
+    print("\033[96m 正在启动 DeepSeek Harness 本地反向桥接客户端 (v3.7 安全握手版)...\033[0m")
+    print(f" • 配对 Token     : \033[96m{token[:7] + '******' if len(token) > 7 else '***'}\033[0m")
     print(f" • App 调度服务器 : \033[94m{server_base}\033[0m")
     print(f" • 网络连接模式   : \033[95m{proxy_mode_desc}\033[0m")
     print(f" • 本地 Harness   : \033[93m{args.harness_url}\033[0m (默认 3080/v1)")

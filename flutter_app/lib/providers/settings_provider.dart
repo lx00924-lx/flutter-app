@@ -67,6 +67,20 @@ class SettingsProvider extends ChangeNotifier {
     _save();
   }
 
+  /// 切换 AI 回复自动朗读开关
+  void toggleAutoSpeakResponse() {
+    _settings.autoSpeakResponse = !_settings.autoSpeakResponse;
+    _save();
+  }
+
+  /// 显式设置自动朗读状态
+  void setAutoSpeakResponse(bool enabled) {
+    if (_settings.autoSpeakResponse != enabled) {
+      _settings.autoSpeakResponse = enabled;
+      _save();
+    }
+  }
+
   /// 在主界面下拉弹窗中切换选中的 API 卡片
   void selectEndpoint(ApiModelEndpoint endpoint) {
     _settings.activeEndpointId = endpoint.id;

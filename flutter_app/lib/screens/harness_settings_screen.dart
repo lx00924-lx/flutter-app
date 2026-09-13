@@ -1,9 +1,11 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
 import '../models/app_settings.dart';
 import '../utils/bridge_script_helper.dart';
+import '../services/sync_service.dart';
 
 class HarnessSettingsScreen extends StatefulWidget {
   const HarnessSettingsScreen({super.key});
@@ -26,6 +28,8 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   final FocusNode _localAgentTokenFocus = FocusNode();
 
   bool _isRefreshing = false;
+  bool _isStartingBridge = false;
+  static Process? _headlessBridgeProcess; // 桌面端保持全局单例后台守护进程
   List<String> _workspaces = ['deepseek-agent', 'workspace-main', 'dev-sandbox'];
   List<Map<String, dynamic>> _rawSessions = [];
   List<String> _filteredSessions = ['智能选择 / 自动新建会话 (推荐)'];
@@ -204,66 +208,198 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     }
   }
 
+  /// 启动/停止本地后台无头桥接程序 (仅限桌面端 Windows/macOS/Linux)
+  Future<void> _toggleHeadlessBridge(String token, String harnessUrl) async {
+    if (_headlessBridgeProcess != null) {
+      // 停止后台进程
+      try {
+        _headlessBridgeProcess!.kill(ProcessSignal.sigterm);
+      } catch (_) {
+        _headlessBridgeProcess!.kill();
+      }
+      _headlessBridgeProcess = null;
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已停止电脑后台桥接守护进程')),
+      );
+      return;
+    }
+
+    setState(() => _isStartingBridge = true);
+    try {
+      final scriptPath = 'deepseek_bridge.py';
+      // 检查当前目录下是否存在脚本
+      final fileExists = await File(scriptPath).exists();
+      if (!fileExists) {
+        // 自动将脚本释放至当前执行工作目录
+        final pyContent = BridgeScriptHelper.generatePyContent();
+        await File(scriptPath).writeAsString(pyContent);
+      }
+
+      final executable = Platform.isWindows ? 'python' : 'python3';
+      final process = await Process.start(
+        executable,
+        [
+          scriptPath,
+          '--token', token,
+          '--harness-url', 'http://$harnessUrl',
+          '--server', 'https://www.lx00924ai.top',
+        ],
+        mode: ProcessStartMode.detachedWithStdio,
+      );
+
+      _headlessBridgeProcess = process;
+      setState(() => _isStartingBridge = false);
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('🚀 本地桥接服务已在后台静默运行，无需保持黑窗口！'),
+          backgroundColor: Colors.green,
+        ),
+      );
+
+      // 启动后 2 秒静默自检连接状态
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) {
+          context.read<SettingsProvider>().refreshAgentStatus();
+        }
+      });
+    } catch (e) {
+      setState(() => _isStartingBridge = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('启动失败: $e (请确保电脑已安装 Python 并加入环境变量)'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    }
+  }
+
   void _showQrScanPairingDialog() {
     final token = _tokenCtrl.text.trim();
     final url = _harnessUrlCtrl.text.trim();
+    final isDesktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+    final codeController = TextEditingController();
+    bool isSubmitting = false;
+
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Row(
-          children: [
-            Icon(Icons.qr_code_scanner, color: Color(0xFF0284C7)),
-            SizedBox(width: 8),
-            Text('Agent 扫码与快速配对'),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDlgState) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Row(
+            children: [
+              Icon(Icons.qr_code_scanner, color: Color(0xFF0284C7)),
+              SizedBox(width: 8),
+              Text('Agent 扫码授权与配对'),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '支持手机扫码秒连、临时授权码快速绑定或一键复制口令：',
+                  style: TextStyle(fontSize: 13),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Theme.of(ctx).brightness == Brightness.dark
+                        ? const Color(0xFF1E293B)
+                        : const Color(0xFFF1F5F9),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('当前配对 Token: ${_maskToken(token)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 4),
+                      Text('Harness 地址: http://$url', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      const SizedBox(height: 4),
+                      const Text('协议: 端到端双向安全长连接 (免公网 IP)', style: TextStyle(fontSize: 12, color: Colors.green)),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
+                // 扫码授权码快速绑定输入框 (方便手机端输入电脑终端上生成的 AUTH_XXXX 临时码)
+                const Text(
+                  '扫码配对 / 动态授权码绑定：',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: codeController,
+                  textCapitalization: TextCapitalization.characters,
+                  decoration: InputDecoration(
+                    hintText: '输入电脑终端显示的临时码 (如 AUTH_ABC123)',
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                    suffixIcon: isSubmitting
+                        ? const Padding(
+                            padding: EdgeInsets.all(10),
+                            child: SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                          )
+                        : IconButton(
+                            icon: const Icon(Icons.send, color: Color(0xFF0284C7)),
+                            tooltip: '确认绑定并授权',
+                            onPressed: isSubmitting ? null : () async {
+                              final inputCode = codeController.text.trim().toUpperCase();
+                              if (inputCode.isEmpty) return;
+                              setDlgState(() => isSubmitting = true);
+                              final res = await SyncService.instance.confirmBridgeAuthSession(
+                                sessionCode: inputCode,
+                                token: token,
+                                account: context.read<SettingsProvider>().settings.loginAccount,
+                              );
+                              setDlgState(() => isSubmitting = false);
+                              if (res['success'] == true) {
+                                Navigator.pop(ctx);
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text(res['message'] ?? '绑定授权成功！电脑端已自动上线'), backgroundColor: Colors.green),
+                                );
+                                context.read<SettingsProvider>().refreshAgentStatus();
+                              } else {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text(res['message'] ?? '授权失败，请检查临时码'), backgroundColor: Colors.redAccent),
+                                );
+                              }
+                            },
+                          ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  '💡 手机端通过相机扫描电脑终端打印的二维码，即可自动识别临时授权链接并握手完成配对。',
+                  style: TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('关闭'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0284C7), foregroundColor: Colors.white),
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: 'TOKEN=$token;URL=http://$url'));
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('已复制配对参数至剪贴板')),
+                );
+              },
+              child: const Text('复制配对参数'),
+            ),
           ],
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              '手机端可直接与电脑端通过配对口令或局域网配置互通：',
-              style: TextStyle(fontSize: 13),
-            ),
-            const SizedBox(height: 12),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Theme.of(ctx).brightness == Brightness.dark
-                    ? const Color(0xFF1E293B)
-                    : const Color(0xFFF1F5F9),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('当前配对 Token: ${_maskToken(token)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                  const SizedBox(height: 4),
-                  Text('Harness 地址: http://$url', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                  const SizedBox(height: 4),
-                  const Text('状态: 即时双向安全长连接', style: TextStyle(fontSize: 12, color: Colors.green)),
-                ],
-              ),
-            ),
-            const SizedBox(height: 12),
-            const Text('💡 提示：电脑端运行 deepseek_bridge.py 即可自动握手接入，无需在同 WiFi 下暴露任何端口。', style: TextStyle(fontSize: 11, color: Colors.grey)),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('关闭'),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF0284C7), foregroundColor: Colors.white),
-            onPressed: () {
-              Clipboard.setData(ClipboardData(text: 'TOKEN=$token;URL=http://$url'));
-              Navigator.pop(ctx);
-            },
-            child: const Text('复制配对参数'),
-          ),
-        ],
       ),
     );
   }
@@ -343,6 +479,73 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         ),
                       ],
                     ),
+                    // 仅在电脑桌面端 (Windows / macOS / Linux) 显示：一键静默无头运行 / 停止后台桥接
+                    if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) ...[
+                      const SizedBox(height: 12),
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: (isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9)),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: const Color(0xFF0284C7).withOpacity(0.3)),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              _headlessBridgeProcess != null ? Icons.bolt : Icons.play_circle_outline,
+                              color: _headlessBridgeProcess != null ? Colors.green : const Color(0xFF0284C7),
+                              size: 28,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _headlessBridgeProcess != null ? '电脑端后台守护中 (无头模式)' : '一键无头后台启动',
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    _headlessBridgeProcess != null
+                                        ? 'PID: ${_headlessBridgeProcess!.pid}，长连接已建立，无黑色控制台窗口'
+                                        : '点击即可在后台静默运行 py 桥接，无需手动打开 CMD 或保留黑窗口',
+                                    style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            _isStartingBridge
+                                ? const SizedBox(
+                                    width: 24,
+                                    height: 24,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  )
+                                : ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: _headlessBridgeProcess != null ? Colors.redAccent : const Color(0xFF0284C7),
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                    ),
+                                    icon: Icon(
+                                      _headlessBridgeProcess != null ? Icons.stop : Icons.play_arrow,
+                                      size: 16,
+                                    ),
+                                    label: Text(
+                                      _headlessBridgeProcess != null ? '停止' : '启动',
+                                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                                    ),
+                                    onPressed: () => _toggleHeadlessBridge(
+                                      _tokenCtrl.text.trim(),
+                                      _harnessUrlCtrl.text.trim(),
+                                    ),
+                                  ),
+                          ],
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 16),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,

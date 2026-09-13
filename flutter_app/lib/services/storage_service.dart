@@ -189,6 +189,42 @@ class StorageService {
     if (mBox != null) await mBox.clear();
   }
 
+  // --- 离线待删除会话队列 (Pending Deletions Queue) ---
+  List<String> getPendingDeleteSessionIds() {
+    final box = _settingsBox;
+    if (box == null) return [];
+    try {
+      final list = box.get('pending_delete_session_ids');
+      if (list is List) {
+        return list.map((e) => e.toString()).toList();
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  Future<void> addPendingDeleteSessionId(String sessionId) async {
+    final box = _settingsBox;
+    if (box == null || sessionId.trim().isEmpty) return;
+    try {
+      final current = getPendingDeleteSessionIds();
+      if (!current.contains(sessionId)) {
+        current.add(sessionId);
+        await box.put('pending_delete_session_ids', current);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> removePendingDeleteSessionId(String sessionId) async {
+    final box = _settingsBox;
+    if (box == null) return;
+    try {
+      final current = getPendingDeleteSessionIds();
+      if (current.remove(sessionId)) {
+        await box.put('pending_delete_session_ids', current);
+      }
+    } catch (_) {}
+  }
+
   // --- 设置持久化 ---
   AppSettings loadSettings() {
     try {

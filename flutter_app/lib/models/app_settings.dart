@@ -124,6 +124,7 @@ class AppSettings {
   double ttsSpeed; // 0.5 - 2.0 (语速)
   double ttsPitch; // 0.5 - 2.0 (音调)
   bool ttsAutoPlayInCall; // 语音通话中自动朗读
+  bool autoSpeakResponse; // 开启时 AI 回复自动朗读，关闭时不启用
 
   // --- 5. DeepSeek Harness (本地电脑 Agent 桥接) ---
   bool defaultAgentMode;
@@ -186,6 +187,7 @@ class AppSettings {
     this.ttsSpeed = 1.0,
     this.ttsPitch = 1.0,
     this.ttsAutoPlayInCall = true,
+    this.autoSpeakResponse = false,
     // Harness
     this.defaultAgentMode = false,
     this.harnessToken = 'sk-agent030efheg0z78491abcdef0123456789abcdef0123456789',
@@ -267,6 +269,7 @@ class AppSettings {
       'ttsSpeed': ttsSpeed,
       'ttsPitch': ttsPitch,
       'ttsAutoPlayInCall': ttsAutoPlayInCall,
+      'autoSpeakResponse': autoSpeakResponse,
       'defaultAgentMode': defaultAgentMode,
       'harnessToken': harnessToken,
       'harnessServiceUrl': harnessServiceUrl,
@@ -380,6 +383,7 @@ class AppSettings {
       ttsSpeed: (map['ttsSpeed'] as num?)?.toDouble() ?? 1.0,
       ttsPitch: (map['ttsPitch'] as num?)?.toDouble() ?? 1.0,
       ttsAutoPlayInCall: map['ttsAutoPlayInCall'] as bool? ?? true,
+      autoSpeakResponse: map['autoSpeakResponse'] as bool? ?? false,
       defaultAgentMode: map['defaultAgentMode'] as bool? ?? false,
       harnessToken: map['harnessToken']?.toString() ?? 'sk-agent030efheg0z78491abcdef0123456789abcdef0123456789',
       harnessServiceUrl: map['harnessServiceUrl']?.toString() ?? 'http://127.0.0.1:3080',

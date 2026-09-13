@@ -160,9 +160,9 @@ class _VoiceCallScreenState extends State<VoiceCallScreen> with SingleTickerProv
         final apiKey = settings.asrApiKey.trim();
 
         final formData = FormData.fromMap({
-          'file': MultipartFile.fromBytes(audioBytes, filename: 'voice_call.wav'),
-          'audio': MultipartFile.fromBytes(audioBytes, filename: 'voice_call.wav'),
-          'audio_in': MultipartFile.fromBytes(audioBytes, filename: 'voice_call.wav'),
+          'file': MultipartFile.fromBytes(audioBytes, filename: 'voice_call.m4a'),
+          'audio': MultipartFile.fromBytes(audioBytes, filename: 'voice_call.m4a'),
+          'audio_in': MultipartFile.fromBytes(audioBytes, filename: 'voice_call.m4a'),
           if (model.isNotEmpty) 'model': model,
         });
 

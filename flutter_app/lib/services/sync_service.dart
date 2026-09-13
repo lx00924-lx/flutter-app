@@ -223,7 +223,7 @@ class SyncService {
     }
   }
 
-  /// 后台静默从服务器拉取历史消息并合并到本地 Hive
+  /// 后台静默从服务器拉取历史消息并合并到本地 Hive，同时基于服务器有效会话与本地 isSynced 状态进行双向权威对齐
   Future<int> pullAndMergeMessages({
     required String userId,
     String? clientSessionId,
@@ -233,8 +233,12 @@ class SyncService {
     if (cleanUserId.isEmpty || _isSyncing) return 0;
     _isSyncing = true;
     int importedCount = 0;
+    bool sessionListChanged = false;
 
     try {
+      // 0. 先将离线期间积压的会话删除指令补发给云端
+      await flushPendingDeletions(userId: cleanUserId, clientSessionId: clientSessionId);
+
       final url = '$serverBaseUrl/api/messages/$cleanUserId';
       final response = await _dio.get(
         url,
@@ -244,7 +248,46 @@ class SyncService {
       if (response.statusCode == 200 && response.data is List) {
         final list = response.data as List;
         final storage = StorageService.instance;
+        final pendingDeleteIds = Set<String>.from(storage.getPendingDeleteSessionIds());
 
+        // 1. 提取服务器当前权威存活且未处于本地待删队列中的会话 ID 集合
+        final serverSessionIds = <String>{};
+        for (var item in list) {
+          if (item is Map && item['sessionId'] != null) {
+            final sId = item['sessionId'].toString().trim();
+            if (sId.isNotEmpty && !pendingDeleteIds.contains(sId)) {
+              serverSessionIds.add(sId);
+            }
+          }
+        }
+
+        // 2. 检查本地所有会话，执行权威对齐与离线新会话保护：
+        final allLocalSessions = storage.getAllSessions();
+        for (var localSession in allLocalSessions) {
+          if (pendingDeleteIds.contains(localSession.id)) {
+            // 处于待删除队列的本地会话必须清除
+            await storage.deleteSession(localSession.id);
+            sessionListChanged = true;
+          } else if (localSession.isSynced && !serverSessionIds.contains(localSession.id)) {
+            // 该会话曾经成功上过云端，但服务器现已不存在 -> 说明已被其他设备删除 -> 本地级联同步清除
+            await storage.deleteSession(localSession.id);
+            sessionListChanged = true;
+          } else if (!localSession.isSynced) {
+            // 该会话是在离线/未开启服务器时本地新建的 -> 坚决不误删，将其本地消息反向补传至云端
+            final localMsgs = storage.getMessagesForSession(localSession.id);
+            if (localMsgs.isNotEmpty) {
+              await pushMessages(
+                userId: cleanUserId,
+                messages: localMsgs,
+                clientSessionId: clientSessionId,
+              );
+            }
+            localSession.isSynced = true;
+            await storage.saveSession(localSession);
+          }
+        }
+
+        // 3. 将云端新消息与会话导入本地
         final List<ChatMessage> newMessages = [];
         final Map<String, ChatSession> neededSessions = {};
 
@@ -252,7 +295,9 @@ class SyncService {
           if (item is Map) {
             try {
               final msg = ChatMessage.fromMap(item);
-              if (msg.id.isNotEmpty && !storage.hasMessage(msg.id)) {
+              if (msg.id.isNotEmpty &&
+                  !pendingDeleteIds.contains(msg.sessionId) &&
+                  !storage.hasMessage(msg.id)) {
                 newMessages.add(msg);
 
                 // 检查对应 session 是否存在
@@ -265,6 +310,7 @@ class SyncService {
                     title: title,
                     createdAt: msg.createdAt,
                     updatedAt: msg.createdAt,
+                    isSynced: true,
                   );
                 }
               }
@@ -274,7 +320,9 @@ class SyncService {
 
         // 补全缺失的会话
         for (var session in neededSessions.values) {
+          session.isSynced = true;
           await storage.saveSession(session);
+          sessionListChanged = true;
         }
 
         // 保存新消息
@@ -283,7 +331,7 @@ class SyncService {
           importedCount++;
         }
 
-        if (importedCount > 0 && onNewMessagesImported != null) {
+        if ((importedCount > 0 || sessionListChanged) && onNewMessagesImported != null) {
           onNewMessagesImported();
         }
       }
@@ -323,6 +371,18 @@ class SyncService {
         },
         options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
+
+      // 标记所涉及的本地会话已成功同步
+      final storage = StorageService.instance;
+      final sessionIds = Set<String>.from(messages.map((m) => m.sessionId).where((id) => id.isNotEmpty));
+      for (final sId in sessionIds) {
+        final allSessions = storage.getAllSessions();
+        final match = allSessions.where((s) => s.id == sId).firstOrNull;
+        if (match != null && !match.isSynced) {
+          match.isSynced = true;
+          await storage.saveSession(match);
+        }
+      }
     } catch (e) {
       _checkAndTriggerForceLogout(e);
       debugPrint('[SyncService] Push messages silent error: $e');
@@ -462,7 +522,7 @@ class SyncService {
     }
   }
 
-  /// 实时静默删除云端会话
+  /// 实时静默删除云端会话（网络失败时自动存入离线待删除队列）
   Future<void> deleteSession({
     required String userId,
     required String sessionId,
@@ -482,9 +542,45 @@ class SyncService {
         },
         options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
+      // 成功发送后从本地待重试删除队列中移除
+      await StorageService.instance.removePendingDeleteSessionId(cleanSessionId);
     } catch (e) {
       _checkAndTriggerForceLogout(e);
-      debugPrint('[SyncService] Delete session silent error: $e');
+      // 网络故障或服务器未开启，安全记入本地待重试队列
+      await StorageService.instance.addPendingDeleteSessionId(cleanSessionId);
+      debugPrint('[SyncService] Delete session recorded in pending queue: $e');
+    }
+  }
+
+  /// 补发离线期间积压的会话删除指令
+  Future<void> flushPendingDeletions({
+    required String userId,
+    String? clientSessionId,
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty) return;
+    final storage = StorageService.instance;
+    final pendingIds = storage.getPendingDeleteSessionIds();
+    if (pendingIds.isEmpty) return;
+
+    for (final sessionId in List<String>.from(pendingIds)) {
+      try {
+        final url = '$serverBaseUrl/api/delete-session';
+        final resp = await _dio.post(
+          url,
+          data: {
+            'userId': cleanUserId,
+            'sessionId': sessionId,
+          },
+          options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
+        );
+        if (resp.statusCode == 200) {
+          await storage.removePendingDeleteSessionId(sessionId);
+        }
+      } catch (e) {
+        debugPrint('[SyncService] Retry flush pending deletion failed for $sessionId: $e');
+        break; // 仍无法连接服务器时暂停后续循环
+      }
     }
   }
 
@@ -525,6 +621,46 @@ class SyncService {
       'sessions': [],
       'clientName': 'DeepSeek-Harness-Local',
     };
+  }
+
+  /// 手机 App 扫码后确认绑定/授权电脑端临时 SessionCode
+  Future<Map<String, dynamic>> confirmBridgeAuthSession({
+    required String sessionCode,
+    required String token,
+    String? account,
+  }) async {
+    final cleanCode = sessionCode.trim().toUpperCase();
+    final cleanToken = token.trim();
+    if (cleanCode.isEmpty || cleanToken.isEmpty) {
+      return {'success': false, 'message': '临时配对码或 Token 为空'};
+    }
+    try {
+      final url = '$serverBaseUrl/api/bridge/auth-confirm';
+      final resp = await _dio.post(
+        url,
+        data: {
+          'sessionCode': cleanCode,
+          'token': cleanToken,
+          'account': account ?? 'guest',
+        },
+      );
+      if (resp.statusCode == 200 && resp.data is Map) {
+        return {
+          'success': resp.data['success'] == true,
+          'message': resp.data['message']?.toString() ?? '授权成功',
+        };
+      }
+      return {
+        'success': false,
+        'message': resp.data?['error']?.toString() ?? '授权失败',
+      };
+    } catch (e) {
+      debugPrint('[SyncService] confirmBridgeAuthSession error: $e');
+      return {
+        'success': false,
+        'message': '网络或服务器异常: $e',
+      };
+    }
   }
 
   /// 经由服务器中继管道直接流式监听 Agent 执行状态与最终模型回复 (SSE 管道)

@@ -18,6 +18,7 @@ class MessageBubble extends StatelessWidget {
   final ChatMessage message;
 
   static final Map<String, Uint8List> _attachmentBytesCache = {};
+  static final Map<String, ImageProvider> _imageProviderCache = {};
 
   static bool isAudioAttachment(String att) {
     return att.startsWith('data:audio/');
@@ -50,6 +51,19 @@ class MessageBubble extends StatelessWidget {
       _attachmentBytesCache[base64Str] = bytes;
     }
     return bytes;
+  }
+
+  static ImageProvider? _getImageProvider(String att) {
+    final localPath = ImagePickerHelper.extractLocalPathFromAttachment(att);
+    final isLocalFilePresent = localPath != null && localPath.isNotEmpty && File(localPath).existsSync();
+    if (isLocalFilePresent) {
+      return _imageProviderCache.putIfAbsent(localPath, () => FileImage(File(localPath)));
+    }
+    final bytes = _getAttachmentBytes(att);
+    if (bytes != null) {
+      return _imageProviderCache.putIfAbsent(att, () => MemoryImage(bytes));
+    }
+    return null;
   }
 
   const MessageBubble({super.key, required this.message});
@@ -144,6 +158,7 @@ class MessageBubble extends StatelessWidget {
           );
           break;
         case 'read':
+          context.read<SettingsProvider>().setAutoSpeakResponse(true);
           TtsService.instance.speak(message.content, settings);
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
@@ -207,15 +222,13 @@ class MessageBubble extends StatelessWidget {
   Widget _buildImageAttachmentWidget(BuildContext context, String att, bool hasImagesOnly, bool isUser) {
     final localPath = ImagePickerHelper.extractLocalPathFromAttachment(att);
     final isLocalFilePresent = localPath != null && localPath.isNotEmpty && File(localPath).existsSync();
-    final imgBytes = _getAttachmentBytes(att);
+    final imgProvider = _getImageProvider(att);
 
-    if (!isLocalFilePresent && imgBytes == null) {
+    if (imgProvider == null) {
       return const SizedBox.shrink();
     }
 
-    final ImageProvider imgProvider = isLocalFilePresent
-        ? FileImage(File(localPath)) as ImageProvider
-        : MemoryImage(imgBytes!);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return GestureDetector(
       onTap: () {
@@ -232,6 +245,7 @@ class MessageBubble extends StatelessWidget {
                   child: Image(
                     image: imgProvider,
                     fit: BoxFit.contain,
+                    gaplessPlayback: true,
                   ),
                 ),
                 Positioned(
@@ -280,10 +294,19 @@ class MessageBubble extends StatelessWidget {
                     bottomRight: Radius.circular(isUser ? 4 : 16),
                   )
                 : BorderRadius.circular(10),
-            child: Image(
-              image: imgProvider,
-              width: double.infinity,
-              fit: BoxFit.cover,
+            child: Container(
+              color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9),
+              child: Image(
+                image: imgProvider,
+                width: double.infinity,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                errorBuilder: (ctx, err, stack) => Container(
+                  height: 120,
+                  alignment: Alignment.center,
+                  child: const Icon(Icons.broken_image_outlined, color: Colors.grey, size: 36),
+                ),
+              ),
             ),
           ),
           // 状态标签
