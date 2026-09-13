@@ -97,7 +97,6 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
         await file.writeAsBytes(bytes);
       }
       _tempFilePath = file.path;
-      _isPrepared = true;
       return _tempFilePath;
     } catch (e) {
       debugPrint('VoiceMessageBubble prepareFile failed: $e');
