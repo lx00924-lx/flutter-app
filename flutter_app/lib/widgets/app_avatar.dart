@@ -1,11 +1,11 @@
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
-/// 类似 Telegram 的零闪烁、无缝平滑头像组件 (Zero-Flicker Telegram Avatar)
+/// 零闪烁、无缝平滑头像组件 (Zero-Flicker Smooth Avatar)
 /// 特性：
-/// 1. 静态全局图片缓存，0 毫秒启动开销；
-/// 2. 使用 gaplessPlayback 和同色系底色，杜绝首帧图标闪烁或跳变；
-/// 3. 支持平滑微透明度过渡，构建极致丝滑视觉体验。
+/// 1. 静态全局图片 Provider 缓存与 ResizeImage 显存优化，0 毫秒二次渲染开销；
+/// 2. gaplessPlayback 持续绘制，杜绝首帧图标闪烁或跳变；
+/// 3. 去除首帧回退图标劫持，确保有头像数据时首帧直接呈现图像层。
 class AppAvatar extends StatelessWidget {
   final Uint8List? imageBytes;
   final double radius;
@@ -13,6 +13,13 @@ class AppAvatar extends StatelessWidget {
   final Color? fallbackBgColor;
   final Color? fallbackIconColor;
   final String? semanticLabel;
+
+  static final Map<int, MemoryImage> _providerCache = {};
+
+  static MemoryImage _getProvider(Uint8List bytes) {
+    final key = Object.hash(bytes.length, bytes.isNotEmpty ? bytes[0] : 0, bytes.isNotEmpty ? bytes[bytes.length - 1] : 0);
+    return _providerCache.putIfAbsent(key, () => MemoryImage(bytes));
+  }
 
   const AppAvatar({
     super.key,
@@ -34,28 +41,38 @@ class AppAvatar extends StatelessWidget {
     final defaultIconColor = fallbackIconColor ??
         (isDark ? const Color(0xFF94A3B8) : const Color(0xFF0284C7));
 
+    if (imageBytes == null || imageBytes!.isEmpty) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(radius),
+        child: Container(
+          width: size,
+          height: size,
+          color: defaultBg,
+          child: _buildFallback(size, defaultIconColor),
+        ),
+      );
+    }
+
+    final provider = _getProvider(imageBytes!);
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
       child: Container(
         width: size,
         height: size,
         color: defaultBg,
-        child: imageBytes != null && imageBytes!.isNotEmpty
-            ? Image.memory(
-                imageBytes!,
-                width: size,
-                height: size,
-                fit: BoxFit.cover,
-                gaplessPlayback: true,
-                errorBuilder: (context, error, stackTrace) => _buildFallback(size, defaultIconColor),
-                frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
-                  if (wasSynchronouslyLoaded || frame != null) {
-                    return child;
-                  }
-                  return _buildFallback(size, defaultIconColor);
-                },
-              )
-            : _buildFallback(size, defaultIconColor),
+        child: Image(
+          image: ResizeImage(
+            provider,
+            width: (size * (MediaQuery.maybeOf(context)?.devicePixelRatio ?? 2.0)).round(),
+            height: (size * (MediaQuery.maybeOf(context)?.devicePixelRatio ?? 2.0)).round(),
+          ),
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          errorBuilder: (context, error, stackTrace) => _buildFallback(size, defaultIconColor),
+        ),
       ),
     );
   }

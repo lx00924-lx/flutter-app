@@ -54,24 +54,51 @@ class AudioRecorderService {
       final recorder = _getRecorder();
       final hasPerm = await recorder.hasPermission();
       if (!hasPerm) {
-        debugPrint('Microphone permission denied');
+        debugPrint('Microphone permission denied or not granted yet');
         return false;
       }
 
       // 准备录音输出路径（优先使用用户在资源管理器中自定义指定的目录）
-      final filePath = await StoragePathService.instance.generateFilePath(
-        prefix: 'audio_msg',
-        extension: 'm4a',
-      );
+      String filePath;
+      try {
+        filePath = await StoragePathService.instance.generateFilePath(
+          prefix: 'audio_msg',
+          extension: 'm4a',
+        );
+      } catch (_) {
+        // 兜底使用系统临时目录
+        final tempDir = await getTemporaryDirectory();
+        final now = DateTime.now().millisecondsSinceEpoch;
+        filePath = '${tempDir.path}/audio_msg_$now.m4a';
+      }
+
+      final targetFile = File(filePath);
+      if (!targetFile.parent.existsSync()) {
+        await targetFile.parent.create(recursive: true);
+      }
+
       _currentRecordingPath = filePath;
 
-      const config = RecordConfig(
-        encoder: AudioEncoder.aacLc,
-        sampleRate: 44100,
-        bitRate: 64000,
-      );
+      // 尝试标准 AAC 编码录制
+      try {
+        const config = RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          sampleRate: 44100,
+          bitRate: 64000,
+          numChannels: 1,
+        );
+        await recorder.start(config, path: filePath);
+      } catch (encodeErr) {
+        debugPrint('AAC recording start failed, fallback to default config: $encodeErr');
+        // 降级尝试默认编码器配置
+        const fallbackConfig = RecordConfig(
+          encoder: AudioEncoder.aacLc,
+          sampleRate: 16000,
+          numChannels: 1,
+        );
+        await recorder.start(fallbackConfig, path: filePath);
+      }
 
-      await recorder.start(config, path: filePath);
       _isRecording = true;
       _recordStartTime = DateTime.now();
       return true;

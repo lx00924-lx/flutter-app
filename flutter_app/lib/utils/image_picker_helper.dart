@@ -85,8 +85,8 @@ class ImagePickerHelper {
 
   /// 处理原始图片字节：
   /// 1. 保存原图到用户指定的自定义路径 (localPath)
-  /// 2. 生成极轻量缩略图 (供云端同步与本地缓存清理后兜底回显)
-  /// 3. 生成最高支持 8K (7680px) 的超清 Base64 (供发给大模型进行顶级 OCR/视觉推理)
+  /// 2. 生成轻量缩略图 (供云端同步与本地缓存清理后兜底回显)
+  /// 3. 生成大模型超清可用 Base64
   static Future<ProcessedImageResult?> processRawImageBytes(
     Uint8List rawBytes, {
     required String extension,
@@ -103,49 +103,82 @@ class ImagePickerHelper {
                 ? 'image/gif'
                 : 'image/png';
 
-    // 1. 本地原图落盘保存到自定义路径
-    final savedPath = await StoragePathService.instance.saveRawImageToDisk(
-      bytes: rawBytes,
-      extension: ext,
-      prefix: prefix,
-    );
-
-    // 2. 生成极小缩略图 (20KB~50KB)
-    final thumbB64 = await generateThumbnail(rawBytes, mime);
-
-    // 3. 生成大模型可用图像 (最大支持 8K UHD: 7680px，不强制压缩)
-    Uint8List highResBytes = rawBytes;
-    if (rawBytes.lengthInBytes > 10 * 1024 * 1024) {
-      // 超过 10MB 时等比缩放至 8K 级别 (7680px)
-      highResBytes = await resizeImageBytes(rawBytes, maxDimension: 7680);
+    // 1. 本地原图落盘保存到自定义路径 (安全容错)
+    String? savedPath;
+    try {
+      savedPath = await StoragePathService.instance.saveRawImageToDisk(
+        bytes: rawBytes,
+        extension: ext,
+        prefix: prefix,
+      );
+    } catch (e) {
+      debugPrint('saveRawImageToDisk error: $e');
     }
-    final highResB64 = 'data:$mime;base64,${base64Encode(highResBytes)}';
+
+    // 2. 快速生成 Base64 Data URI
+    final rawBase64 = base64Encode(rawBytes);
+    final fullDataUri = 'data:$mime;base64,$rawBase64';
+
+    // 3. 生成缩略图 (若大于 200KB 则压缩缩略图，否则直接使用原图)
+    String thumbB64 = fullDataUri;
+    if (rawBytes.lengthInBytes > 200 * 1024) {
+      try {
+        final thumbBytes = await resizeImageBytes(rawBytes, maxDimension: 400);
+        thumbB64 = 'data:$mime;base64,${base64Encode(thumbBytes)}';
+      } catch (_) {
+        thumbB64 = fullDataUri;
+      }
+    }
 
     return ProcessedImageResult(
       localFilePath: savedPath,
       thumbnailBase64: thumbB64,
-      highResBase64: highResB64,
+      highResBase64: fullDataUri,
       originalBytesLength: rawBytes.lengthInBytes,
     );
   }
 
-  /// 1. 从手机系统相册选择图片
+  /// 1. 从手机系统相册选择图片（支持 ImagePicker + FilePicker 双通道双重兜底）
   static Future<ProcessedImageResult?> pickImageFromGallery() async {
     try {
       final XFile? photo = await _imagePicker.pickImage(
         source: ImageSource.gallery,
-        // 不限制分辨率，保留原始画质，最高支持 8K+
         imageQuality: 100,
       );
-      if (photo == null) return null;
-
-      final Uint8List bytes = await photo.readAsBytes();
-      final ext = photo.name.split('.').last.toLowerCase();
-      return await processRawImageBytes(bytes, extension: ext, prefix: 'gallery');
+      if (photo != null) {
+        final Uint8List bytes = await photo.readAsBytes();
+        final ext = photo.name.contains('.') ? photo.name.split('.').last.toLowerCase() : 'png';
+        return await processRawImageBytes(bytes, extension: ext, prefix: 'gallery');
+      }
     } catch (e) {
-      debugPrint('pickImageFromGallery error: $e');
-      return null;
+      debugPrint('ImagePicker gallery error, trying FilePicker fallback: $e');
     }
+
+    // 兜底通道：使用系统文件/媒体选择器
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        withData: true,
+      );
+      if (result != null && result.files.isNotEmpty) {
+        final file = result.files.first;
+        Uint8List? bytes = file.bytes;
+        if (bytes == null && file.path != null && file.path!.isNotEmpty) {
+          final ioFile = File(file.path!);
+          if (await ioFile.exists()) {
+            bytes = await ioFile.readAsBytes();
+          }
+        }
+        if (bytes != null && bytes.isNotEmpty) {
+          final ext = (file.extension ?? 'png').toLowerCase();
+          return await processRawImageBytes(bytes, extension: ext, prefix: 'gallery');
+        }
+      }
+    } catch (e2) {
+      debugPrint('FilePicker gallery fallback error: $e2');
+    }
+
+    return null;
   }
 
   /// 选择图片并直接转为 Base64 字符串（用于头像、背景图、启动图等设置项）

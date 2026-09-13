@@ -14,13 +14,25 @@ class StorageSettingsScreen extends StatefulWidget {
 
 class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
   double _cacheSizeMb = 0.0;
+  String _defaultPath = '';
   bool _isClearing = false;
   bool _isMigrating = false;
 
   @override
   void initState() {
     super.initState();
-    _refreshCacheSize();
+    _initPaths();
+  }
+
+  Future<void> _initPaths() async {
+    final defaultPath = await StoragePathService.instance.getDefaultDirectoryPath();
+    final size = await StoragePathService.instance.calculateCacheSizeMb();
+    if (mounted) {
+      setState(() {
+        _defaultPath = defaultPath;
+        _cacheSizeMb = size;
+      });
+    }
   }
 
   Future<void> _refreshCacheSize() async {
@@ -29,6 +41,35 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
       setState(() {
         _cacheSizeMb = size;
       });
+    }
+  }
+
+  /// 恢复为系统默认目录
+  Future<void> _resetToDefault() async {
+    final sp = context.read<SettingsProvider>();
+    final oldPath = sp.settings.customDataPath;
+    if (oldPath.isEmpty) return;
+
+    setState(() => _isMigrating = true);
+    final targetPath = _defaultPath.isNotEmpty
+        ? _defaultPath
+        : await StoragePathService.instance.getDefaultDirectoryPath();
+
+    final migration = await StoragePathService.instance.migrateCacheToNewDirectory(
+      oldPath: oldPath,
+      newPath: targetPath,
+    );
+
+    if (mounted) {
+      setState(() => _isMigrating = false);
+      sp.updateCustomDataPath('');
+      await _refreshCacheSize();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('已恢复为默认存储路径 (${migration.movedFilesCount} 个文件已迁回)'),
+          backgroundColor: Colors.green,
+        ),
+      );
     }
   }
 
@@ -168,22 +209,52 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
                         color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
                       ),
                     ),
-                    child: Row(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        const Icon(Icons.folder_open, size: 20, color: Color(0xFF0284C7)),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                            s.customDataPath.isNotEmpty
-                                ? s.customDataPath
-                                : '系统默认沙盒目录 (App Temporary Directory)',
-                            style: TextStyle(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w500,
-                              color: s.customDataPath.isNotEmpty
-                                  ? (isDark ? Colors.white : Colors.black87)
-                                  : Colors.grey,
+                        Row(
+                          children: [
+                            Icon(
+                              s.customDataPath.isNotEmpty ? Icons.folder_special : Icons.folder_open,
+                              size: 20,
+                              color: const Color(0xFF0284C7),
                             ),
+                            const SizedBox(width: 8),
+                            Text(
+                              s.customDataPath.isNotEmpty ? '自定义外部目录' : '默认沙盒存储目录',
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF0284C7)),
+                            ),
+                            const Spacer(),
+                            if (s.customDataPath.isNotEmpty)
+                              InkWell(
+                                onTap: _isMigrating ? null : _resetToDefault,
+                                borderRadius: BorderRadius.circular(4),
+                                child: const Padding(
+                                  padding: EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Icon(Icons.restore, size: 14, color: Colors.orange),
+                                      SizedBox(width: 4),
+                                      Text(
+                                        '恢复默认',
+                                        style: TextStyle(fontSize: 12, color: Colors.orange, fontWeight: FontWeight.bold),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        SelectableText(
+                          s.customDataPath.isNotEmpty
+                              ? s.customDataPath
+                              : (_defaultPath.isNotEmpty ? _defaultPath : '/data/user/0/com.lx.app/cache'),
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontFamily: 'monospace',
+                            color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF1E293B),
                           ),
                         ),
                       ],

@@ -4,6 +4,7 @@ import '../models/app_settings.dart';
 import '../models/chat_session.dart';
 import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
+import '../services/tts_service.dart';
 import '../utils/image_picker_helper.dart';
 import '../widgets/chat_input_bar.dart';
 import '../widgets/message_bubble.dart';
@@ -202,19 +203,28 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         actions: [
           IconButton(
+            icon: Icon(
+              settings.autoSpeakResponse ? Icons.volume_up : Icons.volume_off_outlined,
+              color: settings.autoSpeakResponse ? const Color(0xFF0284C7) : null,
+            ),
+            tooltip: settings.autoSpeakResponse ? '自动朗读：已开启 (点击关闭/打断)' : '自动朗读：已关闭 (点击开启)',
+            onPressed: () {
+              if (settings.autoSpeakResponse) {
+                // 处于开启状态或朗读中，点击关闭并立即中断当前朗读
+                TtsService.instance.stop();
+                settingsProvider.setAutoSpeakResponse(false);
+              } else {
+                // 处于关闭状态，点击开启
+                settingsProvider.setAutoSpeakResponse(true);
+              }
+            },
+          ),
+          IconButton(
             icon: const Icon(Icons.phone_in_talk_outlined),
             tooltip: '实时语音通话',
             onPressed: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const VoiceCallScreen()),
-            ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            tooltip: '系统设置',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const SettingsScreen()),
             ),
           ),
         ],
@@ -294,6 +304,18 @@ class _ChatScreenState extends State<ChatScreen> {
                   );
                 },
               ),
+              ListTile(
+                leading: const Icon(Icons.settings_outlined, size: 20),
+                title: const Text('系统设置', style: TextStyle(fontSize: 13)),
+                trailing: const Icon(Icons.chevron_right, size: 18),
+                onTap: () {
+                  Navigator.pop(context);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const SettingsScreen()),
+                  );
+                },
+              ),
             ],
           ),
         ),
@@ -368,6 +390,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     : ListView.builder(
                         controller: _scrollController,
                         padding: const EdgeInsets.symmetric(vertical: 12),
+                        cacheExtent: 600,
+                        addRepaintBoundaries: true,
                         itemCount: chat.messages.length,
                         itemBuilder: (ctx, index) {
                           return MessageBubble(message: chat.messages[index]);

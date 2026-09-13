@@ -1070,10 +1070,25 @@ async function startServer() {
           await safeWriteJSON(MESSAGES_FILE, allMessages);
         }
       });
+      // Broadcast session deletion to all connected devices of this user
+      io.to(`user_${userId}`).emit("session_deleted", { sessionId });
+      io.emit("session_deleted", { userId, sessionId });
       res.json({ success: true });
     } catch (error) {
       console.error("Delete session error:", error);
       res.status(500).json({ error: "Failed to delete session" });
+    }
+  });
+
+  // REST API for active session IDs of a user
+  app.get("/api/active-sessions/:userId", async (req, res) => {
+    try {
+      const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+      const userMessages = allMessages[req.params.userId] || [];
+      const sessionIds = Array.from(new Set(userMessages.map((m: any) => m.sessionId).filter(Boolean)));
+      res.json({ sessionIds });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to load active sessions" });
     }
   });
 
@@ -2313,6 +2328,137 @@ if %errorlevel% neq 0 (
       res.send(batContent);
     } catch (err: any) {
       res.status(500).json({ error: "Failed to generate bat script" });
+    }
+  });
+
+  // =========================================================================
+  // Bridge 扫码动态授权握手核心接口 (OAuth 2.0 Device Flow 扫码模型)
+  // =========================================================================
+  interface BridgeAuthSession {
+    sessionCode: string;
+    createdAt: number;
+    expiresAt: number;
+    status: "pending" | "confirmed" | "expired";
+    authorizedToken?: string;
+    authorizedAccount?: string;
+  }
+  const bridgeAuthSessions = new Map<string, BridgeAuthSession>();
+
+  // 定期清理过期扫码授权会话 (超过 3 分钟自动销毁)
+  setInterval(() => {
+    const now = Date.now();
+    for (const [code, sess] of bridgeAuthSessions.entries()) {
+      if (now > sess.expiresAt + 60000) {
+        bridgeAuthSessions.delete(code);
+      }
+    }
+  }, 30000);
+
+  // 1. 电脑端申请一次性扫码临时配对码
+  app.post("/api/bridge/auth-session", (req, res) => {
+    try {
+      // 生成 8 位高强度随机大写临时码
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      let code = "AUTH_";
+      for (let i = 0; i < 6; i++) {
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      const now = Date.now();
+      const expiresAt = now + 120 * 1000; // 有效期 2 分钟
+
+      bridgeAuthSessions.set(code, {
+        sessionCode: code,
+        createdAt: now,
+        expiresAt,
+        status: "pending",
+      });
+
+      res.json({
+        success: true,
+        sessionCode: code,
+        expiresIn: 120,
+        expiresAt,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 2. 手机端 App 扫码成功后，确认授权并将当前用户的 agentToken 与该临时码绑定
+  app.post("/api/bridge/auth-confirm", (req, res) => {
+    try {
+      const { sessionCode, token, account } = req.body || {};
+      const cleanCode = (sessionCode || "").toString().trim().toUpperCase();
+      const cleanToken = (token || "").toString().trim();
+
+      if (!cleanCode || !cleanToken) {
+        return res.status(400).json({ success: false, error: "缺少配对码或授权 Token" });
+      }
+
+      const sess = bridgeAuthSessions.get(cleanCode);
+      if (!sess) {
+        return res.status(404).json({ success: false, error: "配对码不存在或已失效，请重新生成" });
+      }
+
+      if (Date.now() > sess.expiresAt) {
+        sess.status = "expired";
+        return res.status(410).json({ success: false, error: "配对码已过期，请在电脑端重新生成二维码" });
+      }
+
+      // 授权成功，关联 Token
+      sess.status = "confirmed";
+      sess.authorizedToken = cleanToken;
+      sess.authorizedAccount = (account || "").toString().trim();
+
+      console.log(`[Bridge Auth] Session ${cleanCode} confirmed by user: ${sess.authorizedAccount || 'anonymous'}`);
+      res.json({
+        success: true,
+        message: "授权成功！电脑端正在自动完成握手并上线...",
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 3. 电脑端 Python 脚本轮询探测扫码状态
+  app.get("/api/bridge/auth-poll", (req, res) => {
+    try {
+      const cleanCode = ((req.query.sessionCode as string) || "").trim().toUpperCase();
+      if (!cleanCode) {
+        return res.status(400).json({ success: false, error: "缺少 sessionCode 参数" });
+      }
+
+      const sess = bridgeAuthSessions.get(cleanCode);
+      if (!sess) {
+        return res.json({ status: "expired", message: "配对码不存在或已销毁" });
+      }
+
+      if (Date.now() > sess.expiresAt) {
+        sess.status = "expired";
+        return res.json({ status: "expired", message: "配对码已过期" });
+      }
+
+      if (sess.status === "confirmed" && sess.authorizedToken) {
+        const token = sess.authorizedToken;
+        const account = sess.authorizedAccount;
+        // 安全考虑：获取一次后立即标记销毁，防止重放盗用
+        bridgeAuthSessions.delete(cleanCode);
+
+        return res.json({
+          status: "confirmed",
+          token,
+          account,
+          message: "授权成功！已下发凭证。",
+        });
+      }
+
+      // 仍在等待扫码
+      res.json({
+        status: "pending",
+        remainingSeconds: Math.max(0, Math.floor((sess.expiresAt - Date.now()) / 1000)),
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
     }
   });
 

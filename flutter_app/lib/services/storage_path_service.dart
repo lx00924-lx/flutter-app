@@ -30,6 +30,17 @@ class StoragePathService {
     _customPath = path.trim();
   }
 
+  /// 获取系统默认的缓存物理绝对路径
+  Future<String> getDefaultDirectoryPath() async {
+    if (kIsWeb) return 'Web In-Memory Cache';
+    try {
+      final dir = await getTemporaryDirectory();
+      return dir.path;
+    } catch (e) {
+      return '/data/user/0/com.lx.app/cache';
+    }
+  }
+
   /// 获取当前生效的缓存根目录（优先使用用户在资源管理器中指定的路径）
   Future<Directory> getActiveCacheDirectory() async {
     if (_customPath.isNotEmpty && !kIsWeb) {
@@ -151,7 +162,22 @@ class StoragePathService {
         await targetDir.create(recursive: true);
       }
 
+      // 预先探测目标目录写入权限
+      try {
+        final probeFile = File('${targetDir.path}/.probe_write_${DateTime.now().millisecondsSinceEpoch}.tmp');
+        await probeFile.writeAsString('ok');
+        if (await probeFile.exists()) {
+          await probeFile.delete();
+        }
+      } catch (probeErr) {
+        return CacheMigrationResult(
+          success: false,
+          error: '目标文件夹无写入权限，请选择其他目录或在系统设置中允许应用管理文件 ($probeErr)',
+        );
+      }
+
       if (!await oldDir.exists()) {
+        _customPath = newPath.trim();
         return const CacheMigrationResult(success: true, movedFilesCount: 0, movedBytes: 0);
       }
 
@@ -160,23 +186,32 @@ class StoragePathService {
 
       await for (final entity in oldDir.list(recursive: true, followLinks: false)) {
         if (entity is File) {
-          final relativeSubPath = entity.path.substring(oldDir.path.length);
-          final targetFilePath = '${targetDir.path}$relativeSubPath';
-          final targetParent = File(targetFilePath).parent;
-          if (!await targetParent.exists()) {
-            await targetParent.create(recursive: true);
-          }
+          // 仅迁移应用自身产生的多媒体与缓存原图，跳过第三方内部临时只读锁文件
+          if (!_isCacheFile(entity.path)) continue;
 
-          final fileSize = await entity.length();
           try {
-            await entity.rename(targetFilePath);
-          } catch (_) {
-            await entity.copy(targetFilePath);
-            await entity.delete();
-          }
+            final relativeSubPath = entity.path.substring(oldDir.path.length);
+            final targetFilePath = '${targetDir.path}$relativeSubPath';
+            final targetParent = File(targetFilePath).parent;
+            if (!await targetParent.exists()) {
+              await targetParent.create(recursive: true);
+            }
 
-          movedCount++;
-          totalBytes += fileSize;
+            final fileSize = await entity.length();
+            try {
+              await entity.rename(targetFilePath);
+            } catch (_) {
+              await entity.copy(targetFilePath);
+              try {
+                await entity.delete();
+              } catch (_) {}
+            }
+
+            movedCount++;
+            totalBytes += fileSize;
+          } catch (fileErr) {
+            debugPrint('单个缓存文件迁移跳过: ${entity.path} -> $fileErr');
+          }
         }
       }
 

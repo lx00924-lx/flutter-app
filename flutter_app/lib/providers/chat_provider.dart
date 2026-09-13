@@ -9,6 +9,7 @@ import '../models/chat_session.dart';
 import '../services/api_service.dart';
 import '../services/storage_service.dart';
 import '../services/sync_service.dart';
+import '../services/tts_service.dart';
 import 'settings_provider.dart';
 
 class ChatProvider extends ChangeNotifier {
@@ -24,8 +25,26 @@ class ChatProvider extends ChangeNotifier {
   StreamSubscription? _streamSub;
   CancelToken? _cancelToken;
 
+  Timer? _periodicSyncTimer;
+
   ChatProvider(this.settingsProvider) {
     loadSessions();
+    _startPeriodicSync();
+  }
+
+  void _startPeriodicSync() {
+    _periodicSyncTimer?.cancel();
+    _periodicSyncTimer = Timer.periodic(const Duration(seconds: 12), (_) {
+      if (!_isGenerating) {
+        _silentSyncFromServer();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _periodicSyncTimer?.cancel();
+    super.dispose();
   }
 
   Future<bool> isNetworkOnline() async {
@@ -90,9 +109,18 @@ class ChatProvider extends ChangeNotifier {
 
   void loadSessions() {
     _sessions = _storage.getAllSessions();
-    if (_sessions.isNotEmpty) {
+    // 启动或从存储重新载入时：检查当前选中会话是否依然有效且存在于列表中
+    final currentId = _currentSession?.id;
+    if (currentId != null && _sessions.any((s) => s.id == currentId)) {
+      // 仍然存在，更新引用并拉取最新消息
+      _currentSession = _sessions.firstWhere((s) => s.id == currentId);
+      _messages = _storage.getMessagesForSession(currentId);
+      notifyListeners();
+    } else if (_sessions.isNotEmpty) {
+      // 当前选中的会话已不在列表中或尚未初始化，自动选中第一个有效会话
       selectSession(_sessions.first);
     } else {
+      // 列表为空，自动创建全新干净会话
       createNewSession();
     }
   }
@@ -104,11 +132,26 @@ class ChatProvider extends ChangeNotifier {
       clientSessionId: settingsProvider.clientSessionId,
       onNewMessagesImported: () {
         _sessions = _storage.getAllSessions();
-        if (currentSessionId != null && _storage.hasSession(currentSessionId)) {
+        // 如果当前选中的会话依然存在于会话列表中且在本地数据库中有效
+        if (currentSessionId != null && _sessions.any((s) => s.id == currentSessionId) && _storage.hasSession(currentSessionId)) {
+          _currentSession = _sessions.firstWhere((s) => s.id == currentSessionId);
           _messages = _storage.getMessagesForSession(currentSessionId);
         } else if (_sessions.isNotEmpty) {
+          // 当前选中的会话已不在列表中（可能在其他端被删除或被离线队列清除），自动切至第一个会话
           _currentSession = _sessions.first;
           _messages = _storage.getMessagesForSession(_sessions.first.id);
+        } else {
+          // 若全部被清空，自动新建一个干净对话
+          final newSession = ChatSession(
+            id: const Uuid().v4(),
+            title: '新对话 ${DateTime.now().hour}:${DateTime.now().minute.toString().padLeft(2, '0')}',
+            model: settingsProvider.activeModelDisplayName,
+            isSynced: false,
+          );
+          _storage.saveSession(newSession);
+          _sessions = [newSession];
+          _currentSession = newSession;
+          _messages = [];
         }
         notifyListeners();
       },
@@ -159,6 +202,9 @@ class ChatProvider extends ChangeNotifier {
   }
 
   void deleteSession(String sessionId) {
+    final target = _sessions.where((s) => s.id == sessionId).firstOrNull;
+    final wasSynced = target?.isSynced ?? true;
+
     _storage.deleteSession(sessionId);
     _sessions.removeWhere((s) => s.id == sessionId);
     if (_currentSession?.id == sessionId) {
@@ -170,22 +216,31 @@ class ChatProvider extends ChangeNotifier {
     } else {
       notifyListeners();
     }
-    SyncService.instance.deleteSession(
-      userId: settingsProvider.syncUserId,
-      sessionId: sessionId,
-      clientSessionId: settingsProvider.clientSessionId,
-    );
+
+    // 只有曾经成功同步过云端的会话才需要向云端发起删除通知或存入重发队列
+    if (wasSynced) {
+      SyncService.instance.deleteSession(
+        userId: settingsProvider.syncUserId,
+        sessionId: sessionId,
+        clientSessionId: settingsProvider.clientSessionId,
+      );
+    }
   }
 
   void deleteSessions(List<String> sessionIds) {
     if (sessionIds.isEmpty) return;
     for (final id in sessionIds) {
+      final target = _sessions.where((s) => s.id == id).firstOrNull;
+      final wasSynced = target?.isSynced ?? true;
+
       _storage.deleteSession(id);
-      SyncService.instance.deleteSession(
-        userId: settingsProvider.syncUserId,
-        sessionId: id,
-        clientSessionId: settingsProvider.clientSessionId,
-      );
+      if (wasSynced) {
+        SyncService.instance.deleteSession(
+          userId: settingsProvider.syncUserId,
+          sessionId: id,
+          clientSessionId: settingsProvider.clientSessionId,
+        );
+      }
     }
     _sessions.removeWhere((s) => sessionIds.contains(s.id));
     if (_currentSession != null && sessionIds.contains(_currentSession!.id)) {
@@ -399,6 +454,11 @@ class ChatProvider extends ChangeNotifier {
               _isGenerating = false;
               _cancelToken = null;
               notifyListeners();
+
+              // 若开启了自动朗读，自动朗读本次回复内容
+              if (settingsProvider.settings.autoSpeakResponse && assistantMsg.content.trim().isNotEmpty) {
+                TtsService.instance.speak(assistantMsg.content.trim(), settingsProvider.settings);
+              }
               return;
             }
 
@@ -458,6 +518,11 @@ class ChatProvider extends ChangeNotifier {
               _isGenerating = false;
               _cancelToken = null;
               notifyListeners();
+
+              // 若开启了自动朗读，自动朗读本次回复内容
+              if (settingsProvider.settings.autoSpeakResponse && assistantMsg.content.trim().isNotEmpty) {
+                TtsService.instance.speak(assistantMsg.content.trim(), settingsProvider.settings);
+              }
 
               // 异步后台检测是否触发上下文滑动截断与自动摘要生成
               _checkAndTriggerBackgroundSummary();
