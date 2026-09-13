@@ -148,7 +148,7 @@ class SettingsScreen extends StatelessWidget {
           ),
           const SizedBox(height: 10),
 
-          // 2. GitHub 更新设置
+          // 2. GitHub 官方更新源 (随应用打包发布锁定)
           Card(
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             child: Padding(
@@ -159,8 +159,8 @@ class SettingsScreen extends StatelessWidget {
                   Row(
                     children: [
                       const Icon(Icons.cloud_sync_outlined, color: Color(0xFF0284C7)),
-                      SizedBox(width: 8),
-                      const Text('GitHub 更新设置', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                      const SizedBox(width: 8),
+                      const Text('GitHub 官方发布源', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
                       const Spacer(),
                       ElevatedButton(
                         style: ElevatedButton.styleFrom(
@@ -181,12 +181,26 @@ class SettingsScreen extends StatelessWidget {
                   Row(
                     children: [
                       Expanded(
-                        child: Text(
-                          '仓库: ${s.githubOwner} / ${s.githubRepo}',
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
-                          ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '官方仓库：${AppSettings.officialGithubOwner} / ${AppSettings.officialGithubRepo}',
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF1E293B),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '随编译打包固件锁定，自动检测 Releases 发版通道',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ],

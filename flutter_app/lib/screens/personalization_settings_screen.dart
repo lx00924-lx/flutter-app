@@ -91,19 +91,6 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
     return Scaffold(
       appBar: AppBar(
         title: const Text('个性化设置'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.check),
-            tooltip: '保存',
-            onPressed: () {
-              FocusScope.of(context).unfocus();
-              _savePersonalization();
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('个性化设置已保存')),
-              );
-            },
-          ),
-        ],
       ),
       body: GestureDetector(
         behavior: HitTestBehavior.translucent,

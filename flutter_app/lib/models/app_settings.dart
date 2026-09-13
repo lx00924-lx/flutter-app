@@ -139,9 +139,17 @@ class AppSettings {
   String agentPermission; // 'workspace-write' | 'read-only' | 'full-access'
   String agentModel; // 'deepseek-v4-flash'
 
+  // --- 打包固件常量 (随每次打包发布更新，不可被缓存篡改) ---
+  static const String officialGithubOwner = 'lx00924-lx';
+  static const String officialGithubRepo = 'flutter-app';
+  static const String officialGithubUrl = 'https://github.com/lx00924-lx/flutter-app';
+  static const String officialGithubReleasesUrl = 'https://github.com/lx00924-lx/flutter-app/releases';
+
   // --- 直接展示项 ---
-  String githubOwner;
-  String githubRepo;
+  String get githubOwner => officialGithubOwner;
+  String get githubRepo => officialGithubRepo;
+  set githubOwner(String _) {} // 忽略旧缓存写入
+  set githubRepo(String _) {} // 忽略旧缓存写入
   String customDataPath;
   bool showDebugFab;
 
@@ -201,8 +209,8 @@ class AppSettings {
     this.agentPermission = 'workspace-write',
     this.agentModel = 'deepseek-v4-flash',
     // 辅助
-    this.githubOwner = 'lx00924-lx',
-    this.githubRepo = 'flutter-app',
+    String? githubOwner,
+    String? githubRepo,
     this.customDataPath = '',
     this.showDebugFab = false,
   }) : apiEndpoints = apiEndpoints ?? [

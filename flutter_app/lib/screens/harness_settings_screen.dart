@@ -412,18 +412,6 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('DeepSeek Harness 设置'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.qr_code_scanner),
-            tooltip: '扫码配对',
-            onPressed: _showQrScanPairingDialog,
-          ),
-          IconButton(
-            icon: const Icon(Icons.check),
-            tooltip: '保存',
-            onPressed: _save,
-          ),
-        ],
       ),
       body: GestureDetector(
         behavior: HitTestBehavior.translucent,
