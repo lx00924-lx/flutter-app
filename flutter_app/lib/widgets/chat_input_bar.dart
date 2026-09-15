@@ -2,7 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/chat_message.dart';
 import '../providers/chat_provider.dart';
@@ -30,7 +32,7 @@ class ChatInputBar extends StatefulWidget {
 
 class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderStateMixin {
   final TextEditingController _controller = TextEditingController();
-  final FocusNode _focusNode = FocusNode();
+  late final FocusNode _focusNode;
   bool _hasText = false;
   bool _isMenuOpen = false;
 
@@ -53,6 +55,40 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   @override
   void initState() {
     super.initState();
+    _focusNode = FocusNode(
+      onKeyEvent: (node, event) {
+        if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+        // 仅电脑桌面端（Windows / macOS / Linux）支持键盘快捷回车发送，手机端保持原生软键盘换行
+        final isDesktop = !kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux);
+        if (!isDesktop) return KeyEventResult.ignored;
+
+        final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
+            event.logicalKey == LogicalKeyboardKey.numpadEnter;
+        if (!isEnter) return KeyEventResult.ignored;
+
+        final isShiftPressed = HardwareKeyboard.instance.isShiftPressed;
+        final sp = context.read<SettingsProvider>();
+        final sendOnEnter = sp.settings.sendOnEnter;
+
+        if (sendOnEnter) {
+          // 开启状态：Enter 直接发送消息，Shift + Enter 另起一行
+          if (!isShiftPressed) {
+            _handleSend();
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        } else {
+          // 关闭状态：Enter 另起一行，Shift + Enter 发送消息
+          if (isShiftPressed) {
+            _handleSend();
+            return KeyEventResult.handled;
+          }
+          return KeyEventResult.ignored;
+        }
+      },
+    );
+
     _controller.addListener(() {
       final has = _controller.text.trim().isNotEmpty;
       if (has != _hasText) {
@@ -123,12 +159,6 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     final newMode = !s.defaultAgentMode;
     s.defaultAgentMode = newMode;
     sp.updateSettings(s);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(newMode ? '⚡ 已切换至 DeepSeek Agent 自动化模式' : '✨ 已切换至普通大模型对话模式'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
   }
 
   // 1. 发送图片：调用原生相册
@@ -748,54 +778,52 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                       // 麦克风录音控制 (在同一个按钮中无缝融合长按与点按双模式)
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                        child: _isRecording
-                            ? InkResponse(
-                                onTap: () => _stopRecording(cancelled: false),
-                                radius: 24,
-                                child: Container(
-                                  padding: const EdgeInsets.all(8),
-                                  decoration: const BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    color: Color(0xFFEF4444),
-                                  ),
-                                  child: const Icon(
-                                    Icons.stop_rounded,
-                                    size: 20,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              )
-                            : GestureDetector(
-                                behavior: HitTestBehavior.opaque,
-                                onTap: _toggleClickRecording,
-                                onLongPressStart: (details) {
-                                  _longPressStartY = details.globalPosition.dy;
-                                  _startRecording(isLongPress: true);
-                                },
-                                onLongPressMoveUpdate: (details) {
-                                  if (_isRecording && _isLongPress) {
-                                    final deltaY = _longPressStartY - details.globalPosition.dy;
-                                    final cancelling = deltaY > 50; // 向上滑动超过 50 像素触发取消
-                                    if (cancelling != _isSlideCancelling) {
-                                      setState(() => _isSlideCancelling = cancelling);
-                                    }
-                                  }
-                                },
-                                onLongPressEnd: (_) => _stopRecording(cancelled: _isSlideCancelling),
-                                onLongPressCancel: () => _stopRecording(cancelled: true),
-                                child: Container(
-                                  padding: const EdgeInsets.all(8),
-                                  decoration: const BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    color: Colors.transparent,
-                                  ),
-                                  child: Icon(
-                                    Icons.mic_none_outlined,
-                                    size: 22,
-                                    color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
-                                  ),
-                                ),
-                              ),
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () {
+                            if (_isRecording) {
+                              _stopRecording(cancelled: false);
+                            } else {
+                              _toggleClickRecording();
+                            }
+                          },
+                          onLongPressStart: (details) {
+                            if (!_isRecording) {
+                              _longPressStartY = details.globalPosition.dy;
+                              _startRecording(isLongPress: true);
+                            }
+                          },
+                          onLongPressMoveUpdate: (details) {
+                            if (_isRecording && _isLongPress) {
+                              final deltaY = _longPressStartY - details.globalPosition.dy;
+                              final cancelling = deltaY > 35; // 向上滑动超过 35 像素触发取消
+                              if (cancelling != _isSlideCancelling) {
+                                setState(() => _isSlideCancelling = cancelling);
+                              }
+                            }
+                          },
+                          onLongPressEnd: (_) => _stopRecording(cancelled: _isSlideCancelling),
+                          onLongPressCancel: () => _stopRecording(cancelled: true),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 150),
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: _isRecording
+                                  ? (_isSlideCancelling ? const Color(0xFFEF4444) : const Color(0xFF0284C7))
+                                  : Colors.transparent,
+                            ),
+                            child: Icon(
+                              _isRecording
+                                  ? (_isSlideCancelling ? Icons.cancel_outlined : Icons.stop_rounded)
+                                  : Icons.mic_none_outlined,
+                              size: 20,
+                              color: _isRecording
+                                  ? Colors.white
+                                  : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                            ),
+                          ),
+                        ),
                       ),
                     ],
                   ),

@@ -1,4 +1,6 @@
+import 'dart:io' show Platform;
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
@@ -327,6 +329,41 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
             ),
           ),
           const SizedBox(height: 16),
+
+          // 电脑端专属：回车发送消息设置 (手机端不显示)
+          if (!kIsWeb && (Platform.isWindows || Platform.isMacOS || Platform.isLinux)) ...[
+            Card(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              child: SwitchListTile(
+                value: s.sendOnEnter,
+                title: const Row(
+                  children: [
+                    Icon(Icons.keyboard_return_outlined, color: Color(0xFF0284C7), size: 20),
+                    SizedBox(width: 8),
+                    Text('回车发送消息', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                subtitle: Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    s.sendOnEnter
+                        ? '已开启：按 Enter 发送消息，Shift + Enter 换行'
+                        : '已关闭：按 Enter 换行，Shift + Enter 发送消息',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+                    ),
+                  ),
+                ),
+                activeColor: const Color(0xFF0284C7),
+                onChanged: (val) {
+                  s.sendOnEnter = val;
+                  sp.updateSettings(s);
+                },
+              ),
+            ),
+            const SizedBox(height: 16),
+          ],
 
           // 系统回复逻辑 (System Prompt) - 自适应文字长度，弹性向下延展
           Card(

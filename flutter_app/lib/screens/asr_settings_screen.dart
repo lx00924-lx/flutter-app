@@ -51,54 +51,27 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
     _ttsModelCtrl = TextEditingController(text: s.ttsModel);
     _ttsVoiceCtrl = TextEditingController(text: s.ttsVoice);
     _ttsKeyCtrl = TextEditingController(text: s.ttsApiKey);
+  }
 
-    // 监听与持久化
-    _httpCtrl.addListener(() {
-      final sp = context.read<SettingsProvider>();
-      sp.settings.asrHttpEndpoint = _httpCtrl.text.trim();
-      sp.updateSettings(sp.settings);
-    });
-    _wsCtrl.addListener(() {
-      final sp = context.read<SettingsProvider>();
-      sp.settings.asrWsEndpoint = _wsCtrl.text.trim();
-      sp.updateSettings(sp.settings);
-    });
-    _modelCtrl.addListener(() {
-      final sp = context.read<SettingsProvider>();
-      sp.settings.asrModel = _modelCtrl.text.trim();
-      sp.updateSettings(sp.settings);
-    });
-    _keyCtrl.addListener(() {
-      final sp = context.read<SettingsProvider>();
-      sp.settings.asrApiKey = _keyCtrl.text.trim();
-      sp.updateSettings(sp.settings);
-    });
-
-    _ttsHttpCtrl.addListener(() {
-      final sp = context.read<SettingsProvider>();
-      sp.settings.ttsHttpEndpoint = _ttsHttpCtrl.text.trim();
-      sp.updateSettings(sp.settings);
-    });
-    _ttsModelCtrl.addListener(() {
-      final sp = context.read<SettingsProvider>();
-      sp.settings.ttsModel = _ttsModelCtrl.text.trim();
-      sp.updateSettings(sp.settings);
-    });
-    _ttsVoiceCtrl.addListener(() {
-      final sp = context.read<SettingsProvider>();
-      sp.settings.ttsVoice = _ttsVoiceCtrl.text.trim();
-      sp.updateSettings(sp.settings);
-    });
-    _ttsKeyCtrl.addListener(() {
-      final sp = context.read<SettingsProvider>();
-      sp.settings.ttsApiKey = _ttsKeyCtrl.text.trim();
-      sp.updateSettings(sp.settings);
-    });
+  void _saveAllSilent() {
+    if (!mounted) return;
+    final sp = context.read<SettingsProvider>();
+    final s = sp.settings;
+    s.asrHttpEndpoint = _httpCtrl.text.trim();
+    s.asrWsEndpoint = _wsCtrl.text.trim();
+    s.asrModel = _modelCtrl.text.trim();
+    s.asrApiKey = _keyCtrl.text.trim();
+    s.ttsHttpEndpoint = _ttsHttpCtrl.text.trim();
+    s.ttsModel = _ttsModelCtrl.text.trim();
+    s.ttsVoice = _ttsVoiceCtrl.text.trim();
+    s.ttsApiKey = _ttsKeyCtrl.text.trim();
+    sp.updateSettings(s);
   }
 
   @override
   void dispose() {
     _tabController.dispose();
+    _saveAllSilent();
     _httpCtrl.dispose();
     _wsCtrl.dispose();
     _modelCtrl.dispose();
@@ -129,6 +102,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
       _wsCtrl.text = 'ws://127.0.0.1:10095';
       _modelCtrl.text = 'damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch';
     }
+    _saveAllSilent();
     setState(() {});
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('已应用 $name 语音识别预设配置')),
@@ -212,12 +186,18 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
   }
 
   Future<void> _testHttp() async {
-    final endpoint = _httpCtrl.text.trim();
+    String endpoint = _httpCtrl.text.trim();
     if (endpoint.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('请先输入转写 HTTP 接口地址')),
       );
       return;
+    }
+
+    // 智能修正末尾路径：若用户只填了基路径（如 /v1/audio 或 /v1/audio/），自动规范化补齐
+    if (endpoint.endsWith('/v1/audio') || endpoint.endsWith('/v1/audio/')) {
+      endpoint = '${endpoint.replaceAll(RegExp(r'/+$'), '')}/transcriptions';
+      _httpCtrl.text = endpoint;
     }
 
     setState(() => _isTestingHttp = true);
@@ -228,22 +208,28 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
       final model = _modelCtrl.text.trim();
       final apiKey = _keyCtrl.text.trim();
 
-      final formData = FormData.fromMap({
+      // 标准 OpenAI / 硅基流动 ASR 表单规范：单文件 file + model
+      final formMap = <String, dynamic>{
         'file': MultipartFile.fromBytes(wavBytes, filename: 'test.wav'),
-        'audio': MultipartFile.fromBytes(wavBytes, filename: 'test.wav'),
-        'audio_in': MultipartFile.fromBytes(wavBytes, filename: 'test.wav'),
         if (model.isNotEmpty) 'model': model,
-      });
+      };
+      // 针对自建 FunASR 等服务兼容补充备用字段
+      if (endpoint.contains('10095') || endpoint.contains('funasr')) {
+        formMap['audio'] = MultipartFile.fromBytes(wavBytes, filename: 'test.wav');
+      }
+      final formData = FormData.fromMap(formMap);
 
-      final headers = <String, dynamic>{};
+      final headers = <String, dynamic>{
+        'Connection': 'close', // 显式关闭长连接，杜绝移动端半开连接池导致的二次请求超时
+      };
       if (apiKey.isNotEmpty) {
         headers['Authorization'] = 'Bearer $apiKey';
         headers['x-asr-api-key'] = apiKey;
       }
 
       final dio = Dio(BaseOptions(
-        connectTimeout: const Duration(seconds: 12),
-        receiveTimeout: const Duration(seconds: 15),
+        connectTimeout: const Duration(seconds: 25),
+        receiveTimeout: const Duration(seconds: 30),
         headers: headers,
       ));
 
@@ -675,9 +661,13 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
                         divisions: 15,
                         label: '${s.ttsSpeed.toStringAsFixed(1)}x',
                         onChanged: (val) {
+                          setState(() {
+                            s.ttsSpeed = val;
+                          });
+                        },
+                        onChangeEnd: (val) {
                           s.ttsSpeed = val;
                           sp.updateSettings(s);
-                          setState(() {});
                         },
                       ),
                       const SizedBox(height: 8),
@@ -695,9 +685,13 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
                         divisions: 10,
                         label: '${s.ttsPitch.toStringAsFixed(1)}x',
                         onChanged: (val) {
+                          setState(() {
+                            s.ttsPitch = val;
+                          });
+                        },
+                        onChangeEnd: (val) {
                           s.ttsPitch = val;
                           sp.updateSettings(s);
-                          setState(() {});
                         },
                       ),
                       const Divider(height: 24),

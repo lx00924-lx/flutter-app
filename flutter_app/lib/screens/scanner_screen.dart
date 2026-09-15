@@ -201,33 +201,7 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
 
               return Stack(
                 children: [
-                  ColorFiltered(
-                    colorFilter: ColorFilter.mode(
-                      Colors.black.withOpacity(0.55),
-                      BlendMode.srcOut,
-                    ),
-                    child: Stack(
-                      children: [
-                        Container(
-                          decoration: const BoxDecoration(
-                            color: Colors.transparent,
-                          ),
-                        ),
-                        Align(
-                          alignment: Alignment.center,
-                          child: Container(
-                            margin: const EdgeInsets.only(bottom: 80),
-                            width: scanBoxSize,
-                            height: scanBoxSize,
-                            decoration: BoxDecoration(
-                              color: Colors.black,
-                              borderRadius: BorderRadius.circular(16),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                  // 100% 透明全景取景，无任何遮罩黑块
 
                   // 扫描框边角修饰与对准线
                   Positioned(
@@ -238,7 +212,14 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
                     child: Container(
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: const Color(0xFF0284C7), width: 2),
+                        border: Border.all(color: const Color(0xFF0284C7), width: 2.5),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFF0284C7).withOpacity(0.25),
+                            blurRadius: 12,
+                            spreadRadius: 2,
+                          ),
+                        ],
                       ),
                       child: AnimatedBuilder(
                         animation: _animLine,

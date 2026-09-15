@@ -1,0 +1,17 @@
+# Visual Studio cache directory
+.vs/
+
+# User-specific files
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build outputs
+CMakeSettings.json
+x64/
+x86/
+build/
+CMakeFiles/
+CMakeCache.txt
+*.dir/

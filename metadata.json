@@ -1,11 +1,7 @@
 {
-  "name": "AI",
-  "description": "一个具有沉浸式 UI 的智能 AI 聊天应用，支持文本、图片和语音交互。",
-  "requestFramePermissions": [
-    "screen-wake-lock",
-    "microphone",
-    "camera"
-  ],
+  "name": "LxAI - 跨端私有 Agent 智能控制中枢",
+  "description": "LxAI 官方开源介绍与下载门户。纯原生 Flutter 多端客户端、云端高性能中继与电脑端反向穿透，随时随地连接私有模型与工作区。",
+  "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]

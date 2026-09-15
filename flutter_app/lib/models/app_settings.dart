@@ -103,6 +103,7 @@ class AppSettings {
   
   // 回复逻辑 (System Prompt)
   String systemPrompt;
+  bool sendOnEnter; // 桌面端回车发送消息（默认 true: 回车发送、Shift+回车换行；false: 回车换行、Shift+回车发送）
 
   // --- 3. 大模型 API 卡片列表 ---
   List<ApiModelEndpoint> apiEndpoints;
@@ -140,6 +141,8 @@ class AppSettings {
   String agentModel; // 'deepseek-v4-flash'
 
   // --- 打包固件常量 (随每次打包发布更新，不可被缓存篡改) ---
+  static const String currentVersion = '1.0.1';
+  static const int currentBuildNumber = 101;
   static const String officialGithubOwner = 'lx00924-lx';
   static const String officialGithubRepo = 'flutter-app';
   static const String officialGithubUrl = 'https://github.com/lx00924-lx/flutter-app';
@@ -177,6 +180,7 @@ class AppSettings {
     this.splashDurationMs = 1000,
     this.splashImage = '',
     this.systemPrompt = '你是一个专业、诚实、乐于助人的 AI 助手。',
+    this.sendOnEnter = true,
     // API 端点列表
     List<ApiModelEndpoint>? apiEndpoints,
     // ASR
@@ -262,6 +266,7 @@ class AppSettings {
       'splashDurationMs': splashDurationMs,
       'splashImage': splashImage,
       'systemPrompt': systemPrompt,
+      'sendOnEnter': sendOnEnter,
       'apiEndpoints': apiEndpoints.map((e) => e.toMap()).toList(),
       'asrProvider': asrProvider,
       'asrHttpEndpoint': asrHttpEndpoint,
@@ -376,6 +381,7 @@ class AppSettings {
       splashDurationMs: (map['splashDurationMs'] as num?)?.toInt() ?? 1000,
       splashImage: map['splashImage']?.toString() ?? '',
       systemPrompt: map['systemPrompt']?.toString() ?? '你是一个专业、诚实、乐于助人的 AI 助手。',
+      sendOnEnter: map['sendOnEnter'] as bool? ?? true,
       apiEndpoints: endpoints,
       asrProvider: map['asrProvider']?.toString() ?? 'siliconflow',
       asrHttpEndpoint: map['asrHttpEndpoint']?.toString() ?? 'https://api.siliconflow.cn/v1/audio/transcriptions',

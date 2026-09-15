@@ -138,8 +138,36 @@ class ImagePickerHelper {
     );
   }
 
-  /// 1. 从手机系统相册选择图片（支持 ImagePicker + FilePicker 双通道双重兜底）
+  /// 1. 从手机系统相册选择图片（优先调起系统应用分发意图，让用户直接选择“图片库/相册”，双通道安全兜底）
   static Future<ProcessedImageResult?> pickImageFromGallery() async {
+    // 优先通道：使用标准系统媒体选择意图 (ACTION_GET_CONTENT)，直接唤起多相册选择面板
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        withData: true,
+      );
+      if (result != null && result.files.isNotEmpty) {
+        final file = result.files.first;
+        Uint8List? bytes = file.bytes;
+        if ((bytes == null || bytes.isEmpty) && file.path != null && file.path!.isNotEmpty) {
+          final ioFile = File(file.path!);
+          if (await ioFile.exists()) {
+            bytes = await ioFile.readAsBytes();
+          }
+        }
+        if (bytes != null && bytes.isNotEmpty) {
+          final ext = (file.extension ?? (file.name.contains('.') ? file.name.split('.').last : 'png')).toLowerCase();
+          return await processRawImageBytes(bytes, extension: ext, prefix: 'gallery');
+        }
+      } else if (result == null) {
+        // 用户主动取消选择
+        return null;
+      }
+    } catch (e) {
+      debugPrint('FilePicker gallery primary failed, fallback to ImagePicker: $e');
+    }
+
+    // 备用通道：ImagePicker 兜底
     try {
       final XFile? photo = await _imagePicker.pickImage(
         source: ImageSource.gallery,
@@ -150,32 +178,8 @@ class ImagePickerHelper {
         final ext = photo.name.contains('.') ? photo.name.split('.').last.toLowerCase() : 'png';
         return await processRawImageBytes(bytes, extension: ext, prefix: 'gallery');
       }
-    } catch (e) {
-      debugPrint('ImagePicker gallery error, trying FilePicker fallback: $e');
-    }
-
-    // 兜底通道：使用系统文件/媒体选择器
-    try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.image,
-        withData: true,
-      );
-      if (result != null && result.files.isNotEmpty) {
-        final file = result.files.first;
-        Uint8List? bytes = file.bytes;
-        if (bytes == null && file.path != null && file.path!.isNotEmpty) {
-          final ioFile = File(file.path!);
-          if (await ioFile.exists()) {
-            bytes = await ioFile.readAsBytes();
-          }
-        }
-        if (bytes != null && bytes.isNotEmpty) {
-          final ext = (file.extension ?? 'png').toLowerCase();
-          return await processRawImageBytes(bytes, extension: ext, prefix: 'gallery');
-        }
-      }
     } catch (e2) {
-      debugPrint('FilePicker gallery fallback error: $e2');
+      debugPrint('ImagePicker gallery fallback error: $e2');
     }
 
     return null;
@@ -184,25 +188,23 @@ class ImagePickerHelper {
   /// 选择图片并直接转为 Base64 字符串（用于头像、背景图、启动图等设置项）
   static Future<String?> pickImageAsBase64({int maxDimension = 1024}) async {
     try {
-      final XFile? photo = await _imagePicker.pickImage(
-        source: ImageSource.gallery,
-        imageQuality: 85,
-      );
-      if (photo == null) return null;
+      final processed = await pickImageFromGallery();
+      if (processed == null) return null;
 
-      Uint8List bytes = await photo.readAsBytes();
       if (maxDimension > 0) {
-        bytes = await resizeImageBytes(bytes, maxDimension: maxDimension);
+        final rawBase64 = processed.highResBase64.contains(',')
+            ? processed.highResBase64.split(',').last
+            : processed.highResBase64;
+        final rawBytes = base64Decode(rawBase64);
+        final resized = await resizeImageBytes(rawBytes, maxDimension: maxDimension);
+        final mime = processed.highResBase64.startsWith('data:image/jpeg')
+            ? 'image/jpeg'
+            : processed.highResBase64.startsWith('data:image/webp')
+                ? 'image/webp'
+                : 'image/png';
+        return 'data:$mime;base64,${base64Encode(resized)}';
       }
-      final ext = photo.name.split('.').last.toLowerCase();
-      final mime = (ext == 'jpg' || ext == 'jpeg')
-          ? 'image/jpeg'
-          : ext == 'webp'
-              ? 'image/webp'
-              : ext == 'gif'
-                  ? 'image/gif'
-                  : 'image/png';
-      return 'data:$mime;base64,${base64Encode(bytes)}';
+      return processed.highResBase64;
     } catch (e) {
       debugPrint('pickImageAsBase64 error: $e');
       return null;
