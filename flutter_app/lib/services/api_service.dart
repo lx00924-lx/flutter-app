@@ -193,25 +193,37 @@ class ApiService {
       currentLength += msgLen;
 
       if (attachments != null && attachments.isNotEmpty) {
-        // 多模态 content 格式 (OpenAI / Vision 标准兼容)
-        final List<Map<String, dynamic>> multiContent = [];
-        if (content.isNotEmpty) {
-          multiContent.add({'type': 'text', 'text': content});
-        }
-        for (final att in attachments) {
-          if (att.startsWith('data:image/')) {
-            multiContent.add({
-              'type': 'image_url',
-              'image_url': {'url': att, 'detail': 'high'}
-            });
-          } else if (att.startsWith('data:application/octet-stream')) {
-            multiContent.add({'type': 'text', 'text': '[文件附件]'});
+        final hasImages = attachments.any((att) => att.startsWith('data:image/'));
+        if (hasImages) {
+          // 多模态 Vision content 格式 (OpenAI 标准兼容)
+          final List<Map<String, dynamic>> multiContent = [];
+          if (content.isNotEmpty) {
+            multiContent.add({'type': 'text', 'text': content});
           }
+          for (final att in attachments) {
+            if (att.startsWith('data:image/')) {
+              multiContent.add({
+                'type': 'image_url',
+                'image_url': {'url': att, 'detail': 'high'}
+              });
+            } else if (att.startsWith('data:application/octet-stream')) {
+              multiContent.add({'type': 'text', 'text': '[文件附件]'});
+            }
+          }
+          reversedSelected.add({
+            'role': role,
+            'content': multiContent.isNotEmpty ? multiContent : content,
+          });
+        } else {
+          // 无图片：纯文本大模型（DeepSeek等）使用平铺字符串 content，避免多模态结构导致报错
+          final textPayload = content.isNotEmpty
+              ? content
+              : (attachments.any((att) => att.startsWith('data:audio/')) ? '[语音消息]' : '[文件附件]');
+          reversedSelected.add({
+            'role': role,
+            'content': textPayload,
+          });
         }
-        reversedSelected.add({
-          'role': role,
-          'content': multiContent.isNotEmpty ? multiContent : content,
-        });
       } else {
         reversedSelected.add({
           'role': role,

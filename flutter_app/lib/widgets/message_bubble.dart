@@ -16,6 +16,7 @@ import 'voice_message_bubble.dart';
 
 class MessageBubble extends StatelessWidget {
   final ChatMessage message;
+  final bool isLatestAssistant;
 
   static final Map<String, Uint8List> _attachmentBytesCache = {};
   static final Map<String, ImageProvider> _imageProviderCache = {};
@@ -66,7 +67,11 @@ class MessageBubble extends StatelessWidget {
     return null;
   }
 
-  const MessageBubble({super.key, required this.message});
+  const MessageBubble({
+    super.key,
+    required this.message,
+    this.isLatestAssistant = false,
+  });
 
   /// 类似 Windows 右键的就地气泡菜单（弹出：引用、删除、朗读、选取文字、复制）
   void _showContextMenuAt(BuildContext context, Offset tapPosition) {
@@ -77,6 +82,7 @@ class MessageBubble extends StatelessWidget {
     final isDark = theme.brightness == Brightness.dark;
     final chat = context.read<ChatProvider>();
     final settings = context.read<SettingsProvider>().settings;
+    final isAgent = message.isAgentMode || settings.defaultAgentMode;
 
     showMenu<String>(
       context: context,
@@ -132,6 +138,18 @@ class MessageBubble extends StatelessWidget {
             ],
           ),
         ),
+        if (isLatestAssistant && !isAgent)
+          PopupMenuItem<String>(
+            value: 'regenerate',
+            height: 40,
+            child: Row(
+              children: [
+                Icon(Icons.refresh_rounded, size: 18, color: isDark ? Colors.cyanAccent : const Color(0xFF0284C7)),
+                const SizedBox(width: 10),
+                const Text('重新生成', style: TextStyle(fontSize: 14)),
+              ],
+            ),
+          ),
         const PopupMenuDivider(height: 1),
         PopupMenuItem<String>(
           value: 'delete',
@@ -178,6 +196,9 @@ class MessageBubble extends StatelessWidget {
         case 'copy':
           Clipboard.setData(ClipboardData(text: message.content));
           break;
+        case 'regenerate':
+          chat.regenerateLatestAssistantMessage(message.id);
+          break;
         case 'delete':
           _confirmDeleteMessage(context, chat);
           break;
@@ -186,6 +207,9 @@ class MessageBubble extends StatelessWidget {
   }
 
   void _confirmDeleteMessage(BuildContext context, ChatProvider chat) {
+    // 隐藏软键盘，避免操作弹窗关闭后键盘自动弹起
+    FocusManager.instance.primaryFocus?.unfocus();
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -193,7 +217,10 @@ class MessageBubble extends StatelessWidget {
         content: const Text('确定要删除这条消息吗？此操作无法撤销。'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
+            onPressed: () {
+              FocusManager.instance.primaryFocus?.unfocus();
+              Navigator.pop(ctx);
+            },
             child: const Text('取消'),
           ),
           ElevatedButton(
@@ -202,20 +229,54 @@ class MessageBubble extends StatelessWidget {
               foregroundColor: Colors.white,
             ),
             onPressed: () {
+              FocusManager.instance.primaryFocus?.unfocus();
               Navigator.pop(ctx);
               chat.deleteMessage(message.id);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('已删除该条消息'),
-                  duration: Duration(seconds: 1),
-                ),
-              );
             },
             child: const Text('确认删除'),
           ),
         ],
       ),
     );
+  }
+
+  /// 格式化时间（24小时制，根据日期与时段精确拟人化）
+  String _formatMessageTime(DateTime dt) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final msgDate = DateTime(dt.year, dt.month, dt.day);
+    final diffDays = today.difference(msgDate).inDays;
+
+    final hourStr = dt.hour.toString().padLeft(2, '0');
+    final minStr = dt.minute.toString().padLeft(2, '0');
+    final timeStr = '$hourStr:$minStr';
+
+    // 判断时段：0-5 凌晨，6-10 早晨，11-13 中午，14-18 下午，19-23 夜晚
+    String period;
+    final h = dt.hour;
+    if (h >= 0 && h < 6) {
+      period = '凌晨';
+    } else if (h >= 6 && h < 11) {
+      period = '早晨';
+    } else if (h >= 11 && h < 14) {
+      period = '中午';
+    } else if (h >= 14 && h < 19) {
+      period = '下午';
+    } else {
+      period = '夜晚';
+    }
+
+    if (diffDays == 0) {
+      return '$period $timeStr';
+    } else if (diffDays == 1) {
+      return '昨天 $timeStr';
+    } else if (diffDays == 2) {
+      return '前天 $timeStr';
+    } else if (dt.year == now.year) {
+      return '${dt.month}月${dt.day}日 $timeStr';
+    } else {
+      return '${dt.year}年${dt.month}月${dt.day}日 $timeStr';
+    }
   }
 
   /// 渲染单张图片附件（优先加载本地原图，原图被清理或不存在时优雅回显缩略图并标注状态）
@@ -557,6 +618,19 @@ class MessageBubble extends StatelessWidget {
                           ),
                         ),
                       ),
+                    const SizedBox(height: 4),
+                    Align(
+                      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+                      child: Text(
+                        _formatMessageTime(message.createdAt),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: isUser
+                              ? Colors.white.withOpacity(0.72)
+                              : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),

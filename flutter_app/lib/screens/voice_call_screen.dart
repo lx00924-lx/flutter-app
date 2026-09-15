@@ -9,6 +9,7 @@ import '../models/chat_message.dart';
 import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/audio_recorder_service.dart';
+import '../services/asr_service.dart';
 import '../services/tts_service.dart';
 
 enum VoiceCallStatus {
@@ -148,44 +149,12 @@ class _VoiceCallScreenState extends State<VoiceCallScreen> with SingleTickerProv
     String transcribedText = '';
 
     try {
-      // 提取 base64 音频
-      final rawBase64 = result.base64AudioData.contains(',')
-          ? result.base64AudioData.split(',').last
-          : result.base64AudioData;
-      final audioBytes = base64Decode(rawBase64);
-
-      if (settings.asrHttpEndpoint.isNotEmpty) {
-        final endpoint = settings.asrHttpEndpoint.trim();
-        final model = settings.asrModel.trim();
-        final apiKey = settings.asrApiKey.trim();
-
-        final formData = FormData.fromMap({
-          'file': MultipartFile.fromBytes(audioBytes, filename: 'voice_call.m4a'),
-          'audio': MultipartFile.fromBytes(audioBytes, filename: 'voice_call.m4a'),
-          'audio_in': MultipartFile.fromBytes(audioBytes, filename: 'voice_call.m4a'),
-          if (model.isNotEmpty) 'model': model,
-        });
-
-        final headers = <String, dynamic>{};
-        if (apiKey.isNotEmpty) {
-          headers['Authorization'] = 'Bearer $apiKey';
-          headers['x-asr-api-key'] = apiKey;
-        }
-
-        final dio = Dio(BaseOptions(
-          connectTimeout: const Duration(seconds: 15),
-          receiveTimeout: const Duration(seconds: 20),
-          headers: headers,
-        ));
-
-        final res = await dio.post(endpoint, data: formData);
-        if (res.statusCode == 200 || res.statusCode == 201) {
-          if (res.data is Map) {
-            transcribedText = (res.data['text'] ?? res.data['result'] ?? '').toString().trim();
-          } else if (res.data is String) {
-            transcribedText = res.data.toString().trim();
-          }
-        }
+      final text = await AsrService.instance.transcribeAudio(
+        base64AudioData: result.base64AudioData,
+        settings: settings,
+      );
+      if (text != null && text.isNotEmpty) {
+        transcribedText = text;
       }
     } catch (e) {
       debugPrint('VoiceCall ASR error: $e');

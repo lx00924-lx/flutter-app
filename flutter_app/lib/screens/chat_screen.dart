@@ -24,14 +24,45 @@ class _ChatScreenState extends State<ChatScreen> {
   final ScrollController _scrollController = ScrollController();
   int _lastMessageCount = 0;
   String? _lastSessionId;
+  bool _userScrolledUp = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final maxScroll = _scrollController.position.maxScrollExtent;
+    final currentScroll = _scrollController.offset;
+    // 若距离底部超过 80 像素，视为用户主动向上翻阅，暂停流式自动吸底
+    if (maxScroll - currentScroll > 80) {
+      if (!_userScrolledUp) {
+        setState(() {
+          _userScrolledUp = true;
+        });
+      }
+    } else {
+      if (_userScrolledUp) {
+        setState(() {
+          _userScrolledUp = false;
+        });
+      }
+    }
+  }
 
   @override
   void dispose() {
+    _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
   }
 
-  void _scrollToBottom({bool animate = true}) {
+  void _scrollToBottom({bool animate = true, bool force = false}) {
+    // 如果用户向上滑动了且不是强制滚动，则不吸底，保持用户的视口自由
+    if (_userScrolledUp && !force) return;
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients) return;
       final maxScroll = _scrollController.position.maxScrollExtent;
@@ -172,7 +203,9 @@ class _ChatScreenState extends State<ChatScreen> {
       final isSessionSwitched = chat.currentSession?.id != _lastSessionId;
       _lastMessageCount = chat.messages.length;
       _lastSessionId = chat.currentSession?.id;
-      _scrollToBottom(animate: !isSessionSwitched);
+      // 会话切换或收到新消息时，重置用户上滑状态并强制吸底
+      _userScrolledUp = false;
+      _scrollToBottom(animate: !isSessionSwitched, force: true);
     } else if (chat.isGenerating) {
       _scrollToBottom(animate: false);
     }
@@ -394,7 +427,14 @@ class _ChatScreenState extends State<ChatScreen> {
                         addRepaintBoundaries: true,
                         itemCount: chat.messages.length,
                         itemBuilder: (ctx, index) {
-                          return MessageBubble(message: chat.messages[index]);
+                          final msg = chat.messages[index];
+                          // 检查是否为整个会话中最后一条 Assistant 消息
+                          final isLatestAssistant = msg.role == MessageRole.assistant &&
+                              index == chat.messages.lastIndexWhere((m) => m.role == MessageRole.assistant);
+                          return MessageBubble(
+                            message: msg,
+                            isLatestAssistant: isLatestAssistant,
+                          );
                         },
                       ),
               ),

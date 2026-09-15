@@ -1,8 +1,11 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/app_settings.dart';
 import '../providers/settings_provider.dart';
+import '../services/update_service.dart';
+import '../utils/url_launcher_helper.dart';
 import 'account_settings_screen.dart';
 import 'personalization_settings_screen.dart';
 import 'api_settings_screen.dart';
@@ -149,67 +152,8 @@ class SettingsScreen extends StatelessWidget {
           ),
           const SizedBox(height: 10),
 
-          // 2. GitHub 官方更新源 (随应用打包发布锁定)
-          Card(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.cloud_sync_outlined, color: Color(0xFF0284C7)),
-                      const SizedBox(width: 8),
-                      const Text('GitHub 官方发布源', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                      const Spacer(),
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF0284C7),
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                        ),
-                        onPressed: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('已是最新版本 (v1.0.1+101)')),
-                          );
-                        },
-                        child: const Text('检测新版本', style: TextStyle(fontSize: 12)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              '官方仓库：${AppSettings.officialGithubOwner} / ${AppSettings.officialGithubRepo}',
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF1E293B),
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              '随编译打包固件锁定，自动检测 Releases 发版通道',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
+          // 2. GitHub 官方更新源 (支持 Android / Windows 自动平台固件匹配与检测)
+          const _GithubReleaseCard(),
           const SizedBox(height: 10),
 
           // 4. APP 检修与调试设置
@@ -344,3 +288,437 @@ class SettingsScreen extends StatelessWidget {
     );
   }
 }
+
+class _GithubReleaseCard extends StatefulWidget {
+  const _GithubReleaseCard();
+
+  @override
+  State<_GithubReleaseCard> createState() => _GithubReleaseCardState();
+}
+
+class _GithubReleaseCardState extends State<_GithubReleaseCard> {
+  bool _isChecking = false;
+
+  Future<void> _handleCheckUpdate() async {
+    if (_isChecking) return;
+    setState(() => _isChecking = true);
+
+    try {
+      final result = await UpdateService.checkUpdate();
+      if (!mounted) return;
+
+      if (!result.isSuccess) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result.errorMessage ?? '检查更新失败，请稍后重试'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+        return;
+      }
+
+      if (result.hasUpdate) {
+        // 先检查本地是否已有下载好的安装包
+        final cachedFile = await UpdateService.checkCachedPackage(
+          result.latestVersion,
+          result.matchedAssetFileName,
+          result.fileSize,
+        );
+
+        if (!mounted) return;
+
+        // 如果已经下载了安装包，直接呼出系统安装界面
+        if (cachedFile != null && !kIsWeb && Platform.isAndroid) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('已在本地检测到 v${result.latestVersion} 完整安装包，正在弹出系统安装...'),
+              backgroundColor: const Color(0xFF10B981),
+              duration: const Duration(seconds: 3),
+            ),
+          );
+          await UpdateService.installCachedPackage(cachedFile.path);
+        }
+
+        _showUpdateDialog(result, cachedFile);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('🎉 当前已是最新版本 (v${result.currentVersion}) · [${result.platformName}]'),
+            backgroundColor: const Color(0xFF10B981),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('检测发生异常: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isChecking = false);
+      }
+    }
+  }
+
+  void _showUpdateDialog(UpdateCheckResult result, File? cachedFile) {
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => _UpdateDownloadDialog(result: result, initialCachedFile: cachedFile),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Card(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.cloud_sync_outlined, color: Color(0xFF0284C7)),
+                const SizedBox(width: 8),
+                const Text('GitHub 官方发布源', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                const Spacer(),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF0284C7),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                  onPressed: _isChecking ? null : _handleCheckUpdate,
+                  child: _isChecking
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                          ),
+                        )
+                      : const Text('检测新版本', style: TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '官方仓库：${AppSettings.officialGithubOwner} / ${AppSettings.officialGithubRepo}',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF1E293B),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _UpdateDownloadDialog extends StatefulWidget {
+  final UpdateCheckResult result;
+  final File? initialCachedFile;
+
+  const _UpdateDownloadDialog({
+    required this.result,
+    this.initialCachedFile,
+  });
+
+  @override
+  State<_UpdateDownloadDialog> createState() => _UpdateDownloadDialogState();
+}
+
+class _UpdateDownloadDialogState extends State<_UpdateDownloadDialog> {
+  File? _cachedFile;
+  bool _isDownloading = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _cachedFile = widget.initialCachedFile;
+    _isDownloading = UpdateService.isDownloading &&
+        UpdateService.activeDownloadingVersion == widget.result.latestVersion;
+  }
+
+  void _triggerInstall() {
+    if (_cachedFile != null) {
+      UpdateService.installCachedPackage(_cachedFile!.path);
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(Platform.isAndroid ? '正在调起系统安装界面...' : '正在启动安装程序并退出旧版...'),
+          backgroundColor: const Color(0xFF10B981),
+        ),
+      );
+    }
+  }
+
+  void _startDownload() {
+    setState(() {
+      _isDownloading = true;
+    });
+
+    UpdateService.startInAppDownload(
+      result: widget.result,
+      onComplete: () async {
+        if (!mounted) return;
+        final file = await UpdateService.checkCachedPackage(
+          widget.result.latestVersion,
+          widget.result.matchedAssetFileName,
+          widget.result.fileSize,
+        );
+        setState(() {
+          _isDownloading = false;
+          _cachedFile = file;
+        });
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final res = widget.result;
+
+    return AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0284C7).withOpacity(0.15),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.system_update_alt, color: Color(0xFF0284C7), size: 24),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '发现新版本 v${res.latestVersion}',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+                Text(
+                  '当前版本: v${res.currentVersion}',
+                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 400, maxHeight: 420),
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 平台与下载就绪标识
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(
+                    color: isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0),
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.devices, size: 16, color: Color(0xFF0284C7)),
+                        const SizedBox(width: 6),
+                        Text(
+                          '当前设备: ${res.platformName}',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                        ),
+                      ],
+                    ),
+                    if (res.matchedAssetFileName != null) ...[
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          Icon(
+                            _cachedFile != null ? Icons.check_circle : Icons.file_download_done,
+                            size: 16,
+                            color: const Color(0xFF10B981),
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              _cachedFile != null
+                                  ? '安装包已在本地就绪 (${res.formattedFileSize})'
+                                  : '匹配固件: ${res.matchedAssetFileName} (${res.formattedFileSize})',
+                              style: const TextStyle(fontSize: 12, color: Color(0xFF10B981), fontWeight: FontWeight.w500),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+
+              // 正在下载时展示实时真实进度条
+              if (_isDownloading || UpdateService.isDownloading) ...[
+                const SizedBox(height: 16),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0284C7).withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: const Color(0xFF0284C7).withOpacity(0.25)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF0284C7)),
+                          ),
+                          const SizedBox(width: 8),
+                          const Text(
+                            '正在应用内下载，通知栏同步显示...',
+                            style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF0284C7)),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      ValueListenableBuilder<double>(
+                        valueListenable: UpdateService.downloadProgressNotifier,
+                        builder: (context, progress, _) {
+                          return ClipRRect(
+                            borderRadius: BorderRadius.circular(4),
+                            child: LinearProgressIndicator(
+                              value: progress > 0 ? progress : null,
+                              backgroundColor: Colors.grey.withOpacity(0.2),
+                              valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFF0284C7)),
+                              minHeight: 8,
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      ValueListenableBuilder<String>(
+                        valueListenable: UpdateService.downloadStatusNotifier,
+                        builder: (context, status, _) {
+                          return Text(
+                            status.isNotEmpty ? status : '准备中...',
+                            style: const TextStyle(fontSize: 11, color: Colors.grey),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+
+              const SizedBox(height: 12),
+              const Text('更新日志：', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              const SizedBox(height: 6),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0),
+                  ),
+                ),
+                child: SelectableText(
+                  res.releaseNotes,
+                  style: TextStyle(
+                    fontSize: 12,
+                    height: 1.4,
+                    color: isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(_isDownloading ? '后台下载' : '稍后再说'),
+        ),
+        if (_cachedFile != null) ...[
+          ElevatedButton.icon(
+            icon: const Icon(Icons.install_mobile, size: 16),
+            label: const Text('立即安装'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF10B981),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            onPressed: _triggerInstall,
+          ),
+        ] else if (_isDownloading) ...[
+          ElevatedButton.icon(
+            icon: const Icon(Icons.close, size: 16),
+            label: const Text('取消下载'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.redAccent,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            onPressed: () {
+              UpdateService.cancelDownload();
+              setState(() => _isDownloading = false);
+            },
+          ),
+        ] else ...[
+          ElevatedButton.icon(
+            icon: const Icon(Icons.download, size: 16),
+            label: const Text('立即下载更新'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF0284C7),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            onPressed: () {
+              if (res.matchedAssetFileName != null && res.downloadUrl != null) {
+                _startDownload();
+              } else {
+                UrlLauncherHelper.openUrl(res.downloadUrl ?? res.releaseUrl);
+                Navigator.of(context).pop();
+              }
+            },
+          ),
+        ],
+      ],
+    );
+  }
+}
+
