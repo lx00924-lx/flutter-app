@@ -297,8 +297,14 @@ class SyncService {
         for (var item in list) {
           if (item is Map) {
             try {
+              final rawSessionId = (item['sessionId'] ?? '').toString().trim();
+              if (rawSessionId.isEmpty) {
+                // 坚决忽略无关联会话 ID 的孤儿错误消息，防止生成异常新对话
+                continue;
+              }
               final msg = ChatMessage.fromMap(item);
               if (msg.id.isNotEmpty &&
+                  msg.sessionId.trim().isNotEmpty &&
                   !pendingDeleteIds.contains(msg.sessionId) &&
                   !storage.hasMessage(msg.id)) {
                 newMessages.add(msg);

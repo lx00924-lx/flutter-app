@@ -29,7 +29,7 @@ class ChatProvider extends ChangeNotifier {
   Timer? _periodicSyncTimer;
 
   ChatProvider(this.settingsProvider) {
-    loadSessions();
+    _storage.cleanOrphanData().then((_) => loadSessions());
     _startPeriodicSync();
   }
 

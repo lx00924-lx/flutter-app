@@ -333,6 +333,13 @@ async function runServerSideGeneration({
     return;
   }
 
+  // Safely extract and resolve target sessionId
+  const resolvedSessionId = (
+    settings?.sessionId ||
+    (messages && messages.length > 0 ? (messages[messages.length - 1]?.sessionId || messages[0]?.sessionId) : "") ||
+    ""
+  ).toString().trim();
+
   const abortController = new AbortController();
   const genState: ActiveGeneration = {
     userId,
@@ -347,6 +354,7 @@ async function runServerSideGeneration({
   // Initial placeholder save in DB
   const initialAssistantMessage = {
     id: assistantMessageId,
+    sessionId: resolvedSessionId,
     role: 'assistant',
     content: '',
     timestamp: new Date().toISOString(),
@@ -402,6 +410,7 @@ async function runServerSideGeneration({
         genState.content = offlineNotice;
         const offlineMsg = {
           id: assistantMessageId,
+          sessionId: resolvedSessionId,
           role: 'assistant',
           content: offlineNotice,
           timestamp: new Date().toISOString(),
@@ -760,6 +769,7 @@ async function runServerSideGeneration({
     genState.content = accumulatedContent;
     const finalAssistantMessage = {
       id: assistantMessageId,
+      sessionId: resolvedSessionId,
       role: 'assistant',
       content: accumulatedContent,
       reasoningContent: accumulatedReasoning,
@@ -795,6 +805,7 @@ async function runServerSideGeneration({
 
     const errorAssistantMessage = {
       id: assistantMessageId,
+      sessionId: resolvedSessionId,
       role: 'assistant',
       content: genState.content || `[生成失败: ${err.message || '网络中断'}]`,
       timestamp: new Date().toISOString(),
@@ -818,7 +829,7 @@ async function runServerSideGeneration({
   }
 }
 
-// Ensure directories and files exist
+// Ensure directories and files exist & sanitize orphan messages
 async function ensureDirs() {
   try {
     await fs.mkdir(path.dirname(MESSAGES_FILE), { recursive: true });
@@ -831,6 +842,26 @@ async function ensureDirs() {
     await checkFile(MESSAGES_FILE, {}); // Map of userId -> messages[]
     await checkFile(USERS_FILE, []); // Simple user list
     await checkFile(SETTINGS_FILE, {}); // Map of userId -> settings
+
+    // Clean any orphan messages (messages with empty or missing sessionId)
+    await withFileLock(MESSAGES_FILE, async () => {
+      const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+      let changed = false;
+      for (const uid of Object.keys(allMessages)) {
+        const msgs = allMessages[uid];
+        if (Array.isArray(msgs)) {
+          const cleaned = msgs.filter((m: any) => m && m.id && m.sessionId && m.sessionId.toString().trim() !== '');
+          if (cleaned.length !== msgs.length) {
+            allMessages[uid] = cleaned;
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        await safeWriteJSON(MESSAGES_FILE, allMessages);
+        console.log(`[Data Sanitizer] Purged orphan messages without valid sessionId from server storage.`);
+      }
+    });
   } catch (error) {
     console.error("Error creating directories:", error);
   }
@@ -1029,7 +1060,10 @@ async function startServer() {
   app.get("/api/messages/:userId", async (req, res) => {
     try {
       const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
-      res.json(allMessages[req.params.userId] || []);
+      const userMsgs = (allMessages[req.params.userId] || []).filter(
+        (m: any) => m && m.id && m.sessionId && m.sessionId.toString().trim() !== ''
+      );
+      res.json(userMsgs);
     } catch (error) {
       res.status(500).json({ error: "Failed to load messages" });
     }
@@ -1041,9 +1075,13 @@ async function startServer() {
       await withFileLock(MESSAGES_FILE, async () => {
         const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
         if (!allMessages[userId]) allMessages[userId] = [];
-        // Combine existing with synced, avoiding duplicates based on ID
-        const newMessages = [...allMessages[userId], ...messages];
-        const uniqueMessages = Array.from(new Map(newMessages.map(m => [m.id, m])).values());
+        // Only accept messages with a valid sessionId
+        const validIncoming = (messages || []).filter(
+          (m: any) => m && m.id && m.sessionId && m.sessionId.toString().trim() !== ''
+        );
+        const newMessages = [...allMessages[userId], ...validIncoming];
+        const uniqueMessages = Array.from(new Map(newMessages.map(m => [m.id, m])).values())
+          .filter((m: any) => m && m.id && m.sessionId && m.sessionId.toString().trim() !== '');
         allMessages[userId] = uniqueMessages;
         await safeWriteJSON(MESSAGES_FILE, allMessages);
       });
@@ -1077,20 +1115,23 @@ async function startServer() {
 
   app.post("/api/delete-session", async (req, res) => {
     const { userId, sessionId } = req.body;
-    if (!userId || !sessionId) {
+    const cleanSessionId = (sessionId || "").toString().trim();
+    if (!userId || !cleanSessionId) {
       return res.status(400).json({ error: "Missing userId or sessionId" });
     }
     try {
       await withFileLock(MESSAGES_FILE, async () => {
         const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
         if (allMessages[userId]) {
-          allMessages[userId] = allMessages[userId].filter((m: any) => m.sessionId !== sessionId);
+          allMessages[userId] = allMessages[userId].filter(
+            (m: any) => m && m.sessionId && m.sessionId.toString().trim() !== cleanSessionId
+          );
           await safeWriteJSON(MESSAGES_FILE, allMessages);
         }
       });
       // Broadcast session deletion to all connected devices of this user
-      io.to(`user_${userId}`).emit("session_deleted", { sessionId });
-      io.emit("session_deleted", { userId, sessionId });
+      io.to(`user_${userId}`).emit("session_deleted", { sessionId: cleanSessionId });
+      io.emit("session_deleted", { userId, sessionId: cleanSessionId });
       res.json({ success: true });
     } catch (error) {
       console.error("Delete session error:", error);

@@ -18,19 +18,54 @@ class StorageService {
     if (box == null) return [];
     final List<ChatSession> list = [];
     for (var key in box.keys) {
+      final keyStr = key?.toString().trim() ?? '';
+      if (keyStr.isEmpty) continue; // 坚决跳过空 session 键
       final val = box.get(key);
       if (val != null) {
         try {
+          ChatSession? s;
           if (val is Map) {
-            list.add(ChatSession.fromMap(val));
+            s = ChatSession.fromMap(val);
           } else if (val is String) {
-            list.add(ChatSession.fromJson(val));
+            s = ChatSession.fromJson(val);
+          }
+          if (s != null && s.id.trim().isNotEmpty) {
+            list.add(s);
           }
         } catch (_) {}
       }
     }
     list.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     return list;
+  }
+
+  /// 清除本地所有无关联 session 或 sessionId 为空的孤儿残留数据
+  Future<void> cleanOrphanData() async {
+    final sBox = _sessionsBox;
+    if (sBox != null) {
+      final invalidKeys = sBox.keys.where((k) => k == null || k.toString().trim().isEmpty).toList();
+      for (var k in invalidKeys) {
+        await sBox.delete(k);
+      }
+    }
+    final mBox = _messagesBox;
+    if (mBox != null) {
+      final orphanKeys = <dynamic>[];
+      for (var key in mBox.keys) {
+        final val = mBox.get(key);
+        if (val == null) {
+          orphanKeys.add(key);
+        } else if (val is Map) {
+          final sId = (val['sessionId'] ?? '').toString().trim();
+          if (sId.isEmpty) {
+            orphanKeys.add(key);
+          }
+        }
+      }
+      if (orphanKeys.isNotEmpty) {
+        await mBox.deleteAll(orphanKeys);
+      }
+    }
   }
 
   Future<void> saveSession(ChatSession session) async {
