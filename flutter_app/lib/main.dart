@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -10,18 +9,12 @@ import 'providers/settings_provider.dart';
 import 'screens/chat_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/splash_screen.dart';
-import 'utils/http_client_helper.dart';
 
 /// 全局导航 Key，供服务层在收到顶号通知时安全弹窗与跳转
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  // 注入全局网络底层代理覆盖（原生端自动兼容系统代理、本地代理端口与 SSL 证书握手）
-  if (!kIsWeb) {
-    HttpOverrides.global = AppHttpOverrides();
-  }
 
   // 初始化本地持久化 Hive 数据库 (并发异步打开，大幅提升启动速度；增加异常自动恢复机制)
   try {

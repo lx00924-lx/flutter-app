@@ -144,6 +144,17 @@ function normalizeApiBaseUrl(rawEndpoint: string): string {
     return endpoint;
   }
 
+  if (endpoint.includes('generativelanguage.googleapis.com')) {
+    if (endpoint.endsWith('/openai')) {
+      return endpoint;
+    } else if (endpoint.endsWith('/v1beta')) {
+      return `${endpoint}/openai`;
+    } else if (!endpoint.includes('/v1beta/openai')) {
+      return `${endpoint}/v1beta/openai`;
+    }
+    return endpoint;
+  }
+
   if (endpoint.includes('open.bigmodel.cn')) {
     if (!endpoint.includes('/api/paas/v4')) {
       endpoint = endpoint.replace(/\/+$/, '');
@@ -561,8 +572,10 @@ async function runServerSideGeneration({
       }
 
       const mapMessageToContent = (msg: any) => {
-        let text = msg.content;
-        if (!text || !String(text).trim()) {
+        let text = msg.content || '';
+        // 自动清洗历史消息中的错误提示占位符，避免污染大模型上下文
+        text = text.replace(/\n*\*\s*\(请求异常[^\)]*\)\s*\*/g, '').trim();
+        if (!text) {
           const hasAudio = (Array.isArray(msg.attachments) && msg.attachments.some((a: any) => typeof a === 'string' && a.startsWith('data:audio/'))) || msg.type === 'voice';
           if (hasAudio) {
             text = '[用户发送了一条语音消息。提示：当前客户端未配置 ASR 语音识别转写服务，大模型接收到的是音频条。请直接回复已收到语音消息，并提醒用户在 App「设置 ➔ 语音识别与合成」中配置 ASR 识别服务即可直接与 AI 进行语音文本交互。]';

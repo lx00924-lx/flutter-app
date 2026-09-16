@@ -18,24 +18,75 @@ class ApiService {
     HttpClientHelper.configureProxy(_dio);
   }
 
-  /// 智能从指定端点获取可用模型列表（兼容 OpenAI、DeepSeek、火山方舟、Ollama、LM Studio 等）
+  /// 智能解析并构建标准聊天请求地址（全自动适配 Gemini、DeepSeek、OpenAI、火山方舟、Ollama 等）
+  static String buildChatCompletionsUrl(String endpoint) {
+    String cleanUrl = endpoint.trim();
+    while (cleanUrl.endsWith('/')) {
+      cleanUrl = cleanUrl.substring(0, cleanUrl.length - 1);
+    }
+    if (cleanUrl.endsWith('/chat/completions')) {
+      return cleanUrl;
+    }
+    // 特殊：如果是 Google Gemini 官方端点
+    if (cleanUrl.contains('generativelanguage.googleapis.com')) {
+      if (cleanUrl.endsWith('/openai')) {
+        return '$cleanUrl/chat/completions';
+      } else if (cleanUrl.endsWith('/v1beta')) {
+        return '$cleanUrl/openai/chat/completions';
+      } else if (!cleanUrl.contains('/v1beta/openai')) {
+        return '$cleanUrl/v1beta/openai/chat/completions';
+      }
+    }
+    // 常规 OpenAI 兼容端点
+    if (cleanUrl.endsWith('/v1') || cleanUrl.endsWith('/v3') || cleanUrl.endsWith('/openai') || cleanUrl.contains('/compatible-mode/v1')) {
+      return '$cleanUrl/chat/completions';
+    }
+    return '$cleanUrl/v1/chat/completions';
+  }
+
+  /// 智能解析并构建模型列表请求地址
+  static String buildModelsUrl(String endpoint) {
+    String cleanUrl = endpoint.trim();
+    while (cleanUrl.endsWith('/')) {
+      cleanUrl = cleanUrl.substring(0, cleanUrl.length - 1);
+    }
+    if (cleanUrl.endsWith('/models')) {
+      return cleanUrl;
+    }
+    if (cleanUrl.contains('generativelanguage.googleapis.com')) {
+      if (cleanUrl.endsWith('/openai')) {
+        return '$cleanUrl/models';
+      } else if (cleanUrl.endsWith('/v1beta')) {
+        return '$cleanUrl/openai/models';
+      } else if (!cleanUrl.contains('/v1beta/openai')) {
+        return '$cleanUrl/v1beta/openai/models';
+      }
+    }
+    if (cleanUrl.endsWith('/v1') || cleanUrl.endsWith('/v3') || cleanUrl.endsWith('/openai') || cleanUrl.contains('/compatible-mode/v1')) {
+      return '$cleanUrl/models';
+    }
+    return '$cleanUrl/v1/models';
+  }
+
+  /// 智能净化模型名称（移除冗余的 models/ 前缀）
+  static String sanitizeModelName(String modelName) {
+    String name = modelName.trim();
+    if (name.startsWith('models/')) {
+      name = name.substring('models/'.length);
+    }
+    return name;
+  }
+
+  /// 智能从指定端点获取可用模型列表（兼容 OpenAI、Gemini、DeepSeek、火山方舟、Ollama、LM Studio 等）
   Future<List<String>> fetchModelList({
     required String endpoint,
     required String apiKey,
   }) async {
     String cleanUrl = endpoint.trim();
-    if (cleanUrl.endsWith('/')) {
+    while (cleanUrl.endsWith('/')) {
       cleanUrl = cleanUrl.substring(0, cleanUrl.length - 1);
     }
-    // 自动兼容末尾路径
-    String targetUrl = cleanUrl;
-    if (!targetUrl.contains('/models')) {
-      if (targetUrl.endsWith('/v1')) {
-        targetUrl = '$targetUrl/models';
-      } else {
-        targetUrl = '$targetUrl/v1/models';
-      }
-    }
+    final targetUrl = buildModelsUrl(cleanUrl);
 
     try {
       final response = await _dio.get(
@@ -52,22 +103,22 @@ class ApiService {
       if (response.data is Map && response.data['data'] is List) {
         for (var item in response.data['data']) {
           if (item is Map && item['id'] != null) {
-            modelIds.add(item['id'].toString());
+            modelIds.add(sanitizeModelName(item['id'].toString()));
           }
         }
       } else if (response.data is List) {
         for (var item in response.data) {
           if (item is Map && item['id'] != null) {
-            modelIds.add(item['id'].toString());
+            modelIds.add(sanitizeModelName(item['id'].toString()));
           } else if (item is String) {
-            modelIds.add(item);
+            modelIds.add(sanitizeModelName(item));
           }
         }
       }
 
       return modelIds.isNotEmpty ? modelIds : ['deepseek-chat', 'deepseek-reasoner'];
     } catch (e) {
-      // 若 /v1/models 失败，尝试直接根路径 /models
+      // 若标准路径失败，尝试直接根路径 fallback
       try {
         final fallbackUrl = cleanUrl.endsWith('/models') ? cleanUrl : '$cleanUrl/models';
         final response = await _dio.get(
@@ -83,7 +134,7 @@ class ApiService {
         if (response.data is Map && response.data['data'] is List) {
           for (var item in response.data['data']) {
             if (item is Map && item['id'] != null) {
-              modelIds.add(item['id'].toString());
+              modelIds.add(sanitizeModelName(item['id'].toString()));
             }
           }
         }
@@ -103,20 +154,9 @@ class ApiService {
     final activeEp = settings.activeEndpoint;
     if (activeEp == null || oldMessages.isEmpty) return previousSummary;
 
-    String baseUrl = activeEp.endpoint.trim();
-    if (baseUrl.endsWith('/')) {
-      baseUrl = baseUrl.substring(0, baseUrl.length - 1);
-    }
-    String requestUrl = baseUrl;
-    if (requestUrl.endsWith('/chat/completions')) {
-    } else if (requestUrl.endsWith('/v1') || requestUrl.contains('/v3')) {
-      requestUrl = '$requestUrl/chat/completions';
-    } else {
-      requestUrl = '$requestUrl/v1/chat/completions';
-    }
-
+    final requestUrl = buildChatCompletionsUrl(activeEp.endpoint);
     final apiKey = activeEp.apiKey.trim();
-    final model = activeEp.modelName.trim();
+    final model = sanitizeModelName(activeEp.modelName);
 
     final buffer = StringBuffer();
     if (previousSummary != null && previousSummary.trim().isNotEmpty) {
@@ -125,7 +165,7 @@ class ApiService {
     buffer.writeln('【本次需浓缩的较早对话记录】:');
     for (final m in oldMessages) {
       final role = m.role == MessageRole.user ? '用户' : '助手';
-      final text = m.content.trim();
+      final text = m.content.replaceAll(RegExp(r'\n*\*\s*\(请求异常[^\)]*\)\s*\*'), '').trim();
       if (text.isNotEmpty) {
         buffer.writeln('$role: $text');
       }
@@ -187,8 +227,13 @@ class ApiService {
       final msg = history[i];
       final role = msg.role == MessageRole.user ? 'user' : 'assistant';
       final msgPayload = msg.toAiPayloadMap();
-      final content = msg.content;
+      final content = msg.content.replaceAll(RegExp(r'\n*\*\s*\(请求异常[^\)]*\)\s*\*'), '').trim();
       final attachments = (msgPayload['attachments'] as List<dynamic>?)?.map((e) => e.toString()).toList();
+
+      // 如果是空的异常占位回复且无附件，则跳过不放入大模型上下文
+      if (content.isEmpty && role == 'assistant' && (attachments == null || attachments.isEmpty)) {
+        continue;
+      }
 
       final msgLen = content.length + 10;
       if (currentLength + msgLen > maxContextLength && reversedSelected.isNotEmpty) {
@@ -282,25 +327,9 @@ class ApiService {
       throw Exception('未找到可用的 API 端点配置，请在设置中添加');
     }
 
-    String baseUrl = activeEp.endpoint.trim();
-    if (baseUrl.endsWith('/')) {
-      baseUrl = baseUrl.substring(0, baseUrl.length - 1);
-    }
-    // 智能防重复拼接
-    String requestUrl = baseUrl;
-    if (requestUrl.endsWith('/chat/completions')) {
-      // 已经是完整接口
-    } else if (requestUrl.endsWith('/v1')) {
-      requestUrl = '$requestUrl/chat/completions';
-    } else if (requestUrl.contains('/v3')) {
-      // 火山方舟特定端点
-      requestUrl = '$requestUrl/chat/completions';
-    } else {
-      requestUrl = '$requestUrl/v1/chat/completions';
-    }
-
+    final requestUrl = buildChatCompletionsUrl(activeEp.endpoint);
     final apiKey = activeEp.apiKey.trim();
-    final model = activeEp.modelName.trim();
+    final model = sanitizeModelName(activeEp.modelName);
 
     // 执行滑动窗口截断并支持多模态 8K 图片结构与 KV 摘要基石
     final messagesPayload = truncateHistoryBySlidingWindow(
