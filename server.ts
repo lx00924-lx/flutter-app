@@ -562,10 +562,15 @@ async function runServerSideGeneration({
 
       const mapMessageToContent = (msg: any) => {
         let text = msg.content;
-        if (!text) {
-          if (msg.type === 'image') text = '[图片]';
-          else if (msg.type === 'voice') text = '[语音]';
-          else text = ' ';
+        if (!text || !String(text).trim()) {
+          const hasAudio = (Array.isArray(msg.attachments) && msg.attachments.some((a: any) => typeof a === 'string' && a.startsWith('data:audio/'))) || msg.type === 'voice';
+          if (hasAudio) {
+            text = '[用户发送了一条语音消息。提示：当前客户端未配置 ASR 语音识别转写服务，大模型接收到的是音频条。请直接回复已收到语音消息，并提醒用户在 App「设置 ➔ 语音识别与合成」中配置 ASR 识别服务即可直接与 AI 进行语音文本交互。]';
+          } else if (msg.type === 'image' || (Array.isArray(msg.attachments) && msg.attachments.some((a: any) => typeof a === 'string' && a.startsWith('data:image/')))) {
+            text = '[图片]';
+          } else {
+            text = ' ';
+          }
         }
         if (msg.quote) {
           text = `引用消息: "${msg.quote.content}"\n\n回复上面的消息: ${text}`;

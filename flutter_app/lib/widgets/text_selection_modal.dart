@@ -13,11 +13,14 @@ class TextSelectionModal extends StatefulWidget {
   const TextSelectionModal({super.key, required this.message});
 
   static void show(BuildContext context, ChatMessage message) {
+    FocusManager.instance.primaryFocus?.unfocus();
     showDialog(
       context: context,
       barrierColor: Colors.black.withOpacity(0.55),
       builder: (_) => TextSelectionModal(message: message),
-    );
+    ).then((_) {
+      FocusManager.instance.primaryFocus?.unfocus();
+    });
   }
 
   @override
@@ -26,6 +29,12 @@ class TextSelectionModal extends StatefulWidget {
 
 class _TextSelectionModalState extends State<TextSelectionModal> {
   TextSelection? _currentSelection;
+
+  @override
+  void dispose() {
+    FocusManager.instance.primaryFocus?.unfocus();
+    super.dispose();
+  }
 
   String _getSelectedText([EditableTextState? editableTextState]) {
     // 优先从 EditableTextState 获取真实高亮选区

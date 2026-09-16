@@ -337,7 +337,9 @@ class ChatProvider extends ChangeNotifier {
       }
 
       if (_messages.isNotEmpty && _currentSession!.title == '新对话') {
-        final titleText = cleanText.isNotEmpty ? cleanText : '图片消息';
+        final titleText = cleanText.isNotEmpty
+            ? cleanText
+            : (resolvedText.isNotEmpty ? resolvedText : ((audioAtt != null && audioAtt.isNotEmpty) ? '语音消息' : '图片/文件消息'));
         _currentSession!.title = titleText.length > 20 ? '${titleText.substring(0, 20)}...' : titleText;
         await _storage.saveSession(_currentSession!);
       }
@@ -359,7 +361,9 @@ class ChatProvider extends ChangeNotifier {
 
     // 自动更新会话标题（若为第一轮消息）
     if (_currentSession!.title == '新对话') {
-      final titleText = cleanText.isNotEmpty ? cleanText : '图片消息';
+      final titleText = cleanText.isNotEmpty
+          ? cleanText
+          : (resolvedText.isNotEmpty ? resolvedText : ((audioAtt != null && audioAtt.isNotEmpty) ? '语音消息' : '图片/文件消息'));
       _currentSession!.title = titleText.length > 20 ? '${titleText.substring(0, 20)}...' : titleText;
       await _storage.saveSession(_currentSession!);
     }

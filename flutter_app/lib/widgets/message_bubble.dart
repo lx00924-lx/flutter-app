@@ -75,6 +75,7 @@ class MessageBubble extends StatelessWidget {
 
   /// 类似 Windows 右键的就地气泡菜单（弹出：引用、删除、朗读、选取文字、复制）
   void _showContextMenuAt(BuildContext context, Offset tapPosition) {
+    FocusManager.instance.primaryFocus?.unfocus();
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
     if (overlay == null) return;
 
@@ -164,6 +165,7 @@ class MessageBubble extends StatelessWidget {
         ),
       ],
     ).then((selected) {
+      FocusManager.instance.primaryFocus?.unfocus();
       if (selected == null) return;
       switch (selected) {
         case 'quote':
@@ -186,12 +188,15 @@ class MessageBubble extends StatelessWidget {
           );
           break;
         case 'select':
+          FocusManager.instance.primaryFocus?.unfocus();
           showModalBottomSheet(
             context: context,
             isScrollControlled: true,
             backgroundColor: Colors.transparent,
             builder: (ctx) => TextSelectionModal(message: message),
-          );
+          ).then((_) {
+            FocusManager.instance.primaryFocus?.unfocus();
+          });
           break;
         case 'copy':
           Clipboard.setData(ClipboardData(text: message.content));
@@ -618,16 +623,18 @@ class MessageBubble extends StatelessWidget {
                           ),
                         ),
                       ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 6),
                     Align(
                       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
                       child: Text(
                         _formatMessageTime(message.createdAt),
                         style: TextStyle(
-                          fontSize: 11,
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w400,
+                          letterSpacing: 0.2,
                           color: isUser
-                              ? Colors.white.withOpacity(0.72)
-                              : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                              ? Colors.white.withOpacity(0.85)
+                              : (isDark ? const Color(0xFFA1A1AA) : const Color(0xFF6B7280)),
                         ),
                       ),
                     ),

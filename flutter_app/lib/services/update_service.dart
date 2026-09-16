@@ -3,6 +3,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/app_settings.dart';
+import '../utils/http_client_helper.dart';
 import '../utils/url_launcher_helper.dart';
 
 class UpdateCheckResult {
@@ -43,16 +44,20 @@ class UpdateCheckResult {
 }
 
 class UpdateService {
-  static final Dio _dio = Dio(
-    BaseOptions(
-      headers: {
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'LxAI-Flutter-App',
-      },
-      connectTimeout: const Duration(seconds: 15),
-      receiveTimeout: const Duration(seconds: 30),
-    ),
-  );
+  static final Dio _dio = () {
+    final dio = Dio(
+      BaseOptions(
+        headers: {
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'LxAI-Flutter-App',
+        },
+        connectTimeout: const Duration(seconds: 15),
+        receiveTimeout: const Duration(seconds: 30),
+      ),
+    );
+    HttpClientHelper.configureProxy(dio);
+    return dio;
+  }();
 
   // 全局下载状态（支持弹窗关闭后在后台持续运行，重新打开秒恢复）
   static bool isDownloading = false;
@@ -149,6 +154,11 @@ class UpdateService {
     final tempPath = '$targetPath.downloading';
 
     try {
+      // 在 Android 13+ 环境下，提前触发通知权限动态申请，确保状态栏进度条能正常展示
+      if (!kIsWeb && Platform.isAndroid) {
+        await UrlLauncherHelper.requestNotificationPermission();
+      }
+
       final tempFile = File(tempPath);
       if (await tempFile.exists()) {
         await tempFile.delete();

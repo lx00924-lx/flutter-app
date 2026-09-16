@@ -5,9 +5,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
@@ -19,6 +21,7 @@ class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.lx.app/app_launcher"
     private val NOTIFICATION_CHANNEL_ID = "lx_app_update_channel"
     private val NOTIFICATION_ID = 2026
+    private val NOTIFICATION_PERMISSION_REQUEST_CODE = 1002
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -26,6 +29,14 @@ class MainActivity: FlutterActivity() {
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
+                "requestNotificationPermission" -> {
+                    val granted = requestNotificationPermissionIfNeeded()
+                    result.success(granted)
+                }
+                "checkNotificationPermission" -> {
+                    val granted = isNotificationPermissionGranted()
+                    result.success(granted)
+                }
                 "openUrl" -> {
                     val url = call.argument<String>("url")
                     if (!url.isNullOrEmpty()) {
@@ -72,6 +83,28 @@ class MainActivity: FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+    }
+
+    private fun isNotificationPermissionGranted(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                    NOTIFICATION_PERMISSION_REQUEST_CODE
+                )
+                return false
+            }
+        }
+        return true
     }
 
     private fun createNotificationChannel() {

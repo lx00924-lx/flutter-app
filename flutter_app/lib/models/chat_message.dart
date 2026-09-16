@@ -117,13 +117,22 @@ class ChatMessage {
       }).toList();
     }
 
+    String payloadContent = content;
+    if (payloadContent.trim().isEmpty && (attachments != null && attachments!.any((att) => att.startsWith('data:audio/')))) {
+      final audio = attachments!.firstWhere((att) => att.startsWith('data:audio/'));
+      final durationMatch = RegExp(r'duration=(\d+)').firstMatch(audio);
+      final durationSec = durationMatch?.group(1);
+      final durText = durationSec != null ? '（时长约 $durationSec 秒）' : '';
+      payloadContent = '[用户发送了一条语音消息$durText。提示：当前客户端未配置 ASR 语音识别转写服务，大模型接收到的是音频条。请直接回复已收到用户的语音消息，并提醒用户在 App「设置 ➔ 语音识别与合成」中配置 ASR 识别服务即可直接与 AI 进行语音文本交互。]';
+    }
+
     return {
       'id': id,
       'sessionId': sessionId,
       'role': role.name,
       'sender': role == MessageRole.user ? 'user' : 'ai',
-      'content': content,
-      'text': content,
+      'content': payloadContent,
+      'text': payloadContent,
       'reasoningContent': reasoningContent,
       'thought': reasoningContent,
       'createdAt': createdAt.toIso8601String(),

@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import '../models/app_settings.dart';
 import '../models/chat_message.dart';
+import '../utils/http_client_helper.dart';
 
 class ApiService {
   final Dio _dio = Dio(
@@ -12,6 +13,10 @@ class ApiService {
       receiveTimeout: const Duration(seconds: 120),
     ),
   );
+
+  ApiService() {
+    HttpClientHelper.configureProxy(_dio);
+  }
 
   /// 智能从指定端点获取可用模型列表（兼容 OpenAI、DeepSeek、火山方舟、Ollama、LM Studio 等）
   Future<List<String>> fetchModelList({
@@ -216,9 +221,19 @@ class ApiService {
           });
         } else {
           // 无图片：纯文本大模型（DeepSeek等）使用平铺字符串 content，避免多模态结构导致报错
-          final textPayload = content.isNotEmpty
-              ? content
-              : (attachments.any((att) => att.startsWith('data:audio/')) ? '[语音消息]' : '[文件附件]');
+          String textPayload = content;
+          if (textPayload.trim().isEmpty) {
+            final hasAudio = attachments.any((att) => att.startsWith('data:audio/'));
+            if (hasAudio) {
+              final audio = attachments.firstWhere((att) => att.startsWith('data:audio/'));
+              final durationMatch = RegExp(r'duration=(\d+)').firstMatch(audio);
+              final durationSec = durationMatch?.group(1);
+              final durText = durationSec != null ? '（时长约 $durationSec 秒）' : '';
+              textPayload = '[用户发送了一条语音消息$durText。提示：当前客户端未配置 ASR 语音识别转写服务，大模型接收到的是音频条。请直接回复已收到用户的语音消息，并提醒用户在 App「设置 ➔ 语音识别与合成」中配置 ASR 识别服务即可直接与 AI 进行语音文本交互。]';
+            } else {
+              textPayload = '[文件附件]';
+            }
+          }
           reversedSelected.add({
             'role': role,
             'content': textPayload,

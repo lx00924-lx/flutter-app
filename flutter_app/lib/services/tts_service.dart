@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/app_settings.dart';
+import '../utils/http_client_helper.dart';
 import 'storage_path_service.dart';
 
 /// TTS 统一语音合成服务（支持手机系统原生离线 TTS 与云端大模型拟人 TTS 双轨降级）
@@ -113,6 +114,7 @@ class TtsService {
         receiveTimeout: const Duration(seconds: 20),
         responseType: ResponseType.bytes,
       ));
+      HttpClientHelper.configureProxy(dio);
 
       final headers = <String, dynamic>{
         'Content-Type': 'application/json',

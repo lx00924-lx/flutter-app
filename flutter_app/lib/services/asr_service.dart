@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import '../models/app_settings.dart';
+import '../utils/http_client_helper.dart';
 
 /// 统一 ASR 语音识别转写服务
 class AsrService {
@@ -54,6 +55,7 @@ class AsrService {
         receiveTimeout: const Duration(seconds: 30),
         headers: headers,
       ));
+      HttpClientHelper.configureProxy(dio);
 
       final res = await dio.post(endpoint, data: formData);
       if (res.statusCode == 200 || res.statusCode == 201) {

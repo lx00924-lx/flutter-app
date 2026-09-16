@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -6,6 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../providers/settings_provider.dart';
 import '../services/tts_service.dart';
+import '../utils/http_client_helper.dart';
 
 class AsrSettingsScreen extends StatefulWidget {
   const AsrSettingsScreen({super.key});
@@ -159,19 +161,20 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
     );
   }
 
-  Uint8List _createSilentWav() {
+  Uint8List _createStandardTestWav() {
     const sampleRate = 16000;
     const numChannels = 1;
     const bitsPerSample = 16;
-    const numSamples = 1600;
-    const dataSize = numSamples * numChannels * (bitsPerSample ~/ 8);
+    const durationSeconds = 1.0;
+    final numSamples = (sampleRate * durationSeconds).toInt();
+    final dataSize = numSamples * numChannels * (bitsPerSample ~/ 8);
     final totalSize = 36 + dataSize;
 
     final bytes = ByteData(44 + dataSize);
-    bytes.setUint8(0, 0x52); bytes.setUint8(1, 0x49); bytes.setUint8(2, 0x46); bytes.setUint8(3, 0x46);
+    bytes.setUint8(0, 0x52); bytes.setUint8(1, 0x49); bytes.setUint8(2, 0x46); bytes.setUint8(3, 0x46); // 'RIFF'
     bytes.setUint32(4, totalSize, Endian.little);
-    bytes.setUint8(8, 0x57); bytes.setUint8(9, 0x41); bytes.setUint8(10, 0x56); bytes.setUint8(11, 0x45);
-    bytes.setUint8(12, 0x66); bytes.setUint8(13, 0x6D); bytes.setUint8(14, 0x74); bytes.setUint8(15, 0x20);
+    bytes.setUint8(8, 0x57); bytes.setUint8(9, 0x41); bytes.setUint8(10, 0x56); bytes.setUint8(11, 0x45); // 'WAVE'
+    bytes.setUint8(12, 0x66); bytes.setUint8(13, 0x6D); bytes.setUint8(14, 0x74); bytes.setUint8(15, 0x20); // 'fmt '
     bytes.setUint32(16, 16, Endian.little);
     bytes.setUint16(20, 1, Endian.little);
     bytes.setUint16(22, numChannels, Endian.little);
@@ -179,8 +182,14 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
     bytes.setUint32(28, sampleRate * numChannels * (bitsPerSample ~/ 8), Endian.little);
     bytes.setUint16(32, numChannels * (bitsPerSample ~/ 8), Endian.little);
     bytes.setUint16(34, bitsPerSample, Endian.little);
-    bytes.setUint8(36, 0x64); bytes.setUint8(37, 0x61); bytes.setUint8(38, 0x74); bytes.setUint8(39, 0x61);
+    bytes.setUint8(36, 0x64); bytes.setUint8(37, 0x61); bytes.setUint8(38, 0x74); bytes.setUint8(39, 0x61); // 'data'
     bytes.setUint32(40, dataSize, Endian.little);
+
+    // 写入 1 秒柔和标准音频信号，确保各大商用及自建语音识别后端均能正常解包识别
+    for (int i = 0; i < numSamples; i++) {
+      final sample = (math.sin(2 * math.pi * 440 * i / sampleRate) * 3000).toInt();
+      bytes.setInt16(44 + i * 2, sample, Endian.little);
+    }
 
     return bytes.buffer.asUint8List();
   }
@@ -204,7 +213,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
     final stopwatch = Stopwatch()..start();
 
     try {
-      final wavBytes = _createSilentWav();
+      final wavBytes = _createStandardTestWav();
       final model = _modelCtrl.text.trim();
       final apiKey = _keyCtrl.text.trim();
 
@@ -219,9 +228,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
       }
       final formData = FormData.fromMap(formMap);
 
-      final headers = <String, dynamic>{
-        'Connection': 'close', // 显式关闭长连接，杜绝移动端半开连接池导致的二次请求超时
-      };
+      final headers = <String, dynamic>{};
       if (apiKey.isNotEmpty) {
         headers['Authorization'] = 'Bearer $apiKey';
         headers['x-asr-api-key'] = apiKey;
@@ -232,6 +239,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
         receiveTimeout: const Duration(seconds: 30),
         headers: headers,
       ));
+      HttpClientHelper.configureProxy(dio);
 
       final res = await dio.post(endpoint, data: formData);
       final ms = stopwatch.elapsedMilliseconds;

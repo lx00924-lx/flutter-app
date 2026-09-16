@@ -5,12 +5,15 @@ import 'package:dio/dio.dart';
 import '../models/app_settings.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
+import '../utils/http_client_helper.dart';
 import 'storage_service.dart';
 
 /// 后台静默实时同步服务：实现 Flutter 客户端与服务端的自动增量同步及多端互斥下线监控
 class SyncService {
   static final SyncService instance = SyncService._();
-  SyncService._();
+  SyncService._() {
+    HttpClientHelper.configureProxy(_dio);
+  }
 
   final Dio _dio = Dio(
     BaseOptions(

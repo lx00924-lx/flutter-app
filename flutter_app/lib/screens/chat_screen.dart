@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:provider/provider.dart';
 import '../models/app_settings.dart';
 import '../models/chat_session.dart';
@@ -25,6 +26,7 @@ class _ChatScreenState extends State<ChatScreen> {
   int _lastMessageCount = 0;
   String? _lastSessionId;
   bool _userScrolledUp = false;
+  bool _isUserInteracting = false;
 
   @override
   void initState() {
@@ -36,14 +38,15 @@ class _ChatScreenState extends State<ChatScreen> {
     if (!_scrollController.hasClients) return;
     final maxScroll = _scrollController.position.maxScrollExtent;
     final currentScroll = _scrollController.offset;
-    // 若距离底部超过 80 像素，视为用户主动向上翻阅，暂停流式自动吸底
-    if (maxScroll - currentScroll > 80) {
+    final distFromBottom = maxScroll - currentScroll;
+    // 若距离底部超过 30 像素，视为用户主动向上翻阅，暂停流式自动吸底
+    if (distFromBottom > 30) {
       if (!_userScrolledUp) {
         setState(() {
           _userScrolledUp = true;
         });
       }
-    } else {
+    } else if (distFromBottom <= 10) {
       if (_userScrolledUp) {
         setState(() {
           _userScrolledUp = false;
@@ -60,11 +63,22 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _scrollToBottom({bool animate = true, bool force = false}) {
-    // 如果用户向上滑动了且不是强制滚动，则不吸底，保持用户的视口自由
-    if (_userScrolledUp && !force) return;
+    // 🛡️ 核心防手势打断：
+    // 1. 若用户手指正在触摸/拖拽屏幕(_isUserInteracting)，严禁调用 jumpTo/animateTo，否则会瞬间强行杀死手势！
+    // 2. 若用户已向上滑动翻看历史(_userScrolledUp)，且非强制（如发新消息/换会话），保持视口静止自由翻阅！
+    if (!force) {
+      if (_isUserInteracting || _userScrolledUp) return;
+      if (_scrollController.hasClients) {
+        final distFromBottom = _scrollController.position.maxScrollExtent - _scrollController.offset;
+        if (distFromBottom > 30) return;
+      }
+    }
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients) return;
+      // 帧回调内部二次校验，避免在回调延迟微秒内用户手指触碰而被强行打断
+      if (!force && (_isUserInteracting || _userScrolledUp)) return;
+
       final maxScroll = _scrollController.position.maxScrollExtent;
       if (animate) {
         _scrollController.animateTo(
@@ -127,6 +141,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _showModelSelector(BuildContext context) {
+    FocusManager.instance.primaryFocus?.unfocus();
     final settingsProvider = context.read<SettingsProvider>();
     final endpoints = settingsProvider.settings.apiEndpoints;
 
@@ -188,7 +203,9 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         );
       },
-    );
+    ).then((_) {
+      FocusManager.instance.primaryFocus?.unfocus();
+    });
   }
 
   @override
@@ -203,8 +220,9 @@ class _ChatScreenState extends State<ChatScreen> {
       final isSessionSwitched = chat.currentSession?.id != _lastSessionId;
       _lastMessageCount = chat.messages.length;
       _lastSessionId = chat.currentSession?.id;
-      // 会话切换或收到新消息时，重置用户上滑状态并强制吸底
+      // 会话切换或收到新消息时，重置用户上滑与手势交互状态并强制吸底
       _userScrolledUp = false;
+      _isUserInteracting = false;
       _scrollToBottom(animate: !isSessionSwitched, force: true);
     } else if (chat.isGenerating) {
       _scrollToBottom(animate: false);
@@ -215,6 +233,9 @@ class _ChatScreenState extends State<ChatScreen> {
         : settings.activeModelDisplayName;
 
     return Scaffold(
+      onDrawerChanged: (isOpen) {
+        FocusManager.instance.primaryFocus?.unfocus();
+      },
       appBar: AppBar(
         title: InkWell(
           onTap: () => _showModelSelector(context),
@@ -255,10 +276,14 @@ class _ChatScreenState extends State<ChatScreen> {
           IconButton(
             icon: const Icon(Icons.phone_in_talk_outlined),
             tooltip: '实时语音通话',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const VoiceCallScreen()),
-            ),
+            onPressed: () async {
+              FocusManager.instance.primaryFocus?.unfocus();
+              await Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const VoiceCallScreen()),
+              );
+              FocusManager.instance.primaryFocus?.unfocus();
+            },
           ),
         ],
       ),
@@ -280,6 +305,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     IconButton(
                       icon: const Icon(Icons.add),
                       onPressed: () {
+                        FocusManager.instance.primaryFocus?.unfocus();
                         chat.createNewSession();
                         Navigator.pop(context);
                       },
@@ -313,6 +339,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         style: const TextStyle(fontSize: 11),
                       ),
                       onTap: () {
+                        FocusManager.instance.primaryFocus?.unfocus();
                         chat.selectSession(session);
                         Navigator.pop(context);
                       },
@@ -329,24 +356,28 @@ class _ChatScreenState extends State<ChatScreen> {
                 leading: const Icon(Icons.tune_outlined, size: 20),
                 title: const Text('会话管理与备份', style: TextStyle(fontSize: 13)),
                 trailing: const Icon(Icons.chevron_right, size: 18),
-                onTap: () {
+                onTap: () async {
+                  FocusManager.instance.primaryFocus?.unfocus();
                   Navigator.pop(context);
-                  Navigator.push(
+                  await Navigator.push(
                     context,
                     MaterialPageRoute(builder: (_) => const SessionManagementScreen()),
                   );
+                  FocusManager.instance.primaryFocus?.unfocus();
                 },
               ),
               ListTile(
                 leading: const Icon(Icons.settings_outlined, size: 20),
                 title: const Text('系统设置', style: TextStyle(fontSize: 13)),
                 trailing: const Icon(Icons.chevron_right, size: 18),
-                onTap: () {
+                onTap: () async {
+                  FocusManager.instance.primaryFocus?.unfocus();
                   Navigator.pop(context);
-                  Navigator.push(
+                  await Navigator.push(
                     context,
                     MaterialPageRoute(builder: (_) => const SettingsScreen()),
                   );
+                  FocusManager.instance.primaryFocus?.unfocus();
                 },
               ),
             ],
@@ -360,92 +391,139 @@ class _ChatScreenState extends State<ChatScreen> {
               backgroundColor: const Color(0xFF0284C7).withOpacity(0.9),
               foregroundColor: Colors.white,
               tooltip: '打开检修控制台',
-              onPressed: () {
-                Navigator.push(
+              onPressed: () async {
+                FocusManager.instance.primaryFocus?.unfocus();
+                await Navigator.push(
                   context,
                   MaterialPageRoute(builder: (_) => const LogConsoleScreen()),
                 );
+                FocusManager.instance.primaryFocus?.unfocus();
               },
               child: const Icon(Icons.bug_report, size: 20),
             )
           : null,
-      body: Stack(
-        children: [
-          // 自定义背景图片渲染（支持暗夜模式开关与透明度，使用缓存内存图节约解码开销）
-          if (settings.customBackground.isNotEmpty &&
-              (!isDark || settings.showBackgroundInDarkMode) &&
-              settingsProvider.customBackgroundBytes != null) ...[
-            Positioned.fill(
-              child: Opacity(
-                opacity: (settings.backgroundOpacity / 100).clamp(0.0, 1.0),
-                child: Image.memory(
-                  settingsProvider.customBackgroundBytes!,
-                  fit: BoxFit.cover,
+      body: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () {
+          FocusManager.instance.primaryFocus?.unfocus();
+        },
+        child: Stack(
+          children: [
+            // 自定义背景图片渲染（支持暗夜模式开关与透明度，使用缓存内存图节约解码开销）
+            if (settings.customBackground.isNotEmpty &&
+                (!isDark || settings.showBackgroundInDarkMode) &&
+                settingsProvider.customBackgroundBytes != null) ...[
+              Positioned.fill(
+                child: Opacity(
+                  opacity: (settings.backgroundOpacity / 100).clamp(0.0, 1.0),
+                  child: Image.memory(
+                    settingsProvider.customBackgroundBytes!,
+                    fit: BoxFit.cover,
+                  ),
                 ),
               ),
+            ],
+            Column(
+              children: [
+                Expanded(
+                  child: chat.messages.isEmpty
+                      ? Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                width: 64,
+                                height: 64,
+                                decoration: BoxDecoration(
+                                  gradient: const LinearGradient(
+                                    colors: [Color(0xFF0284C7), Color(0xFF2563EB)],
+                                  ),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: const Icon(Icons.auto_awesome, color: Colors.white, size: 36),
+                              ),
+                              const SizedBox(height: 16),
+                              Text(
+                                '随时向 ${settings.aiName.isNotEmpty ? settings.aiName : 'DeepSeek'} 提问',
+                                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                '原生 Flutter 驱动 · 支持超长思考链 · 毫秒级流式响应',
+                                style: TextStyle(
+                                  color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ],
+                          ),
+                        )
+                      : NotificationListener<ScrollNotification>(
+                          onNotification: (notification) {
+                            if (notification is ScrollStartNotification) {
+                              if (notification.dragDetails != null) {
+                                _isUserInteracting = true;
+                              }
+                            } else if (notification is UserScrollNotification) {
+                              if (notification.direction != ScrollDirection.idle) {
+                                _isUserInteracting = true;
+                              }
+                            } else if (notification is ScrollUpdateNotification) {
+                              final metrics = notification.metrics;
+                              final distFromBottom = metrics.maxScrollExtent - metrics.pixels;
+                              if (distFromBottom > 30) {
+                                if (!_userScrolledUp) {
+                                  setState(() {
+                                    _userScrolledUp = true;
+                                  });
+                                }
+                              } else if (distFromBottom <= 10) {
+                                if (_userScrolledUp) {
+                                  setState(() {
+                                    _userScrolledUp = false;
+                                  });
+                                }
+                              }
+                            } else if (notification is ScrollEndNotification) {
+                              _isUserInteracting = false;
+                              final metrics = notification.metrics;
+                              final distFromBottom = metrics.maxScrollExtent - metrics.pixels;
+                              if (distFromBottom <= 15 && _userScrolledUp) {
+                                setState(() {
+                                  _userScrolledUp = false;
+                                });
+                              }
+                            }
+                            return false;
+                          },
+                          child: ListView.builder(
+                            controller: _scrollController,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            cacheExtent: 600,
+                            addRepaintBoundaries: true,
+                            itemCount: chat.messages.length,
+                            itemBuilder: (ctx, index) {
+                              final msg = chat.messages[index];
+                              // 检查是否为整个会话中最后一条 Assistant 消息
+                              final isLatestAssistant = msg.role == MessageRole.assistant &&
+                                  index == chat.messages.lastIndexWhere((m) => m.role == MessageRole.assistant);
+                              return MessageBubble(
+                                message: msg,
+                                isLatestAssistant: isLatestAssistant,
+                              );
+                            },
+                          ),
+                        ),
+                ),
+                ChatInputBar(
+                  onSend: (text, {attachments}) => chat.sendMessage(text, attachments: attachments),
+                  onStop: () => chat.stopGeneration(),
+                  isGenerating: chat.isGenerating,
+                ),
+              ],
             ),
           ],
-          Column(
-            children: [
-              Expanded(
-                child: chat.messages.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Container(
-                              width: 64,
-                              height: 64,
-                              decoration: BoxDecoration(
-                                gradient: const LinearGradient(
-                                  colors: [Color(0xFF0284C7), Color(0xFF2563EB)],
-                                ),
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: const Icon(Icons.auto_awesome, color: Colors.white, size: 36),
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              '随时向 ${settings.aiName.isNotEmpty ? settings.aiName : 'DeepSeek'} 提问',
-                              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              '原生 Flutter 驱动 · 支持超长思考链 · 毫秒级流式响应',
-                              style: TextStyle(
-                                color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
-                                fontSize: 13,
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    : ListView.builder(
-                        controller: _scrollController,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        cacheExtent: 600,
-                        addRepaintBoundaries: true,
-                        itemCount: chat.messages.length,
-                        itemBuilder: (ctx, index) {
-                          final msg = chat.messages[index];
-                          // 检查是否为整个会话中最后一条 Assistant 消息
-                          final isLatestAssistant = msg.role == MessageRole.assistant &&
-                              index == chat.messages.lastIndexWhere((m) => m.role == MessageRole.assistant);
-                          return MessageBubble(
-                            message: msg,
-                            isLatestAssistant: isLatestAssistant,
-                          );
-                        },
-                      ),
-              ),
-              ChatInputBar(
-                onSend: (text, {attachments}) => chat.sendMessage(text, attachments: attachments),
-                onStop: () => chat.stopGeneration(),
-                isGenerating: chat.isGenerating,
-              ),
-            ],
-          ),
-        ],
+        ),
       ),
     );
   }

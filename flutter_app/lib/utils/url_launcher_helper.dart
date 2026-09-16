@@ -5,6 +5,34 @@ import 'package:flutter/services.dart';
 class UrlLauncherHelper {
   static const MethodChannel _channel = MethodChannel('com.lx.app/app_launcher');
 
+  /// Android 端：请求系统通知权限（Android 13+ 运行时通知权限申请）
+  static Future<bool> requestNotificationPermission() async {
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        final bool? res = await _channel.invokeMethod<bool>('requestNotificationPermission');
+        return res ?? false;
+      } catch (e) {
+        debugPrint('请求通知权限失败: $e');
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// Android 端：检查系统通知权限是否已授予
+  static Future<bool> checkNotificationPermission() async {
+    if (!kIsWeb && Platform.isAndroid) {
+      try {
+        final bool? res = await _channel.invokeMethod<bool>('checkNotificationPermission');
+        return res ?? false;
+      } catch (e) {
+        debugPrint('检查通知权限失败: $e');
+        return false;
+      }
+    }
+    return true;
+  }
+
   /// Android 端：更新系统通知栏下载进度条
   static Future<void> showDownloadNotification({
     required int progress,
