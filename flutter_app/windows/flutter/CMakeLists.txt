@@ -35,17 +35,17 @@ endif()
 #
 # This wrapper hides the platform-specific details of the Flutter C API.
 set(WRAPPER_SOURCES
-  "${WRAPPER_ROOT}/ephemeral/cpp_client_wrapper/core_implementations.cc"
-  "${WRAPPER_ROOT}/ephemeral/cpp_client_wrapper/standard_codec.cc"
-  "${WRAPPER_ROOT}/ephemeral/cpp_client_wrapper/plugin_registrar.cc"
-  "${WRAPPER_ROOT}/ephemeral/cpp_client_wrapper/flutter_engine.cc"
-  "${WRAPPER_ROOT}/ephemeral/cpp_client_wrapper/flutter_view_controller.cc"
+  "${FLUTTER_EPHEMERAL_DIR}/cpp_client_wrapper/core_implementations.cc"
+  "${FLUTTER_EPHEMERAL_DIR}/cpp_client_wrapper/standard_codec.cc"
+  "${FLUTTER_EPHEMERAL_DIR}/cpp_client_wrapper/plugin_registrar.cc"
+  "${FLUTTER_EPHEMERAL_DIR}/cpp_client_wrapper/flutter_engine.cc"
+  "${FLUTTER_EPHEMERAL_DIR}/cpp_client_wrapper/flutter_view_controller.cc"
 )
 
 add_library(flutter_wrapper_plugin INTERFACE)
 target_include_directories(flutter_wrapper_plugin INTERFACE
-  "${WRAPPER_ROOT}/ephemeral"
-  "${WRAPPER_ROOT}/ephemeral/cpp_client_wrapper/include"
+  "${FLUTTER_EPHEMERAL_DIR}"
+  "${FLUTTER_EPHEMERAL_DIR}/cpp_client_wrapper/include"
 )
 
 add_library(flutter_wrapper_app STATIC
@@ -55,8 +55,8 @@ apply_standard_settings(flutter_wrapper_app)
 set_target_properties(flutter_wrapper_app PROPERTIES
   POSITION_INDEPENDENT_CODE ON)
 target_include_directories(flutter_wrapper_app PUBLIC
-  "${WRAPPER_ROOT}/ephemeral"
-  "${WRAPPER_ROOT}/ephemeral/cpp_client_wrapper/include"
+  "${FLUTTER_EPHEMERAL_DIR}"
+  "${FLUTTER_EPHEMERAL_DIR}/cpp_client_wrapper/include"
 )
 target_link_libraries(flutter_wrapper_app PUBLIC
   "${FLUTTER_EPHEMERAL_DIR}/flutter_windows.dll.lib"
