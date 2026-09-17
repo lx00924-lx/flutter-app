@@ -21,11 +21,11 @@ if(MSVC)
   )
 endif()
 
-# Application build; see runner/CMakeLists.txt.
-add_subdirectory("runner")
-
 # Generated code build; see flutter/CMakeLists.txt.
 add_subdirectory("flutter")
+
+# Application build; see runner/CMakeLists.txt.
+add_subdirectory("runner")
 
 # For visual studio solutions, set the project startup project
 set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY VS_STARTUP_PROJECT "${BINARY_NAME}")
