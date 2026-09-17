@@ -25,3 +25,9 @@ flutter_app/.packages
 flutter_app/android/.gradle/
 flutter_app/android/local.properties
 flutter_app/android/gradle-wrapper.jar
+
+# Flutter Windows: generated plugin registration (recreated by `flutter build windows`)
+flutter_app/windows/flutter/ephemeral/
+flutter_app/windows/flutter/generated_plugins.cmake
+flutter_app/windows/flutter/generated_plugin_registrant.cc
+flutter_app/windows/flutter/generated_plugin_registrant.h
