@@ -1,5 +1,9 @@
-# CMake project that writes Flutter-specific build targets.
+# cmake_minimum_required must be one of the first lines in CMakeLists.txt.
 cmake_minimum_required(VERSION 3.14)
+
+# The Flutter wrapper library.
+#
+# This wrapper hides the platform-specific details of the Flutter C API.
 project(flutter_wrapper LANGUAGES CXX)
 
 # This value is used when generating builds using this file, and it must not
@@ -10,7 +14,10 @@ set(WRAPPER_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Look for the generated config file in the build directory. If it's not found,
 # use the default.
-set(FLUTTER_CONFIG_FILE "${CMAKE_BINARY_DIR}/flutter/ephemeral/generated_config.cmake")
+set(FLUTTER_CONFIG_FILE "${CMAKE_CURRENT_BINARY_DIR}/ephemeral/generated_config.cmake")
+if(NOT EXISTS "${FLUTTER_CONFIG_FILE}")
+  set(FLUTTER_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/ephemeral/generated_config.cmake")
+endif()
 if(EXISTS "${FLUTTER_CONFIG_FILE}")
   include("${FLUTTER_CONFIG_FILE}")
 else()
@@ -20,7 +27,7 @@ endif()
 
 # Set up the library files that need to be copied.
 set(FLUTTER_LIBRARY "${FLUTTER_EPHEMERAL_DIR}/flutter_windows.dll")
-set(FLUTTER_PLUGIN_SYMLINK_DIR "${CMAKE_BINARY_DIR}/plugins")
+set(FLUTTER_PLUGIN_SYMLINK_DIR "${CMAKE_CURRENT_BINARY_DIR}/plugins")
 
 # Ensure apply_standard_settings is defined
 if(NOT COMMAND apply_standard_settings)
@@ -42,11 +49,20 @@ set(WRAPPER_SOURCES
   "${FLUTTER_EPHEMERAL_DIR}/cpp_client_wrapper/flutter_view_controller.cc"
 )
 
+# === Core build targets =======================================================
+
+# Custom target to assemble Flutter assets and build the engine wrapper.
+add_custom_target(flutter_assemble DEPENDS
+  "${FLUTTER_EPHEMERAL_DIR}/flutter_windows.dll"
+  ${WRAPPER_SOURCES}
+)
+
 add_library(flutter_wrapper_plugin INTERFACE)
 target_include_directories(flutter_wrapper_plugin INTERFACE
   "${FLUTTER_EPHEMERAL_DIR}"
   "${FLUTTER_EPHEMERAL_DIR}/cpp_client_wrapper/include"
 )
+add_dependencies(flutter_wrapper_plugin flutter_assemble)
 
 add_library(flutter_wrapper_app STATIC
   ${WRAPPER_SOURCES}
@@ -61,6 +77,7 @@ target_include_directories(flutter_wrapper_app PUBLIC
 target_link_libraries(flutter_wrapper_app PUBLIC
   "${FLUTTER_EPHEMERAL_DIR}/flutter_windows.dll.lib"
 )
+add_dependencies(flutter_wrapper_app flutter_assemble)
 
 # === Package-level support ====================================================
 
@@ -69,7 +86,7 @@ function(flutter_copy_file TARGET SOURCE DESTINATION)
   add_custom_command(
     TARGET ${TARGET} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-      ${SOURCE}
-      ${DESTINATION}
+      "${SOURCE}"
+      "${DESTINATION}"
   )
 endfunction()
