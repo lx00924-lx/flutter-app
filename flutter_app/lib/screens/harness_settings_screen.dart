@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
 import '../models/app_settings.dart';
+import '../config/app_config.dart';
 import '../utils/bridge_script_helper.dart';
 import '../services/sync_service.dart';
 
@@ -242,7 +243,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
           scriptPath,
           '--token', token,
           '--harness-url', 'http://$harnessUrl',
-          '--server', 'https://www.lx00924ai.top',
+          '--server', AppConfig.normalizedServerBaseUrl,
         ],
         mode: ProcessStartMode.detachedWithStdio,
       );
@@ -981,7 +982,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                   onPressed: () async {
                                     final batContent = BridgeScriptHelper.generateBatContent(
                                       token: _tokenCtrl.text.trim(),
-                                      serverUrl: 'https://www.lx00924ai.top',
+                                      serverUrl: AppConfig.normalizedServerBaseUrl,
                                       harnessUrl: 'http://${_harnessUrlCtrl.text.trim()}',
                                     );
                                     final savedPath = await BridgeScriptHelper.downloadFile(
@@ -1082,7 +1083,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                               onPressed: () async {
                                 final batContent = BridgeScriptHelper.generateBatContent(
                                   token: _tokenCtrl.text.trim(),
-                                  serverUrl: 'https://www.lx00924ai.top',
+                                  serverUrl: AppConfig.normalizedServerBaseUrl,
                                   harnessUrl: 'http://${_harnessUrlCtrl.text.trim()}',
                                 );
                                 final savedPath = await BridgeScriptHelper.downloadFile(

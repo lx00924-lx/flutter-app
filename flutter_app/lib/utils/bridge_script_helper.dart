@@ -5,6 +5,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:path_provider/path_provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'web_download_stub.dart' if (dart.library.html) 'web_download_helper.dart' as web_download;
+import '../config/app_config.dart';
 
 class BridgeScriptHelper {
   /// 从应用内置 Assets 中读取完整的工业级生产 deepseek_bridge.py
@@ -27,7 +28,7 @@ class BridgeScriptHelper {
     required String serverUrl,
     required String harnessUrl,
   }) {
-    final cleanServer = serverUrl.isNotEmpty ? serverUrl : 'https://www.lx00924ai.top';
+    final cleanServer = serverUrl.isNotEmpty ? serverUrl : AppConfig.normalizedServerBaseUrl;
     final cleanHarness = harnessUrl.isNotEmpty ? harnessUrl : 'http://127.0.0.1:3080';
     final cleanToken = token.isNotEmpty ? token : 'agent_default';
 
@@ -71,9 +72,12 @@ if %errorlevel% neq 0 (
 
   /// 获取标准 Python 桥接守护脚本 (deepseek_bridge.py)
   static String generatePyContent({
-    String serverUrl = 'https://www.lx00924ai.top',
+    String? serverUrl,
     String defaultHarnessUrl = 'http://127.0.0.1:3080',
   }) {
+    final resolvedServerUrl = (serverUrl != null && serverUrl.trim().isNotEmpty)
+        ? serverUrl.trim()
+        : AppConfig.normalizedServerBaseUrl;
     return '''#!/usr/bin/env python3
 """
 DeepSeek Harness 本地安全反向桥接客户端 (DeepSeek Bridge v3.6 - 工业增强/双模高可用版)
@@ -107,7 +111,7 @@ logger = logging.getLogger("Bridge")
 def parse_args():
     parser = argparse.ArgumentParser(description="DeepSeek Harness 本地反向桥接")
     parser.add_argument("--token", type=str, required=True, help="配对通信 Token")
-    parser.add_argument("--server", type=str, default="$serverUrl", help="中继服务器地址")
+    parser.add_argument("--server", type=str, default="$resolvedServerUrl", help="中继服务器地址")
     parser.add_argument("--harness-url", type=str, default="$defaultHarnessUrl", help="本地 Harness API 地址")
     return parser.parse_args()
 

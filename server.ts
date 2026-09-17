@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import FormData from "form-data";
 import { createServer } from "http";
@@ -22,6 +23,11 @@ const ACTIVE_SESSIONS_FILE = path.join(DATA_DIR, "active_sessions.json");
 const MODEL_LIMITS_FILE = path.join(DATA_DIR, "model_limits.json");
 const MODEL_LIMITS_EXAMPLE = path.join(process.cwd(), "model_limits.example.json");
 const UPLOADS_DIR = path.join(process.cwd(), "messages_media");
+
+// 中继服务器对外地址（用于生成 Bridge 启动命令 / 一键 bat 脚本）。
+// 自建部署无需改代码：设置环境变量 SERVER_BASE_URL，或写入 .env 文件。
+const SERVER_BASE_URL =
+  (process.env.SERVER_BASE_URL || "").trim().replace(/\/+$/, "") || "https://www.lx00924ai.top";
 
 interface DeviceSession {
   clientSessionId: string;
@@ -403,7 +409,7 @@ async function runServerSideGeneration({
 
       if (!isAgentOnline) {
         // Agent is offline
-        const offlineNotice = `> ⚠️ **【本地 Agent 模式提示】**\n> 检测到您已开启 **Agent 模式**，但未检测到本地 DeepSeek Harness 桥接连接。\n>\n> **快速解决**：\n> 1. 打开应用右上角 **设置 ➔ 🤖 本地 Agent**；\n> 2. 复制启动命令并在本地终端运行：\`python deepseek_bridge.py --token "${agentToken}" --server "https://www.lx00924ai.top" --harness-url "http://127.0.0.1:3080"\`；\n> 3. 或在聊天输入框左侧一键切换回 **「💬 普通模式」**。`;
+        const offlineNotice = `> ⚠️ **【本地 Agent 模式提示】**\n> 检测到您已开启 **Agent 模式**，但未检测到本地 DeepSeek Harness 桥接连接。\n>\n> **快速解决**：\n> 1. 打开应用右上角 **设置 ➔ 🤖 本地 Agent**；\n> 2. 复制启动命令并在本地终端运行：\`python deepseek_bridge.py --token "${agentToken}" --server "${SERVER_BASE_URL}" --harness-url "http://127.0.0.1:3080"\`；\n> 3. 或在聊天输入框左侧一键切换回 **「💬 普通模式」**。`;
         
         onChunk(offlineNotice);
         genState.status = 'completed';
@@ -2331,7 +2337,7 @@ if %errorlevel% neq 0 (
   app.get("/api/agent/download-bat", (req, res) => {
     try {
       const token = (req.query.token as string)?.trim() || "default_agent_token";
-      const serverUrl = (req.query.server as string)?.trim() || "https://www.lx00924ai.top";
+      const serverUrl = (req.query.server as string)?.trim() || SERVER_BASE_URL;
       const harnessUrl = (req.query.harness as string)?.trim() || "http://127.0.0.1:3080";
       const batContent = `@echo off
 chcp 65001 >nul

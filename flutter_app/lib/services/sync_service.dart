@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:dio/dio.dart';
 import '../models/app_settings.dart';
+import '../config/app_config.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../utils/http_client_helper.dart';
@@ -27,7 +28,7 @@ class SyncService {
   Timer? _sessionWatcherTimer;
   void Function(String reason)? onForceLogout;
 
-  /// 获取服务器基地址（Web 端自适应 origin，App 原生端连接生产服务端）
+  /// 获取服务器基地址（Web 端自适应 origin，App 原生端使用 AppConfig 中可配置的地址）
   String get serverBaseUrl {
     if (kIsWeb) {
       final uri = Uri.base;
@@ -36,7 +37,7 @@ class SyncService {
         return '${uri.scheme}://${uri.host}$portPart';
       }
     }
-    return 'https://www.lx00924ai.top';
+    return AppConfig.normalizedServerBaseUrl;
   }
 
   /// 统一注入设备与会话识别头
