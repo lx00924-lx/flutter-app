@@ -767,62 +767,93 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                             ),
                           ),
 
-                          // 麦克风录音控制 (在同一个按钮中无缝融合长按与点按双模式)
+                          // 麦克风录音控制 (状态驱动的手势隔离：点击录音中与静止/长按状态完全解耦)
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                            child: GestureDetector(
-                              behavior: HitTestBehavior.opaque,
-                              onTap: () {
-                                if (_isRecording) {
-                                  _stopRecording(cancelled: false);
-                                } else {
-                                  _toggleClickRecording();
-                                }
-                              },
-                              onLongPressStart: (details) {
-                                if (!_isRecording) {
-                                  HapticFeedback.lightImpact();
-                                  _startRecording(isLongPress: true);
-                                }
-                              },
-                              onLongPressMoveUpdate: (details) {
-                                if (_isRecording && _isLongPress) {
-                                  // offsetFromOrigin.dy 向上滑动为负值
-                                  final dy = details.offsetFromOrigin.dy;
-                                  final cancelling = dy < -30;
-                                  if (cancelling != _isSlideCancelling) {
-                                    HapticFeedback.mediumImpact();
-                                    setState(() => _isSlideCancelling = cancelling);
-                                  }
-                                }
-                              },
-                              onLongPressEnd: (_) {
-                                HapticFeedback.lightImpact();
-                                _stopRecording(cancelled: _isSlideCancelling);
-                              },
-                              onLongPressCancel: () {
-                                _stopRecording(cancelled: true);
-                              },
-                              child: AnimatedContainer(
-                                duration: const Duration(milliseconds: 150),
-                                padding: const EdgeInsets.all(8),
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: _isRecording
-                                      ? (_isSlideCancelling ? const Color(0xFFEF4444) : const Color(0xFF0284C7))
-                                      : Colors.transparent,
-                                ),
-                                child: Icon(
-                                  _isRecording
-                                      ? (_isSlideCancelling ? Icons.cancel_outlined : Icons.stop_rounded)
-                                      : Icons.mic_none_outlined,
-                                  size: 20,
-                                  color: _isRecording
-                                      ? Colors.white
-                                      : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
-                                ),
-                              ),
-                            ),
+                            child: _isRecording && !_isLongPress
+                                // 模式 A：点击录音进行中 -> 纯点击停止按钮，0 延迟响应，彻底脱离长按手势竞技场
+                                ? Tooltip(
+                                    message: '点击完成录音',
+                                    child: GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      onTap: () {
+                                        HapticFeedback.lightImpact();
+                                        _stopRecording(cancelled: false);
+                                      },
+                                      child: AnimatedContainer(
+                                        duration: const Duration(milliseconds: 150),
+                                        padding: const EdgeInsets.all(8),
+                                        decoration: const BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: Color(0xFF0284C7),
+                                        ),
+                                        child: const Icon(
+                                          Icons.stop_rounded,
+                                          size: 20,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                    ),
+                                  )
+                                // 模式 B：静止状态 / 长按录音中 -> 完整支持轻点触发点击录音，长按触发长按并支持上滑取消
+                                : Tooltip(
+                                    message: _isRecording ? '松开手指完成录音，上滑取消' : '点击/长按录音 (长按可上滑取消)',
+                                    child: GestureDetector(
+                                      behavior: HitTestBehavior.opaque,
+                                      onTap: () {
+                                        if (!_isRecording) {
+                                          _startRecording(isLongPress: false);
+                                        }
+                                      },
+                                      onLongPressStart: (details) {
+                                        if (!_isRecording) {
+                                          HapticFeedback.lightImpact();
+                                          _startRecording(isLongPress: true);
+                                        }
+                                      },
+                                      onLongPressMoveUpdate: (details) {
+                                        if (_isRecording && _isLongPress) {
+                                          // offsetFromOrigin.dy 向上滑动为负值
+                                          final dy = details.offsetFromOrigin.dy;
+                                          final cancelling = dy < -30;
+                                          if (cancelling != _isSlideCancelling) {
+                                            HapticFeedback.mediumImpact();
+                                            setState(() => _isSlideCancelling = cancelling);
+                                          }
+                                        }
+                                      },
+                                      onLongPressEnd: (_) {
+                                        if (_isRecording && _isLongPress) {
+                                          HapticFeedback.lightImpact();
+                                          _stopRecording(cancelled: _isSlideCancelling);
+                                        }
+                                      },
+                                      onLongPressCancel: () {
+                                        if (_isRecording && _isLongPress) {
+                                          _stopRecording(cancelled: true);
+                                        }
+                                      },
+                                      child: AnimatedContainer(
+                                        duration: const Duration(milliseconds: 150),
+                                        padding: const EdgeInsets.all(8),
+                                        decoration: BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: _isRecording
+                                              ? (_isSlideCancelling ? const Color(0xFFEF4444) : const Color(0xFF0284C7))
+                                              : Colors.transparent,
+                                        ),
+                                        child: Icon(
+                                          _isRecording
+                                              ? (_isSlideCancelling ? Icons.cancel_outlined : Icons.stop_rounded)
+                                              : Icons.mic_none_outlined,
+                                          size: 20,
+                                          color: _isRecording
+                                              ? Colors.white
+                                              : (isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
                           ),
                         ],
                       ),
