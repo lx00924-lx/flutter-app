@@ -22,6 +22,13 @@ endif()
 set(FLUTTER_LIBRARY "${FLUTTER_EPHEMERAL_DIR}/flutter_windows.dll")
 set(FLUTTER_PLUGIN_SYMLINK_DIR "${CMAKE_BINARY_DIR}/plugins")
 
+# Ensure apply_standard_settings is defined
+if(NOT COMMAND apply_standard_settings)
+  function(apply_standard_settings TARGET)
+    target_compile_features(${TARGET} PUBLIC cxx_std_17)
+  endfunction()
+endif()
+
 # === Target configuration =====================================================
 
 # The Flutter wrapper library.
