@@ -71,80 +71,79 @@ class _SplashScreenState extends State<SplashScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-              if (splashImageBytes != null)
-                Container(
-                  width: 90,
-                  height: 90,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(22),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.1),
-                        blurRadius: 16,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
-                    image: DecorationImage(
-                      image: MemoryImage(splashImageBytes),
-                      fit: BoxFit.cover,
+            if (splashImageBytes != null)
+              Container(
+                width: 90,
+                height: 90,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(22),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 16,
+                      offset: const Offset(0, 8),
                     ),
+                  ],
+                  image: DecorationImage(
+                    image: MemoryImage(splashImageBytes),
+                    fit: BoxFit.cover,
                   ),
-                )
-              else
-                Container(
-                  width: 80,
-                  height: 80,
-                  decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      colors: [Color(0xFF0284C7), Color(0xFF2563EB)],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
+                ),
+              )
+            else
+              Container(
+                width: 80,
+                height: 80,
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF0284C7), Color(0xFF2563EB)],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(22),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFF0284C7).withOpacity(0.3),
+                      blurRadius: 16,
+                      offset: const Offset(0, 8),
                     ),
-                    borderRadius: BorderRadius.circular(22),
-                    boxShadow: [
-                      BoxShadow(
-                        color: const Color(0xFF0284C7).withOpacity(0.3),
-                        blurRadius: 16,
-                        offset: const Offset(0, 8),
-                      ),
-                    ],
-                  ),
-                  child: const Icon(
-                    Icons.auto_awesome,
-                    color: Colors.white,
-                    size: 40,
-                  ),
+                  ],
                 ),
-              const SizedBox(height: 24),
-              Text(
-                settings.splashTitle.isNotEmpty ? settings.splashTitle : 'Aether-X',
-                style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 0.5,
-                  color: isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
+                child: const Icon(
+                  Icons.auto_awesome,
+                  color: Colors.white,
+                  size: 40,
                 ),
               ),
-              const SizedBox(height: 8),
-              Text(
-                settings.splashSubtitle.isNotEmpty ? settings.splashSubtitle : 'Loading AI Experience',
-                style: TextStyle(
-                  fontSize: 14,
-                  color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
-                  letterSpacing: 0.2,
-                ),
+            const SizedBox(height: 24),
+            Text(
+              settings.splashTitle.isNotEmpty ? settings.splashTitle : 'Aether-X',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 0.5,
+                color: isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
               ),
-              const SizedBox(height: 48),
-              SizedBox(
-                width: 24,
-                height: 24,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2.5,
-                  color: const Color(0xFF0284C7).withOpacity(0.8),
-                ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              settings.splashSubtitle.isNotEmpty ? settings.splashSubtitle : 'Loading AI Experience',
+              style: TextStyle(
+                fontSize: 14,
+                color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
+                letterSpacing: 0.2,
               ),
-            ],
-          ),
+            ),
+            const SizedBox(height: 48),
+            SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(
+                strokeWidth: 2.5,
+                color: const Color(0xFF0284C7).withOpacity(0.8),
+              ),
+            ),
+          ],
         ),
       ),
     );
