@@ -53,18 +53,28 @@ android {
 
     signingConfigs {
         release {
-            keyAlias keystoreProperties['keyAlias']
-            keyPassword keystoreProperties['keyPassword']
-            storeFile(rootProject.file("app/${keystoreProperties['storeFile']}").exists() ? 
-                      rootProject.file("app/${keystoreProperties['storeFile']}") : 
-                      file(keystoreProperties['storeFile']))
-            storePassword keystoreProperties['storePassword']
+            // key.properties / AI.jks 不入库（内含签名口令），本地存在时才配置正式签名。
+            // 放置位置：android/key.properties 指向 android/app/AI.jks
+            if (keystorePropertiesFile.exists()) {
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+                storeFile(rootProject.file("app/${keystoreProperties['storeFile']}").exists() ? 
+                          rootProject.file("app/${keystoreProperties['storeFile']}") : 
+                          file(keystoreProperties['storeFile']))
+                storePassword keystoreProperties['storePassword']
+            }
         }
     }
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
+            // 有 key.properties -> 正式签名（AI.jks）；缺失 -> 回退 debug 签名，
+            // 保证新克隆的仓库依旧可以构建（发布前请自行放回 key.properties + AI.jks）。
+            if (keystorePropertiesFile.exists()) {
+                signingConfig signingConfigs.release
+            } else {
+                signingConfig signingConfigs.debug
+            }
             minifyEnabled false
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'

@@ -6,9 +6,12 @@ coverage/
 *.log
 .env*
 !.env.example
-android/key.properties
-# android/app/*.jks
-# android/app/*.keystore
+# Android 签名机密：绝不入库（口令与私钥泄露等于别人能签出可覆盖安装的正式包）
+flutter_app/android/key.properties
+flutter_app/android/app/*.jks
+flutter_app/android/app/*.keystore
+flutter_app/android/app/*.p12
+flutter_app/android/app/*.pem
 
 # Local runtime data & caches (prevent sensitive data leak & git push rejection)
 messages_data/
@@ -25,6 +28,9 @@ flutter_app/.packages
 flutter_app/android/.gradle/
 flutter_app/android/local.properties
 flutter_app/android/gradle-wrapper.jar
+
+# Flutter Android: 每次 flutter pub get / build 都会重新生成的插件注册表
+flutter_app/android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
 
 # Flutter Windows: generated plugin registration (recreated by `flutter build windows`)
 flutter_app/windows/flutter/ephemeral/
