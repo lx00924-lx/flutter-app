@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.14)
 project(runner LANGUAGES CXX)
 
+# Run the Flutter tool to generate the plugin registrants.
+# If FLUTTER_MANAGED_DIR is not set, fallback to flutter/ephemeral
+if(NOT DEFINED FLUTTER_MANAGED_DIR)
+  set(FLUTTER_MANAGED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../flutter/ephemeral")
+endif()
+
 # Define the application target. To change its name, change BINARY_NAME in the
 # top-level CMakeLists.txt, not here.
 add_executable(${BINARY_NAME} WIN32
