@@ -77,3 +77,77 @@ flutter build apk --release
    - Flutter 官方对未来版本 Gradle 升级的常规预警，当前 Gradle 8.14 与 AGP 8.11 完全稳定运行。
 3. **`警告: [options] 源值 8 已过时...`**  
    - 第三方 Android 原生依赖库底层针对 Java 8 的编译提示，完全不影响 APK 安装与运行。
+
+---
+
+# 🔀 本地开发与打包工作流（双目录分离，严禁混用）
+
+> 本节记录了仓库历史重构后确立的本地工作方式，以及两次真实事故的教训。**每次开始工作前先按本节执行**。
+
+## 一、两个目录的分工
+
+| 目录 | 角色 | 允许的操作 |
+| :--- | :--- | :--- |
+| `F:\ai\flutter\123` | **源码编辑仓**（唯一提交/推送的地方） | 改代码、`git commit`、`git push` |
+| `F:\ai\flutter\flutter-app` | **打包测试目录**（单向使用） | `git fetch` + `git reset --hard origin/main`、构建、测试 |
+
+**为什么要分开**：构建过程会产生 `build/`、`.dart_tool/`、`windows/flutter/ephemeral/`、Gradle 缓存等大量中间产物，与"待提交的源码"混在同一目录时极易误提交、污染仓库。两个目录共用同一远端 `https://github.com/lx00924-lx/flutter-app`，靠 Git 同步，**永远不要手动复制粘贴源码**。
+
+## 二、标准操作流程
+
+**改代码（在 123）**
+```powershell
+cd F:\ai\flutter\123
+# ...修改源码...
+git add -A ; git commit -m "..." ; git push
+```
+
+**打包测试（在 flutter-app）**
+```powershell
+cd F:\ai\flutter\flutter-app
+git fetch origin ; git reset --hard origin/main     # 抓取仓库最新源码
+cd flutter_app
+flutter build apk --release                          # 或 flutter build windows --release
+```
+
+## 三、三条禁令
+
+1. **禁止在 `flutter-app` 执行 `git clean -fdx`。** 该目录存在被 `.gitignore` 忽略但本地必需的签名文件 `flutter_app/android/key.properties` 与 `flutter_app/android/app/AI.jks`，`clean -fdx` 会将其删除、导致正式签名失效。更新源码只用 `fetch` + `reset --hard`。
+2. **禁止在 `flutter-app` 提交代码。** 它是"拉最新 → 打包"的单向目录，本地提交会被下一次 `reset --hard origin/main` 丢弃。
+3. **`123` 内没有签名密钥（刻意如此）。** 在 123 执行 `flutter build apk --release` 得到的是 debug 签名包；若确需在 123 出正式包，再从 `flutter-app` 复制那两个文件过去（二者均已被 gitignore，不会误提交）。
+
+## 四、临时目录 / 缓存清理规范
+
+- **严禁使用 `robocopy /MIR` 清理构建目录。** robocopy 默认跟随目录链接（junction/symlink），而 `windows/flutter/ephemeral/.plugin_symlinks/` 指向 pub 缓存中的真实包目录，`/MIR` 会把 pub 缓存里对应的包**清空**（曾导致 9 个包被清空、本机 Flutter 构建全面失败）。确需使用 robocopy 时必须加 `/XJ`。
+- 清理验证用副本统一使用：
+  ```powershell
+  Remove-Item -LiteralPath "\\?\<绝对路径>" -Recurse -Force
+  ```
+  PowerShell 7 的 `Remove-Item` 不跟随链接，`\\?\` 前缀可绕过 Windows 260 字符长路径限制。
+- 若 pub 缓存已被清空：先删除那些**空目录**（pub 认为"目录存在 = 已缓存"，不会重新下载），再执行 `flutter pub get` 重新拉取。
+
+## 五、两条硬性入库红线
+
+1. **签名机密绝不入库**：`flutter_app/android/key.properties`、`flutter_app/android/app/*.jks`、`*.keystore`、`*.p12`、`*.pem` 一律由 `.gitignore` 拦截。历史上曾误提交 `AI.jks` 与明文口令，已通过重写全部 Git 历史清除，**不得再次引入**。
+2. **构建缓存与生成物绝不入库**：`build/`、`.dart_tool/`、`windows/flutter/ephemeral/`、`windows/flutter/generated_plugins.cmake`、`windows/flutter/generated_plugin_registrant.*`、`android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java`、`android/.gradle/`、`.flutter-plugins-dependencies`、`node_modules/`。历史上曾误提交 76.82 MB 的 `app.dill`，已清除。
+
+## 六、服务器地址与打包参数（禁止再硬编码）
+
+自建 / fork 部署时，中继服务器地址**不再散落在源码各处**，统一由单一可配置入口提供：
+
+- **Flutter 端**：`flutter_app/lib/config/app_config.dart` 的 `AppConfig.serverBaseUrl`（`String.fromEnvironment('SERVER_BASE_URL')`）；拼接 URL 一律使用 `AppConfig.normalizedServerBaseUrl`（已去除末尾斜杠）。
+- **服务端**：`server.ts` 顶部的 `SERVER_BASE_URL` 常量（可用环境变量或 `.env` 覆盖）。
+- **Web 端**：`src/config.ts` 的 `getApiBaseUrl()`（`VITE_SERVER_BASE_URL` → 自适应 `window.location.origin` → 兜底默认值）。
+
+打包时替换地址：
+
+```powershell
+flutter build apk     --release --dart-define=SERVER_BASE_URL=https://你的域名
+flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域名
+```
+
+**新增代码时严禁再写死 `https://www.lx00924ai.top`**，一律走上述入口；该默认值只允许出现在 `app_config.dart`、`server.ts`、`src/config.ts` 三处。
+
+## 七、换用自己的 Android 签名（fork 者指引）
+
+仓库**不含任何密钥**。放置 `flutter_app/android/key.properties` + `flutter_app/android/app/AI.jks` 即自动切换为正式签名；缺失时 `android/app/build.gradle` 会回退到 debug 签名，**构建不会失败**。详细步骤见 `flutter_app/android/SIGNING_README.md`。
