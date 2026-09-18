@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12 (API 31) 及以上的系统启动画面配置。
+
+  背景：targetSdk >= 31 时，系统会强制为每个应用套一层自己的启动画面
+  （SplashScreen API），并且【不会】再使用 android:windowBackground。
+  若此处不做显式声明，系统会自行推导：拿应用图标当启动图标、并从图标里
+  提取主色当背景，表现为“图标被放大 + 背景虚化 + 随后黑屏一闪”。
+
+  这里显式声明为：纯色背景 + 全透明图标，即“纯色铺开、不显示图标”，
+  并让窗口底色与 Flutter 首帧底色（浅色主题 #F8FAFC）保持一致，
+  使“系统启动画面 → 首帧”之间没有色差跳变。
+
+  注意：本文件仅存在于 values-v31，只会被 API 31+ 的设备解析，
+  因此可以安全使用 android:windowSplashScreen* 系列属性，
+  无需引入 androidx.core:core-splashscreen 兼容库。
+-->
+<resources>
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@color/launch_screen_background</item>
+        <item name="android:windowSplashScreenBackground">@color/launch_screen_background</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@color/launch_screen_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+    </style>
+</resources>

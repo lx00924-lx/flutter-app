@@ -1,13 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 及以下的启动窗口背景（API 31+ 由 values-v31/styles.xml 接管）。
+  只保留纯色，不放图标：与 Android 12+ 的“纯色铺开”观感保持一致，
+  避免旧机型上出现被放大的图标（即“虚化”观感的来源）。
+-->
 <layer-list xmlns:android="http://schemas.android.com/apk/res/android">
     <item android:drawable="@color/launch_screen_background" />
-    <item
-        android:width="80dp"
-        android:height="80dp"
-        android:gravity="center">
-        <bitmap
-            android:gravity="center"
-            android:src="@mipmap/ic_launcher" />
-    </item>
 </layer-list>
 
