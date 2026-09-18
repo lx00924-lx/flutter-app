@@ -612,6 +612,32 @@ class SyncService {
     return false;
   }
 
+  /// 换发 Agent 配对 Token（服务端为唯一真源）。
+  ///
+  /// "重新生成"必须调用它而不是本地随机：服务端会生成新 token、踢掉旧连接，
+  /// 并广播给该用户所有设备，保证手机与电脑始终使用同一枚 token。
+  /// 成功返回新 token，失败返回 null。
+  Future<String?> rotateAgentToken({
+    required String userId,
+    String oldToken = '',
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty || cleanUserId == 'guest') return null;
+    try {
+      final resp = await _dio.post(
+        '$serverBaseUrl/api/agent/rotate-token',
+        data: {'userId': cleanUserId, 'oldToken': oldToken.trim()},
+      );
+      if (resp.statusCode == 200 && resp.data is Map) {
+        final token = resp.data['token']?.toString().trim();
+        if (token != null && token.isNotEmpty) return token;
+      }
+    } catch (e) {
+      debugPrint('[SyncService] rotateAgentToken error: $e');
+    }
+    return null;
+  }
+
   /// 获取本地 Agent 的工作区列表及活动会话列表
   ///
   /// [userId] 为当前登录账号，服务端据此校验该 Token 是否属于本账号（防越权）。

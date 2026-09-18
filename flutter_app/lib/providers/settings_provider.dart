@@ -402,13 +402,25 @@ class SettingsProvider extends ChangeNotifier {
           cloud.asrApiKey = _settings.asrApiKey;
         }
 
-        // 配对 Token 是本机唯一凭据：云端可能是旧设备/旧版本写入的历史默认值或空值，
-        // 一律以本地为准，避免"拉云端把本机 token 冲掉 → bridge 失联"。
+        // 配对 Token 以【服务端】为准：服务端是唯一真源，它会在首次同步时采纳
+        // 客户端带来的 token、之后保持稳定。此前"以本地为准"会导致多端各持一份、
+        // 永远无法收敛（桌面端点启动用桌面 token、手机用自己的 token → 互相看不到）。
+        final serverToken = cloud.harnessToken.trim();
         final localToken = _settings.harnessToken.trim();
-        if (localToken.length < 16 || localToken == kLegacyDefaultAgentToken) {
-          cloud.harnessToken = generateAgentPairingToken();
-        } else {
+        if (serverToken.length >= 16 && serverToken != kLegacyDefaultAgentToken) {
+          cloud.harnessToken = serverToken;
+        } else if (localToken.length >= 16 && localToken != kLegacyDefaultAgentToken) {
+          // 服务端还没有（首次同步）：保留本地值，并立即推给服务端固化为真源
           cloud.harnessToken = localToken;
+          Future.microtask(() {
+            SyncService.instance.pushSettings(
+              userId: cloud.loginAccount,
+              settings: _settings,
+              clientSessionId: _settings.clientSessionId,
+            );
+          });
+        } else {
+          cloud.harnessToken = generateAgentPairingToken();
         }
 
         _settings = cloud;

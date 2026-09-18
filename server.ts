@@ -2548,6 +2548,61 @@ if %errorlevel% neq 0 (
     }
   });
 
+  /**
+   * 换发该用户的 Agent 配对 Token。
+   *
+   * token 的真源在服务端，因此"重新生成"必须走这里，而不是客户端本地随机一个：
+   * 1) 生成新 token 并写入该用户设置
+   * 2) 踢掉旧 token 上的 Agent 连接，避免旧凭证继续可用
+   * 3) 广播 settings_updated，使该用户所有在线设备（手机/电脑）立即拿到同一枚新 token
+   */
+  app.post("/api/agent/rotate-token", async (req, res) => {
+    try {
+      const userId = ((req.body?.userId as string) || "").trim();
+      const oldToken = ((req.body?.oldToken as string) || "").trim();
+      if (!userId || userId === "guest") {
+        return res.status(401).json({ error: "缺少 userId，无法换发配对凭证" });
+      }
+
+      // 校验账号真实存在，避免为任意字符串凭空造 token
+      const allUsers = await safeReadJSON<any[]>(USERS_FILE, []);
+      const user = allUsers.find((u: any) => u.username === userId || u.id === userId);
+      if (!user) {
+        return res.status(401).json({ error: "账号无效，请重新登录" });
+      }
+      const ownerUserId = (user.username || user.id).toString();
+
+      // 先断开旧 token 上的 Agent 连接
+      if (oldToken && connectedAgents.has(oldToken)) {
+        const agent = connectedAgents.get(oldToken);
+        try {
+          if (agent?.ws && agent.ws.readyState === 1) {
+            agent.ws.send(JSON.stringify({ type: "token_revoked", reason: "Token rotated by user" }));
+            agent.ws.close(1000, "Token Rotated");
+          }
+        } catch {}
+        connectedAgents.delete(oldToken);
+        io.emit("agent_status_change", { token: oldToken, online: false });
+      }
+
+      const newToken = generateServerAgentToken();
+      await withFileLock(SETTINGS_FILE, async () => {
+        const current = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+        current[ownerUserId] = { ...(current[ownerUserId] || {}), harnessToken: newToken };
+        await safeWriteJSON(SETTINGS_FILE, current);
+      });
+
+      // 广播给该用户所有设备，使手机与电脑立刻收敛到同一枚 token
+      io.to(`user_${ownerUserId}`).emit("settings_updated", { harnessToken: newToken });
+      console.log(`[Agent Hub] 已为用户 ${ownerUserId} 换发新的配对 Token`);
+
+      res.json({ success: true, token: newToken });
+    } catch (err: any) {
+      console.error("rotate-token failed:", err);
+      res.status(500).json({ error: err.message || "Failed to rotate token" });
+    }
+  });
+
   app.get("/api/agent/download-bat", (req, res) => {
     try {
       const token = (req.query.token as string)?.trim() || "";

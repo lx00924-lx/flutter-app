@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
-import '../models/app_settings.dart';
 import '../config/app_config.dart';
 import '../utils/bridge_script_helper.dart';
 import '../services/sync_service.dart';
@@ -30,6 +29,8 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
 
   bool _isRefreshing = false;
   bool _isStartingBridge = false;
+  /// 正在向服务端换发配对 Token（防止重复点击）
+  bool _isRotatingToken = false;
   static Process? _headlessBridgeProcess; // 桌面端保持全局单例后台守护进程
   List<String> _workspaces = ['deepseek-agent', 'workspace-main', 'dev-sandbox'];
   List<Map<String, dynamic>> _rawSessions = [];
@@ -218,6 +219,110 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   }
 
   /// 启动/停止本地后台无头桥接程序 (仅限桌面端 Windows/macOS/Linux)
+  /// 重新生成配对 Token（服务端换发）+ 必要时重启已运行的桥接进程。
+  ///
+  /// 关键点：token 唯一真源在服务端，所以这里不能本地随机生成；
+  /// 换发后若桥接进程仍在运行，它会继续用旧 token 连接（表现为"界面显示新 token
+  /// 但电脑端仍是旧 token、手机连不上"），因此必须同步重启桥接。
+  Future<void> _rotateToken(SettingsProvider sp) async {
+    final s = sp.settings;
+    final oldToken = s.harnessToken.trim();
+    setState(() => _isRotatingToken = true);
+    try {
+      final newToken = await SyncService.instance.rotateAgentToken(
+        userId: s.loginAccount,
+        oldToken: oldToken,
+      );
+      if (!mounted) return;
+
+      if (newToken == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('换发失败：请确认已登录且网络正常'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+        return;
+      }
+
+      final bridgeWasRunning = _headlessBridgeProcess != null;
+      setState(() {
+        _tokenCtrl.text = newToken;
+        s.harnessToken = newToken;
+      });
+      sp.updateSettings(s);
+
+      if (bridgeWasRunning) {
+        await _restartHeadlessBridge(newToken, _harnessUrlCtrl.text.trim());
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('🔑 配对 Token 已更新，电脑端桥接已自动重启并重连'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('🔑 配对 Token 已更新（桥接未运行，下次启动将使用新 Token）')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isRotatingToken = false);
+    }
+  }
+
+  /// 重启后台桥接进程：先停旧进程，再用新 Token 以相同参数启动。
+  Future<void> _restartHeadlessBridge(String token, String harnessUrl) async {
+    final running = _headlessBridgeProcess;
+    if (running != null) {
+      try {
+        running.kill(ProcessSignal.sigterm);
+      } catch (_) {
+        try {
+          running.kill();
+        } catch (_) {}
+      }
+      _headlessBridgeProcess = null;
+      // 给进程一点退出时间，避免端口/连接残留
+      await Future.delayed(const Duration(milliseconds: 600));
+    }
+
+    setState(() => _isStartingBridge = true);
+    try {
+      final scriptPath = 'deepseek_bridge.py';
+      if (!await File(scriptPath).exists()) {
+        final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
+        await File(scriptPath).writeAsString(pyContent);
+      }
+
+      final executable = Platform.isWindows ? 'python' : 'python3';
+      final process = await Process.start(
+        executable,
+        [
+          scriptPath,
+          '--token', token,
+          '--harness-url', 'http://$harnessUrl',
+          '--server', AppConfig.normalizedServerBaseUrl,
+        ],
+        mode: ProcessStartMode.detachedWithStdio,
+      );
+      _headlessBridgeProcess = process;
+
+      // 启动后静默自检连接状态
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) context.read<SettingsProvider>().refreshAgentStatus();
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('桥接重启失败: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isStartingBridge = false);
+    }
+  }
+
   Future<void> _toggleHeadlessBridge(String token, String harnessUrl) async {
     if (_headlessBridgeProcess != null) {
       // 停止后台进程
@@ -587,14 +692,8 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         const SizedBox(width: 8),
                         IconButton(
                           icon: const Icon(Icons.refresh),
-                          tooltip: '重新生成',
-                          onPressed: () {
-                            final newToken = AppSettings.generateOpenAiStyleKey();
-                            _tokenCtrl.text = newToken;
-                            s.harnessToken = newToken;
-                            sp.updateSettings(s);
-                            setState(() {});
-                          },
+                          tooltip: '重新生成配对 Token',
+                          onPressed: _isRotatingToken ? null : () => _rotateToken(sp),
                         ),
                         IconButton(
                           icon: const Icon(Icons.copy),
