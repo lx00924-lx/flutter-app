@@ -595,11 +595,15 @@ class SyncService {
   }
 
   /// 检查特定 Token 的本地 Agent 在线状态
-  Future<bool> checkAgentStatus(String token) async {
+  ///
+  /// [userId] 为当前登录账号，服务端据此校验该 Token 是否属于本账号（防越权）。
+  Future<bool> checkAgentStatus(String token, {String userId = ''}) async {
     final cleanToken = token.trim();
     if (cleanToken.isEmpty) return false;
     try {
-      final url = '$serverBaseUrl/api/agent/status?token=${Uri.encodeComponent(cleanToken)}';
+      final url = '$serverBaseUrl/api/agent/status'
+          '?token=${Uri.encodeComponent(cleanToken)}'
+          '&userId=${Uri.encodeComponent(userId.trim())}';
       final resp = await _dio.get(url);
       if (resp.statusCode == 200 && resp.data is Map) {
         return resp.data['online'] == true;
@@ -609,15 +613,20 @@ class SyncService {
   }
 
   /// 获取本地 Agent 的工作区列表及活动会话列表
-  Future<Map<String, dynamic>> getAgentSessions(String token) async {
+  ///
+  /// [userId] 为当前登录账号，服务端据此校验该 Token 是否属于本账号（防越权）。
+  Future<Map<String, dynamic>> getAgentSessions(String token, {String userId = ''}) async {
     final cleanToken = token.trim();
     try {
-      final url = '$serverBaseUrl/api/agent/sessions?token=${Uri.encodeComponent(cleanToken)}';
+      final url = '$serverBaseUrl/api/agent/sessions'
+          '?token=${Uri.encodeComponent(cleanToken)}'
+          '&userId=${Uri.encodeComponent(userId.trim())}';
       final resp = await _dio.get(url);
       if (resp.statusCode == 200 && resp.data is Map) {
         return {
           'online': resp.data['online'] == true,
-          'workspaces': List<String>.from(resp.data['workspaces'] ?? ['deepseek-agent']),
+          // 不再用假值兜底：服务端返回空即代表未取到真实工作区
+          'workspaces': List<String>.from(resp.data['workspaces'] ?? const []),
           'sessions': resp.data['sessions'] as List? ?? [],
           'clientName': resp.data['clientName']?.toString() ?? 'DeepSeek-Harness-Local',
         };

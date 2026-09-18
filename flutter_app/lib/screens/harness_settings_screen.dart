@@ -187,8 +187,16 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         });
 
         if (isOnline) {
+          // 关键：不能只看 online 就报成功——bridge 在线但没取到真实工作区时，
+          // _workspaces 仍是本地预设占位值，必须明确告知用户，避免“假成功”。
+          final gotReal = wsList != null && wsList.isNotEmpty;
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('✅ 成功同步本地 Agent 工作区（共 ${_workspaces.length} 个工作区）')),
+            gotReal
+                ? SnackBar(content: Text('✅ 成功同步本地 Agent 工作区（共 ${_workspaces.length} 个工作区）'))
+                : const SnackBar(
+                    content: Text('⚠️ 桥接已在线，但未取到本地目录列表（请检查电脑端 DSH 是否正常）'),
+                    backgroundColor: Colors.orange,
+                  ),
           );
         } else {
           ScaffoldMessenger.of(context).showSnackBar(

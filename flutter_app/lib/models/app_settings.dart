@@ -1,8 +1,32 @@
-import 'dart:convert';
 import 'dart:io' show Platform;
-import 'dart:math' show Random;
+import 'dart:math' show Random; // Random.secure() 用于生成不可猜测的配对 Token
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
+
+/// 历史遗留的硬编码默认配对 Token。
+///
+/// 它曾作为全局默认值写死在客户端，导致**所有未自行修改的设备共用同一个 Token**；
+/// 服务端又对缺失值回退到 `default_agent_token`，最终形成「任何知道该 Token 的人
+/// 都能控制他人电脑」的越权通道。现在改为**每台设备本地随机生成**，此常量仅用于
+/// 识别并替换旧值。
+const String kLegacyDefaultAgentToken =
+    'sk-agent030efheg0z78491abcdef0123456789abcdef0123456789';
+
+/// 生成一个设备唯一的 Agent 配对 Token。
+///
+/// 格式：`sk-agent` + 43 位随机字符（URL 安全字母表，共 51 字符）。
+/// 使用 [Random.secure] → 密码学安全随机，不可预测；配合服务端 `isPlausibleAgentToken`
+/// 的最小长度校验（≥16）与归属校验，构成完整的配对鉴权闭环。
+String generateAgentPairingToken() {
+  const charset =
+      'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  final rnd = Random.secure();
+  final buf = StringBuffer('sk-agent');
+  for (var i = 0; i < 43; i++) {
+    buf.write(charset[rnd.nextInt(charset.length)]);
+  }
+  return buf.toString();
+}
 
 /// 单个 API 模型端点配置（卡片项）
 class ApiModelEndpoint {
@@ -200,9 +224,9 @@ class AppSettings {
     this.ttsPitch = 1.0,
     this.ttsAutoPlayInCall = true,
     this.autoSpeakResponse = false,
-    // Harness
+    // Harness（配对 Token 不再硬编码：留空后由 fromMap 自动为每台设备随机生成）
     this.defaultAgentMode = false,
-    this.harnessToken = 'sk-agent030efheg0z78491abcdef0123456789abcdef0123456789',
+    this.harnessToken = '',
     this.harnessServiceUrl = 'http://127.0.0.1:3080',
     this.localBridgeWsUrl = 'http://127.0.0.1:3080',
     this.localAgentToken = '',
@@ -399,7 +423,10 @@ class AppSettings {
       ttsAutoPlayInCall: map['ttsAutoPlayInCall'] as bool? ?? true,
       autoSpeakResponse: map['autoSpeakResponse'] as bool? ?? false,
       defaultAgentMode: map['defaultAgentMode'] as bool? ?? false,
-      harnessToken: map['harnessToken']?.toString() ?? 'sk-agent030efheg0z78491abcdef0123456789abcdef0123456789',
+      // 配对 Token：不再回退到全局硬编码默认值。
+      // 旧数据若是历史默认值（所有设备共用）或为空，则本地重新随机生成，
+      // 生成结果由 SettingsProvider 落盘并同步到云端设置。
+      harnessToken: _resolveHarnessToken(map['harnessToken']?.toString()),
       harnessServiceUrl: map['harnessServiceUrl']?.toString() ?? 'http://127.0.0.1:3080',
       localBridgeWsUrl: map['localBridgeWsUrl']?.toString() ?? 'http://127.0.0.1:3080',
       localAgentToken: map['localAgentToken']?.toString() ?? '',
@@ -414,5 +441,19 @@ class AppSettings {
       customDataPath: map['customDataPath']?.toString() ?? '',
       showDebugFab: map['showDebugFab'] as bool? ?? false,
     );
+  }
+
+  /// 解析 Agent 配对 Token：清洗旧值，必要时为本机生成新的随机 Token。
+  ///
+  /// 处理三种情况：
+  /// 1. 旧版本写死的全局默认值 → 视为无效，重新随机生成；
+  /// 2. 空值 / 过短（服务端要求 ≥16 位）→ 重新随机生成；
+  /// 3. 已经是设备唯一 Token → 原样保留。
+  static String _resolveHarnessToken(String? raw) {
+    final token = (raw ?? '').trim();
+    if (token.isEmpty || token == kLegacyDefaultAgentToken || token.length < 16) {
+      return generateAgentPairingToken();
+    }
+    return token;
   }
 }

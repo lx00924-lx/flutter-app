@@ -14,7 +14,8 @@ import cors from "cors";
 const generationEvents = new EventEmitter();
 generationEvents.setMaxListeners(500);
 
-const PORT = 3000;
+// 监听端口：默认 3000，可用环境变量 PORT 覆盖（便于本地起隔离实例做安全回归测试）
+const PORT = Number(process.env.PORT) || 3000;
 const DATA_DIR = path.join(process.cwd(), "messages_data");
 const MESSAGES_FILE = path.join(DATA_DIR, "messages_v2.json"); // Use v2 to avoid conflicts
 const USERS_FILE = path.join(DATA_DIR, "users.json");
@@ -28,6 +29,32 @@ const UPLOADS_DIR = path.join(process.cwd(), "messages_media");
 // 自建部署无需改代码：设置环境变量 SERVER_BASE_URL，或写入 .env 文件。
 const SERVER_BASE_URL =
   (process.env.SERVER_BASE_URL || "").trim().replace(/\/+$/, "") || "https://www.lx00924ai.top";
+
+// ==================== Agent Token 工具（顶层，供生成流程与路由共用） ====================
+// 历史问题：客户端设置的字段名是 harnessToken，服务端曾误读 agentToken，
+// 导致永远读不到 token、全部落进 default_agent_token（公共秘密＝无鉴权）。
+// 参考：https://github.com/lx00924-lx/flutter-app 多租户安全整改
+
+/** 明显非法的 token（空值、历史默认值、占位符）一律不接受。 */
+const isPlausibleAgentToken = (token: string): boolean => {
+  const t = (token || "").trim();
+  if (!t) return false;
+  const lower = t.toLowerCase();
+  if (lower === "default_agent_token") return false;
+  if (lower === "agent_default") return false;
+  if (lower.includes("your_token") || lower.includes("你的token")) return false;
+  return t.length >= 16;
+};
+
+/**
+ * 从用户设置里读取 Agent Token。
+ * 兼容两种字段：App 端为 harnessToken，早期服务端字段为 agentToken。
+ */
+const readUserAgentToken = (record: any): string => {
+  if (!record || typeof record !== "object") return "";
+  const candidate = record.harnessToken ?? record.agentToken ?? "";
+  return isPlausibleAgentToken(String(candidate)) ? String(candidate).trim() : "";
+};
 
 interface DeviceSession {
   clientSessionId: string;
@@ -284,6 +311,8 @@ interface DshSessionInfo {
 interface ConnectedAgent {
   ws?: WSWebSocket;
   token: string;
+  /** 该 Agent 归属的用户 ID（用于 App 侧越权校验；未认领时为 undefined） */
+  ownerUserId?: string;
   clientName: string;
   connectedAt: number;
   lastPing: number;
@@ -371,7 +400,8 @@ async function runServerSideGeneration({
 
   try {
     const isAgentMode = settings?.agentMode === true;
-    const agentToken = settings?.agentToken?.trim() || "default_agent_token";
+    // 修复：客户端字段是 harnessToken，此前误读 agentToken 导致永远取空 → 全落默认 token
+    const agentToken = readUserAgentToken(settings);
     let agentExecutionResult: { status: 'completed' | 'failed'; steps: string[]; rawOutput?: string; timestamp?: string } | null = null;
 
     let accumulatedContent = "";
@@ -1292,6 +1322,68 @@ async function startServer() {
   });
 
   // Settings API
+  // ==================== Agent Token 归属校验（多租户安全） ====================
+  // 历史问题：agent 接口只按 token 查表、且多处回退到 "default_agent_token"，
+  // 导致「知道任意 token 即可控制他人电脑」。以下工具用于堵死该通道：
+  // 1) 客户端字段名是 harnessToken，服务端曾误读 agentToken → 永远读空 → 全落默认 token；
+  // 2) token 必须能归属到某个真实用户，否则拒绝；
+  // 3) 所有带 token 的 App 侧请求都必须自报 userId 并通过归属校验。
+
+  /**
+   * 反查 token 归属者：优先取注册时记录的 owner，
+   * 否则回落到用户设置反查并回填（兼容升级前已配对的存量用户）。
+   */
+  const resolveTokenOwnerUserId = async (token: string): Promise<string | undefined> => {
+    const clean = (token || "").trim();
+    if (!isPlausibleAgentToken(clean)) return undefined;
+
+    const existing = connectedAgents.get(clean);
+    if (existing?.ownerUserId) return existing.ownerUserId;
+
+    try {
+      const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+      for (const [userId, record] of Object.entries(allSettings || {})) {
+        if (readUserAgentToken(record) === clean) {
+          const agent = connectedAgents.get(clean);
+          if (agent && !agent.ownerUserId) {
+            agent.ownerUserId = userId;
+            console.log(`\x1b[36m[Agent Hub] 已回填 token 归属: user=${userId}\x1b[0m`);
+          }
+          return userId;
+        }
+      }
+    } catch (e) {
+      console.error("[Agent Hub] 反查 token 归属失败:", e);
+    }
+    return undefined;
+  };
+
+  /**
+   * App（人）侧接口的归属校验：必须自报 userId，且该 token 确实属于他。
+   * 返回 undefined 表示通过；否则为应回给客户端的错误。
+   */
+  const verifyAgentOwnership = async (
+    token: string,
+    claimedUserId: string
+  ): Promise<{ status: number; error: string } | undefined> => {
+    const clean = (token || "").trim();
+    const claimed = (claimedUserId || "").trim();
+
+    if (!isPlausibleAgentToken(clean)) {
+      return { status: 401, error: "无效的 Agent Token（不得为空或使用默认值）" };
+    }
+    if (!claimed) {
+      return { status: 401, error: "缺少 userId，无法校验 Agent 归属" };
+    }
+
+    const owner = await resolveTokenOwnerUserId(clean);
+    if (owner && owner !== claimed) {
+      console.warn(`\x1b[31m[Security] 越权访问被拒绝: user=${claimed} 试图访问 owner=${owner} 的 Agent\x1b[0m`);
+      return { status: 403, error: "该 Agent 不属于当前账号" };
+    }
+    return undefined;
+  };
+
   const sanitizeSettings = (settings: any) => {
     if (!settings || typeof settings !== "object") return settings;
     const sanitized = { ...settings };
@@ -1631,18 +1723,29 @@ async function startServer() {
   });
 
   // Agent Status & Bridge APIs (Dual-Channel: HTTP Long-Polling + WebSocket)
-  app.post("/api/agent/register", (req, res) => {
+  app.post("/api/agent/register", async (req, res) => {
     try {
-      const token = ((req.body?.token as string) || "").trim() || "default_agent_token";
+      const token = ((req.body?.token as string) || "").trim();
+      if (!isPlausibleAgentToken(token)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
+      // 不再回退到 default_agent_token：默认值 = 公共秘密，等于没有鉴权
+      if (!isPlausibleAgentToken(token)) {
+        console.warn("[Security] 拒绝注册：非法或默认 Agent Token");
+        return res.status(401).json({ error: "无效的 Agent Token，请在 App 中生成配对口令后重试" });
+      }
       const clientInfo = req.body?.clientInfo || {};
       const clientName = clientInfo.name || "DeepSeek-Harness-Local";
 
       console.log(`\x1b[32m[Agent Hub] Agent registered via HTTP [${token}] (${clientName}, mode: ${clientInfo.mode || 'polling'})\x1b[0m`);
 
+      // 绑定归属（若该 token 已在某用户设置中登记）
+      const ownerUserId = await resolveTokenOwnerUserId(token);
       let agent = connectedAgents.get(token);
       if (!agent) {
         agent = {
           token,
+          ownerUserId,
           clientName,
           connectedAt: Date.now(),
           lastPing: Date.now(),
@@ -1667,7 +1770,10 @@ async function startServer() {
   // Long-polling endpoint for local Python bridge agent
   app.get("/api/agent/poll", (req, res) => {
     try {
-      const token = ((req.query.token as string) || "").trim() || "default_agent_token";
+      const token = ((req.query.token as string) || "").trim() || "";
+      if (!isPlausibleAgentToken(token)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
       const timeoutSec = Math.min(60, Math.max(5, parseInt((req.query.timeout as string) || "25", 10)));
 
       let agent = connectedAgents.get(token);
@@ -1773,7 +1879,10 @@ async function startServer() {
 
   // Agent heartbeat ping
   app.post("/api/agent/heartbeat", (req, res) => {
-    const token = ((req.body?.token as string) || "").trim() || "default_agent_token";
+    const token = ((req.body?.token as string) || "").trim() || "";
+    if (!isPlausibleAgentToken(token)) {
+      return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+    }
     let agent = connectedAgents.get(token);
     if (agent) {
       agent.lastPing = Date.now();
@@ -1822,7 +1931,10 @@ async function startServer() {
 
   // Dedicated API download route for Windows 1-Click .bat package
   app.get(["/api/download/run_bridge.bat", "/api/download/start.bat"], (req, res) => {
-    const token = ((req.query.token as string) || "default_agent_token").trim();
+    const token = ((req.query.token as string) || "").trim();
+    if (!isPlausibleAgentToken(token)) {
+      return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+    }
     const harnessUrl = ((req.query.harnessUrl as string) || "http://127.0.0.1:3080").trim();
     
     // Determine host URL
@@ -1872,8 +1984,17 @@ if %errorlevel% neq 0 (
     res.send(batContent);
   });
 
-  app.get("/api/agent/status", (req, res) => {
-    const token = ((req.query.token as string) || "").trim() || "default_agent_token";
+  app.get("/api/agent/status", async (req, res) => {
+    const token = ((req.query.token as string) || "").trim() || "";
+    if (!isPlausibleAgentToken(token)) {
+      return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+    }
+    // 越权校验：App 需自报 userId，token 不属于该用户时一律拒绝
+    const ownershipError = await verifyAgentOwnership(token, (req.query.userId as string) || "");
+    if (ownershipError) {
+      return res.status(ownershipError.status).json({ error: ownershipError.error, online: false });
+    }
+
     const agent = connectedAgents.get(token);
     const isOnline = agent && (
       (agent.ws && agent.ws.readyState === WSWebSocket.OPEN) ||
@@ -1886,18 +2007,27 @@ if %errorlevel% neq 0 (
         clientName: agent.clientName,
         connectedAt: agent.connectedAt,
         mode: agent.mode,
-        workspaces: agent.workspaces || ["deepseek-agent"],
-        sessions: agent.sessions || []
+        // 不再用假值兜底：取不到真实工作区就返回空数组，交由客户端提示“未取到”
+        workspaces: agent.workspaces ?? [],
+        sessions: agent.sessions ?? []
       });
     } else {
-      res.json({ online: false, workspaces: ["deepseek-agent"], sessions: [] });
+      res.json({ online: false, workspaces: [], sessions: [] });
     }
   });
 
   // Get agent workspaces and active session list
   app.get("/api/agent/sessions", async (req, res) => {
     try {
-      const token = ((req.query.token as string) || "").trim() || "default_agent_token";
+      const token = ((req.query.token as string) || "").trim() || "";
+      if (!isPlausibleAgentToken(token)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
+      // 越权校验：token 必须属于自报的 userId
+      const ownershipError = await verifyAgentOwnership(token, (req.query.userId as string) || "");
+      if (ownershipError) {
+        return res.status(ownershipError.status).json({ error: ownershipError.error, online: false, workspaces: [], sessions: [] });
+      }
       const agent = connectedAgents.get(token);
       const isOnline = agent && (
         (agent.ws && agent.ws.readyState === WSWebSocket.OPEN) ||
@@ -1950,7 +2080,10 @@ if %errorlevel% neq 0 (
   // Reset user active session
   app.post("/api/agent/reset-session", (req, res) => {
     const { userId, token } = req.body || {};
-    const targetToken = (token || "").trim() || "default_agent_token";
+    const targetToken = (token || "").trim() || "";
+    if (!isPlausibleAgentToken(targetToken)) {
+      return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+    }
     const agent = connectedAgents.get(targetToken);
     if (agent && agent.activeUserSessions && userId) {
       agent.activeUserSessions.delete(userId);
@@ -1962,7 +2095,10 @@ if %errorlevel% neq 0 (
   app.post("/api/agent/create-session", async (req, res) => {
     try {
       const { token, workspace, title, model } = req.body || {};
-      const targetToken = (token || "").trim() || "default_agent_token";
+      const targetToken = (token || "").trim() || "";
+      if (!isPlausibleAgentToken(targetToken)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
       const agent = connectedAgents.get(targetToken);
       const targetWs = (workspace || "").trim() || "deepseek-agent";
       const sessionTitle = (title || "").trim() || `新对话 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
@@ -2095,7 +2231,10 @@ if %errorlevel% neq 0 (
   app.post("/api/agent/sync-sessions", (req, res) => {
     try {
       const { token, workspaces, sessions, models } = req.body;
-      const targetToken = (token || "").trim() || "default_agent_token";
+      const targetToken = (token || "").trim() || "";
+      if (!isPlausibleAgentToken(targetToken)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
       const agent = connectedAgents.get(targetToken);
       if (agent) {
         if (workspaces) agent.workspaces = workspaces;
@@ -2118,7 +2257,10 @@ if %errorlevel% neq 0 (
   // Get agent models and reasoning levels
   app.get("/api/agent/models", (req, res) => {
     try {
-      const token = (req.query.token as string || "").trim() || "default_agent_token";
+      const token = (req.query.token as string || "").trim() || "";
+      if (!isPlausibleAgentToken(token)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
       const agent = connectedAgents.get(token);
       if (agent && agent.models && agent.models.length > 0) {
         return res.json({ models: agent.models });
@@ -2162,7 +2304,10 @@ if %errorlevel% neq 0 (
     try {
       const { taskId, approvalId, action, token } = req.body;
       const pending = pendingAgentTasks.get(taskId);
-      const targetToken = (token || pending?.token || "default_agent_token").trim();
+      const targetToken = (token || pending?.token || "").trim();
+      if (!isPlausibleAgentToken(targetToken)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
       const agent = connectedAgents.get(targetToken);
       if (!agent) {
         return res.status(404).json({ error: "Agent not connected or offline" });
@@ -2195,7 +2340,10 @@ if %errorlevel% neq 0 (
   app.patch("/api/agent/rename-session", (req, res) => {
     try {
       const { sessionId, title, token } = req.body;
-      const targetToken = (token || "").trim() || "default_agent_token";
+      const targetToken = (token || "").trim() || "";
+      if (!isPlausibleAgentToken(targetToken)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
       const agent = connectedAgents.get(targetToken);
       if (agent) {
         const renamePayload = { type: "rename_session", sessionId, title };
@@ -2219,7 +2367,10 @@ if %errorlevel% neq 0 (
   app.delete("/api/agent/archive-session", (req, res) => {
     try {
       const { sessionId, token } = req.body;
-      const targetToken = (token || "").trim() || "default_agent_token";
+      const targetToken = (token || "").trim() || "";
+      if (!isPlausibleAgentToken(targetToken)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
       const agent = connectedAgents.get(targetToken);
       if (agent) {
         const archPayload = { type: "archive_session", sessionId };
@@ -2253,6 +2404,9 @@ if %errorlevel% neq 0 (
 
         // Notify local bridge to cancel execution
         const targetToken = token || pending.token;
+        if (!isPlausibleAgentToken(targetToken)) {
+          return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+        }
         const agent = connectedAgents.get(targetToken);
         if (agent && agent.ws && agent.ws.readyState === 1) {
           try {
@@ -2308,7 +2462,10 @@ if %errorlevel% neq 0 (
 
   app.get("/api/agent/download-bat", (req, res) => {
     try {
-      const token = (req.query.token as string)?.trim() || "default_agent_token";
+      const token = (req.query.token as string)?.trim() || "";
+      if (!isPlausibleAgentToken(token)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
       const serverUrl = (req.query.server as string)?.trim() || SERVER_BASE_URL;
       const harnessUrl = (req.query.harness as string)?.trim() || "http://127.0.0.1:3080";
       const batContent = `@echo off
@@ -2427,6 +2584,9 @@ if %errorlevel% neq 0 (
       const { sessionCode, token, account } = req.body || {};
       const cleanCode = (sessionCode || "").toString().trim().toUpperCase();
       const cleanToken = (token || "").toString().trim();
+      if (!isPlausibleAgentToken(cleanToken)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
 
       if (!cleanCode || !cleanToken) {
         return res.status(400).json({ success: false, error: "缺少配对码或授权 Token" });
@@ -2477,6 +2637,9 @@ if %errorlevel% neq 0 (
 
       if (sess.status === "confirmed" && sess.authorizedToken) {
         const token = sess.authorizedToken;
+        if (!isPlausibleAgentToken(token)) {
+          return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+        }
         const account = sess.authorizedAccount;
         // 安全考虑：获取一次后立即标记销毁，防止重放盗用
         bridgeAuthSessions.delete(cleanCode);
@@ -2918,7 +3081,16 @@ if %errorlevel% neq 0 (
     });
 
     socket.on("check_agent_status", ({ token }) => {
-      const cleanToken = (token || "").trim() || "default_agent_token";
+      const cleanToken = (token || "").trim() || "";
+      // Socket 上下文没有 res，改用事件回错
+      if (!isPlausibleAgentToken(cleanToken)) {
+        socket.emit("agent_status_response", {
+          token: cleanToken,
+          online: false,
+          error: "invalid_token",
+        });
+        return;
+      }
       const agent = connectedAgents.get(cleanToken);
       const isOnline = !!(agent && agent.ws.readyState === WSWebSocket.OPEN);
       socket.emit("agent_status_response", {
