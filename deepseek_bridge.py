@@ -220,6 +220,73 @@ def dsh_auth_status():
     return True, "已加载 DSH 会话密钥，可为请求自签 Cookie"
 
 
+# ============================================================================
+# 设备凭证持久化（用于"扫码一次，之后免扫码"）
+# ----------------------------------------------------------------------------
+# 设计取舍：按原设计，扫码得到的**配对 Token 本身不落盘**（纯内存，关闭即失效），
+# 以保证终端进程不留任何长期凭证。
+# 但 bridge 是常驻服务、系统重启或手动重启都很常见，若每次都要求重新扫码，
+# 不装桌面版的用户会非常痛苦。
+#
+# 折中：只在用户目录保存一个**设备凭证文件**，内含：
+#   - pairToken：最近一次扫码获得的配对 Token（供下次启动直接复用）
+# 该文件仅存于本机用户目录，权限受操作系统保护；用户删除即彻底注销，
+# 也可在 App 中撤销 Token 使其立即失效。
+# ============================================================================
+
+BRIDGE_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".deepseek_bridge")
+BRIDGE_CONFIG_FILE = os.path.join(BRIDGE_CONFIG_DIR, "config.json")
+
+
+def save_bridge_pair_token(token: str, server_base: str = "", account: str = "") -> bool:
+    """保存最近一次扫码获得的配对 Token，供后续启动免扫码复用。"""
+    if not token:
+        return False
+    try:
+        os.makedirs(BRIDGE_CONFIG_DIR, exist_ok=True)
+        payload = {
+            "pairToken": token,
+            "server": server_base,
+            "account": account,
+            "savedAt": int(time.time() * 1000),
+        }
+        # 尽量以仅属主可读的权限写入（Windows 上忽略权限位）
+        with open(BRIDGE_CONFIG_FILE, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        try:
+            os.chmod(BRIDGE_CONFIG_FILE, 0o600)
+        except Exception:
+            pass
+        return True
+    except Exception as exc:
+        print(f"\033[93m[提示] 保存配对凭证失败（不影响本次连接）: {exc}\033[0m")
+        return False
+
+
+def load_bridge_pair_token():
+    """读取本机保存的配对 Token；不存在或格式非法时返回 None。"""
+    if not os.path.isfile(BRIDGE_CONFIG_FILE):
+        return None
+    try:
+        with open(BRIDGE_CONFIG_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        token = str(data.get("pairToken") or "").strip()
+        return token if len(token) >= 16 else None
+    except Exception:
+        return None
+
+
+def clear_bridge_pair_token() -> bool:
+    """清除本机保存的配对凭证（用户主动注销时使用）。"""
+    try:
+        if os.path.isfile(BRIDGE_CONFIG_FILE):
+            os.remove(BRIDGE_CONFIG_FILE)
+        return True
+    except Exception:
+        return False
+
+
+
 # 强制标准输出为 UTF-8 编码并激活 Windows 控制台 ANSI 颜色与高对比度字符支持
 if sys.platform == "win32":
     try:
@@ -1992,7 +2059,15 @@ async def run_bridge_client(args):
     concurrency_limit = max(1, args.concurrency)
     init_global_http_client(force_no_proxy=args.no_proxy, custom_proxy=args.proxy, primary_server=server_base)
 
-    # 如果未传入 Token 或为占位符：进入高安全【扫码动态授权模式】(OAuth 2.0 Device Flow)
+    # 未显式传入 Token 时：先尝试复用本机已保存的配对凭证，避免每次重启都要重新扫码
+    if not token or token in ("default_agent_token", "YOUR_AGENT_TOKEN_HERE", "<YOUR_AGENT_TOKEN>"):
+        saved_token = load_bridge_pair_token()
+        if saved_token:
+            token = saved_token
+            print("\033[96m[凭证复用] 已读取本机保存的配对凭证，跳过扫码。\033[0m")
+            print(f"\033[90m         （如需更换账号，请删除 {BRIDGE_CONFIG_FILE} 后重新运行以扫码配对）\033[0m")
+
+    # 如果仍未传入 Token 或为占位符：进入高安全【扫码动态授权模式】(OAuth 2.0 Device Flow)
     if not token or token in ("default_agent_token", "YOUR_AGENT_TOKEN_HERE", "<YOUR_AGENT_TOKEN>"):
         print("=" * 70)
         print("\033[96m[动态扫码配对] 未指定 --token，已自动进入免记忆安全扫码授权模式...\033[0m")
@@ -2022,7 +2097,12 @@ async def run_bridge_client(args):
         token = auth_token
         account_tip = f" (用户: {auth_info})" if auth_info and auth_info != "expired" else ""
         print(f"\n\033[92m🎉 [授权成功!] 已成功获取手机端授权 Token{account_tip}！\033[0m")
-        print("\033[90m[安全声明] 本次会话为纯内存即时连接，关闭终端即刻失效，不落盘持久化任何文件。\033[0m\n")
+        # 保存到本机凭证文件，供后续启动免扫码复用
+        if save_bridge_pair_token(token, server_base, str(auth_info or "")):
+            print(f"\033[90m[凭证已保存] 下次启动将自动复用，无需重新扫码（存放于 {BRIDGE_CONFIG_FILE}）。\033[0m")
+        else:
+            print("\033[90m[安全声明] 本次会话为纯内存即时连接，关闭终端即刻失效，不落盘持久化任何文件。\033[0m")
+        print("")
 
     proxy_mode_desc = "强制 Direct 直连" if args.no_proxy else (f"自定义代理 ({args.proxy})" if args.proxy else "自适应系统/VPN代理")
     print("=" * 70)

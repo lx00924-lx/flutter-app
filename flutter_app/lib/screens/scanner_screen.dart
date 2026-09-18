@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:provider/provider.dart';
+import '../providers/settings_provider.dart';
 import '../services/sync_service.dart';
 
 class ScannerScreen extends StatefulWidget {
@@ -61,18 +63,40 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
     _controller.stop();
 
     String authCode = code;
-    // 解析支持前缀 lx_auth: 或 json
+    // 解析支持三种格式：
+    //   1) 电脑端 bridge 生成的二维码：URL 形如 https://host?authSession=AUTH_XXXXXX
+    //   2) 自定义协议前缀：lx_auth:AUTH_XXXXXX
+    //   3) JSON：{"authCode": "..."} / {"code": "..."} / {"sessionCode": "..."}
     if (code.startsWith('lx_auth:')) {
       authCode = code.substring('lx_auth:'.length).trim();
     } else if (code.startsWith('{') && code.endsWith('}')) {
       try {
         final json = jsonDecode(code);
-        if (json['authCode'] != null) {
-          authCode = json['authCode'].toString().trim();
-        } else if (json['code'] != null) {
-          authCode = json['code'].toString().trim();
-        }
+        authCode = (json['sessionCode'] ?? json['authCode'] ?? json['code'] ?? authCode)
+            .toString()
+            .trim();
       } catch (_) {}
+    } else if (code.contains('authSession=') || code.contains('authCode=')) {
+      // 关键修复：bridge 的二维码内容是 URL，此前未解析参数，
+      // 导致把整条 URL 当成配对码提交，服务端必然查不到该会话。
+      try {
+        final uri = Uri.parse(code);
+        authCode = (uri.queryParameters['authSession'] ??
+                uri.queryParameters['authCode'] ??
+                uri.queryParameters['sessionCode'] ??
+                authCode)
+            .trim();
+      } catch (_) {}
+    }
+
+    // 扫码者身份：服务端据此校验账号真实性并把 token 绑定到该账号
+    final userId = context.read<SettingsProvider>().syncUserId;
+    if (userId.isEmpty || userId == 'guest' || userId == 'default_user') {
+      if (mounted) {
+        setState(() => _isProcessing = false);
+        _showErrorAndResume('请先登录账号后再进行扫码配对');
+      }
+      return;
     }
 
     try {
@@ -83,7 +107,10 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
         uri,
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
-          'authCode': authCode,
+          // 服务端字段名为 sessionCode（旧字段 authCode 服务端也兼容）
+          'sessionCode': authCode,
+          // 扫码者身份：服务端校验通过后把 token 绑定到该账号
+          'userId': userId,
           'device': 'mobile',
         }),
       ).timeout(const Duration(seconds: 8));

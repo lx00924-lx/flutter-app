@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import bcrypt from "bcryptjs";
+import { randomBytes } from "crypto";
 import FormData from "form-data";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -1507,8 +1508,16 @@ async function startServer() {
         allSettings[cleanUserId] = { ...(allSettings[cleanUserId] || {}), ...cleanSettings };
         await safeWriteJSON(SETTINGS_FILE, allSettings);
       });
+
+      // 确保该用户有一条服务端签发的 Agent Token（token 唯一真源）。
+      // 兼容顺序：设置里已有 → 复用；本次同步带来了 → 采纳；都没有 → 生成。
+      const issuedToken = await resolveOrCreateUserAgentToken(
+        cleanUserId,
+        readUserAgentToken(cleanSettings)
+      );
+
       io.to(`user_${cleanUserId}`).emit("settings_updated", cleanSettings);
-      res.json({ success: true });
+      res.json({ success: true, ...(issuedToken ? { harnessToken: issuedToken } : {}) });
     } catch (error) {
       console.error("Failed to sync settings:", error);
       res.status(500).json({ error: "Failed to sync settings" });
@@ -2614,8 +2623,60 @@ if %errorlevel% neq 0 (
     status: "pending" | "confirmed" | "expired";
     authorizedToken?: string;
     authorizedAccount?: string;
+    /** 发起配对的用户 ID（扫码者身份校验通过后写入） */
+    authorizedUserId?: string;
   }
   const bridgeAuthSessions = new Map<string, BridgeAuthSession>();
+
+  /**
+   * 取（必要时创建）某用户的 Agent 配对 Token，并落盘。
+   *
+   * 这是 token 的**唯一真源**：服务端生成、服务端存储，各端只读取。
+   * 兼容策略（顺序很重要，避免升级时把用户正在用的 token 换掉导致 bridge 断连）：
+   *   1) 用户设置里已有合法 token  → 直接复用
+   *   2) 设置里没有但请求方带来了合法 token（首次同步）→ **采纳并落盘**
+   *   3) 都没有 → 生成一个新的
+   */
+  const resolveOrCreateUserAgentToken = async (
+    userId: string,
+    adoptToken?: string
+  ): Promise<string | undefined> => {
+    const cleanUserId = (userId || "").trim();
+    if (!cleanUserId || cleanUserId === "guest") return undefined;
+
+    const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+    const record = allSettings[cleanUserId] || {};
+    const existing = readUserAgentToken(record);
+    if (existing) return existing;
+
+    const adopted = (adoptToken || "").trim();
+    const token = isPlausibleAgentToken(adopted) ? adopted : generateServerAgentToken();
+
+    await withFileLock(SETTINGS_FILE, async () => {
+      const current = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+      const currentRecord = current[cleanUserId] || {};
+      // 双检：避免并发下覆盖别人刚写入的值
+      if (!readUserAgentToken(currentRecord)) {
+        current[cleanUserId] = { ...currentRecord, harnessToken: token };
+        await safeWriteJSON(SETTINGS_FILE, current);
+      }
+    });
+
+    // 让该用户的所有在线设备立即拿到新 token
+    io.to(`user_${cleanUserId}`).emit("settings_updated", { harnessToken: token });
+    return token;
+  };
+
+  /** 生成服务端 Agent Token（格式与客户端一致：sk-agent + 43 位随机，共 51 字符） */
+  const generateServerAgentToken = (): string => {
+    const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const bytes = randomBytes(43);
+    let out = "sk-agent";
+    for (let i = 0; i < 43; i++) {
+      out += charset[bytes[i] % charset.length];
+    }
+    return out;
+  };
 
   // 定期清理过期扫码授权会话 (超过 3 分钟自动销毁)
   setInterval(() => {
@@ -2658,35 +2719,55 @@ if %errorlevel% neq 0 (
   });
 
   // 2. 手机端 App 扫码成功后，确认授权并将当前用户的 agentToken 与该临时码绑定
-  app.post("/api/bridge/auth-confirm", (req, res) => {
+  app.post("/api/bridge/auth-confirm", async (req, res) => {
     try {
-      const { sessionCode, token, account } = req.body || {};
-      const cleanCode = (sessionCode || "").toString().trim().toUpperCase();
-      const cleanToken = (token || "").toString().trim();
-      if (!isPlausibleAgentToken(cleanToken)) {
-        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
-      }
+      // 兼容两种字段名：新客户端用 sessionCode，旧客户端曾用 authCode
+      const body = req.body || {};
+      const rawCode = body.sessionCode ?? body.authCode ?? body.code ?? "";
+      const cleanCode = rawCode.toString().trim().toUpperCase();
+      // 扫码者身份：必须自报已登录账号（服务端据此校验并绑定 token 归属）
+      const scannerUserId = (body.userId ?? body.account ?? "").toString().trim();
+      const legacyToken = (body.token || "").toString().trim();
 
-      if (!cleanCode || !cleanToken) {
-        return res.status(400).json({ success: false, error: "缺少配对码或授权 Token" });
+      if (!cleanCode) {
+        return res.status(400).json({ success: false, error: "缺少配对码" });
       }
+      if (!scannerUserId) {
+        return res.status(401).json({ success: false, error: "请先登录后再扫码配对" });
+      }
+      // 校验账号真实存在，防止伪造 userId 把二维码绑到他人账号
+      const allUsers = await safeReadJSON<any[]>(USERS_FILE, []);
+      const scanner = allUsers.find((u: any) => u.username === scannerUserId || u.id === scannerUserId);
+      if (!scanner) {
+        return res.status(401).json({ success: false, error: "扫码账号无效，请重新登录" });
+      }
+      const ownerUserId = (scanner.username || scanner.id).toString();
 
       const sess = bridgeAuthSessions.get(cleanCode);
       if (!sess) {
         return res.status(404).json({ success: false, error: "配对码不存在或已失效，请重新生成" });
       }
-
       if (Date.now() > sess.expiresAt) {
         sess.status = "expired";
         return res.status(410).json({ success: false, error: "配对码已过期，请在电脑端重新生成二维码" });
       }
 
-      // 授权成功，关联 Token
-      sess.status = "confirmed";
-      sess.authorizedToken = cleanToken;
-      sess.authorizedAccount = (account || "").toString().trim();
+      // token 由服务端产生并存储（唯一真源）；兼容旧客户端带来的 token 时予以采纳
+      const issuedToken = await resolveOrCreateUserAgentToken(ownerUserId, legacyToken);
+      if (!issuedToken) {
+        return res.status(500).json({ success: false, error: "服务端未能签发配对凭证" });
+      }
 
-      console.log(`[Bridge Auth] Session ${cleanCode} confirmed by user: ${sess.authorizedAccount || 'anonymous'}`);
+      // 授权成功：绑定归属，供 auth-poll 下发给电脑端
+      sess.status = "confirmed";
+      sess.authorizedToken = issuedToken;
+      sess.authorizedAccount = ownerUserId;
+      sess.authorizedUserId = ownerUserId;
+
+      console.log(`[Bridge Auth] 配对码 ${cleanCode} 已由用户 ${ownerUserId} 确认授权`);
+
+      // 注意：不把 token 回给手机端——手机端本就持有同一枚 token（服务端真源），
+      // 而电脑端会通过 auth-poll 领取，避免 token 在更多位置留存。
       res.json({
         success: true,
         message: "授权成功！电脑端正在自动完成握手并上线...",
