@@ -2239,34 +2239,6 @@ if %errorlevel% neq 0 (
     }
   });
 
-  app.get("/api/agent/download-bridge", async (req, res) => {
-    try {
-      let scriptContent = "";
-      const candidates = [
-        path.join(process.cwd(), "public", "deepseek_bridge.py"),
-        path.join(process.cwd(), "deepseek_bridge.py")
-      ];
-      for (const p of candidates) {
-        try {
-          const c = await fs.readFile(p, "utf-8");
-          if (c && c.length > 500) {
-            scriptContent = c;
-            break;
-          }
-        } catch {}
-      }
-      if (!scriptContent) {
-        scriptContent = `# DeepSeek Bridge Script`;
-      }
-      res.setHeader("Content-Type", "text/x-python; charset=utf-8");
-      res.setHeader("Content-Disposition", 'attachment; filename="deepseek_bridge.py"');
-      res.send(scriptContent);
-    } catch (err: any) {
-      console.error("Failed to serve bridge script:", err);
-      res.status(500).json({ error: "Failed to download bridge script" });
-    }
-  });
-
   app.post("/api/agent/cancel-task", (req, res) => {
     try {
       const { taskId, token } = req.body;

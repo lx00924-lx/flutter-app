@@ -1,10 +1,10 @@
 <div align="center">
 
-# LxAI · 云端中继监控看板 + 多端 App + 内网穿透 Bridge
+# LxAI · 官网介绍页 + 多端 App + 内网穿透 Bridge
 
 **无公网 IP，也能远程遥控内网电脑上的私有 Agent（DeepSeek Harness / 本地模型 / 本地自动化工作区）。**
 
-Flutter 纯原生多端客户端（Android / Windows） · Node + React 云端中继看板 · Python 反向长连接内网穿透
+Flutter 纯原生多端客户端（Android / Windows） · Node + React 官网介绍与下载门户 · Python 反向长连接内网穿透
 
 </div>
 
@@ -16,7 +16,7 @@ Flutter 纯原生多端客户端（Android / Windows） · Node + React 云端�
 
 | 模块 | 目录 | 技术栈 | 作用 |
 | :--- | :--- | :--- | :--- |
-| **① 云端中继服务（含 Web 看板）** | `/`（`server.ts`、`src/`） | Express + TypeScript + React + Vite | 会话鉴权、Token 调度分配、消息持久化与增量漫游、设置云端同步、单点登录互斥、反向信道桥接 |
+| **① 云端中继服务（含官网介绍页）** | `/`（`server.ts`、`src/`） | Express + TypeScript + React + Vite | 会话鉴权、Token 调度分配、消息持久化与增量漫游、设置云端同步、单点登录互斥、反向信道桥接；`src/` 为对外官网介绍与下载门户 |
 | **② 多端 App 客户端** | `flutter_app/` | Flutter（纯原生，无 WebView 套壳） | 手机/电脑遥控端：聊天、语音、扫码配对、本地 Agent 控制 |
 | **③ 本地反向长连接 Bridge** | `deepseek_bridge.py` | Python 3.8+ | 跑在**无公网 IP** 的电脑上，主动向云端建立反向长连接，把本地 Harness 暴露给 App |
 
@@ -28,7 +28,7 @@ Flutter 纯原生多端客户端（Android / Windows） · Node + React 云端�
 
 | 用途 | 需要 |
 | :--- | :--- |
-| 服务端 / Web 看板 | Node.js **20+**、npm |
+| 服务端 / 官网介绍页 | Node.js **20+**、npm |
 | 打包 Flutter App | Flutter **3.44+**（含 Dart 3.12+） |
 | 打包 Windows 客户端 | Visual Studio 2022，勾选「使用 C++ 的桌面开发」 |
 | 打包 Android 客户端 | JDK 17+、Android SDK（含 build-tools / platform 36） |
@@ -42,7 +42,7 @@ python --version
 
 ---
 
-## 三、跑起来（服务端 + Web 看板）
+## 三、跑起来（服务端 + 官网介绍页）
 
 ```bash
 npm install
@@ -55,7 +55,7 @@ npm run build      # 产出 dist/（前端静态产物 + dist/server.cjs）
 npm start
 ```
 
-浏览器打开 `http://localhost:3000` 即可看到中继监控看板。
+浏览器打开 `http://localhost:3000` 即可看到 LxAI 官网介绍与下载门户。
 
 ---
 
@@ -119,7 +119,7 @@ flutter run                                 --dart-define=SERVER_BASE_URL=http:/
 
 不传该参数时，默认指向本项目作者的生产环境地址（见 `flutter_app/lib/config/app_config.dart`）。
 
-服务端与 Web 看板同样可配置（见 `.env.example`）：
+服务端与官网介绍页同样可配置（见 `.env.example`）：
 
 ```bash
 cp .env.example .env
@@ -156,9 +156,8 @@ App 内「设置 ➔ 🤖 本地 Agent」会直接给出带 Token 的启动命�
 
 ```
 ├── server.ts                     # 云端中继服务端（鉴权/调度/持久化/漫游/桥接）
-├── src/                          # Web 中继监控看板（React）
-├── public/deepseek_bridge.py     # 供 Web 端下载的 Bridge 脚本副本
-├── deepseek_bridge.py            # Bridge 主程序（反向长连接）
+├── src/                          # LxAI 官网介绍与下载门户（React）
+├── deepseek_bridge.py            # Bridge 主程序（反向长连接，唯一真源）
 ├── flutter_app/                  # Flutter 纯原生多端 App
 │   ├── lib/config/app_config.dart    # 全局可配置项（服务器地址等）
 │   ├── lib/services/                 # 网络、同步、录音、TTS、本地 Agent
