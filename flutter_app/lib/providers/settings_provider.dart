@@ -6,6 +6,7 @@ import '../models/app_settings.dart';
 import '../services/storage_service.dart';
 import '../services/storage_path_service.dart';
 import '../services/sync_service.dart';
+import '../services/keep_alive_service.dart';
 import '../utils/image_picker_helper.dart';
 import '../main.dart' show rootNavigatorKey;
 
@@ -27,6 +28,16 @@ class SettingsProvider extends ChangeNotifier {
     if (_settings.clientSessionId.isEmpty) {
       _settings.clientSessionId = const Uuid().v4();
       _save(pushToCloud: false);
+    }
+
+    // 确保有本机唯一的 Agent 配对 Token：
+    // 历史版本所有设备共用同一个硬编码 Token（服务端还会回退到 default_agent_token），
+    // 这构成越权通道。fromMap 已把旧值/空值替换为新的随机值，这里负责落盘与云端同步。
+    if (_settings.harnessToken.isEmpty ||
+        _settings.harnessToken == kLegacyDefaultAgentToken) {
+      _settings.harnessToken = generateAgentPairingToken();
+      _save();
+      debugPrint('[Settings] 已为本机生成唯一的 Agent 配对 Token');
     }
 
     // 异步拉取服务端维护的模型上下文上限表
@@ -141,6 +152,10 @@ class SettingsProvider extends ChangeNotifier {
         handleForceLogout(reason);
       },
     );
+
+    // 已登录：开启 Android 常驻保活前台服务，确保划掉任务栏后
+    // Dart isolate 仍存活，上面的会话轮询与中继长连接得以继续运行
+    KeepAliveService.enableAfterLogin();
   }
 
   /// 处理顶号强制下线
@@ -307,6 +322,9 @@ class SettingsProvider extends ChangeNotifier {
     );
     SyncService.instance.stopSessionWatcher();
 
+    // 已退出登录：关闭常驻保活，避免未登录状态仍占着前台服务与常驻通知
+    KeepAliveService.stop();
+
     _settings.isLoggedIn = false;
     _save();
   }
@@ -339,7 +357,11 @@ class SettingsProvider extends ChangeNotifier {
 
   /// 获取本地 Agent 工作区与会话列表
   Future<Map<String, dynamic>> fetchAgentWorkspacesAndSessions() async {
-    final data = await SyncService.instance.getAgentSessions(_settings.harnessToken);
+    // 带上当前登录账号：服务端据此校验该 Token 是否属于本账号（防止越权访问他人电脑）
+    final data = await SyncService.instance.getAgentSessions(
+      _settings.harnessToken,
+      userId: _settings.loginAccount,
+    );
     final isOnline = data['online'] == true;
     if (_settings.isHarnessOnline != isOnline) {
       _settings.isHarnessOnline = isOnline;
@@ -378,6 +400,15 @@ class SettingsProvider extends ChangeNotifier {
         }
         if (cloud.asrApiKey.trim().isEmpty && _settings.asrApiKey.trim().isNotEmpty) {
           cloud.asrApiKey = _settings.asrApiKey;
+        }
+
+        // 配对 Token 是本机唯一凭据：云端可能是旧设备/旧版本写入的历史默认值或空值，
+        // 一律以本地为准，避免"拉云端把本机 token 冲掉 → bridge 失联"。
+        final localToken = _settings.harnessToken.trim();
+        if (localToken.length < 16 || localToken == kLegacyDefaultAgentToken) {
+          cloud.harnessToken = generateAgentPairingToken();
+        } else {
+          cloud.harnessToken = localToken;
         }
 
         _settings = cloud;

@@ -14,6 +14,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
@@ -23,8 +24,33 @@ class MainActivity: FlutterActivity() {
     private val NOTIFICATION_ID = 2026
     private val NOTIFICATION_PERMISSION_REQUEST_CODE = 1002
 
+    /**
+     * 提供【缓存复用的】FlutterEngine：
+     * - 引擎存放在 FlutterEngineCache 中，跨 Activity 生命周期存活；
+     * - 配合 shouldDestroyEngineWithHost() = false，划掉任务栏销毁 Activity 后
+     *   Dart isolate 不会被销毁，SyncService 的中继轮询与 WebSocket 得以继续运行；
+     * - Activity 重建（如从后台回来）时直接复用同一个引擎，状态不丢、也不会重复初始化。
+     */
+    override fun provideFlutterEngine(context: android.content.Context): FlutterEngine {
+        FlutterEngineCache.getInstance().get(LxEngine.MAIN_ENGINE_ID)?.let { return it }
+        val engine = FlutterEngine(context)
+        engine.dartExecutor.executeDartEntrypoint(
+            io.flutter.embedding.engine.dart.DartExecutor.DartEntrypoint.createDefault()
+        )
+        setupMethodChannel(engine)
+        FlutterEngineCache.getInstance().put(LxEngine.MAIN_ENGINE_ID, engine)
+        return engine
+    }
+
+    /** 宿主销毁时不销毁引擎，交由常驻前台服务维持。 */
+    override fun shouldDestroyEngineWithHost(): Boolean = false
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        setupMethodChannel(flutterEngine)
+    }
+
+    private fun setupMethodChannel(flutterEngine: FlutterEngine) {
         createNotificationChannel()
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
@@ -79,6 +105,29 @@ class MainActivity: FlutterActivity() {
                     } else {
                         result.error("INVALID_PATH", "APK path is null or empty", null)
                     }
+                }
+                "startKeepAliveService" -> {
+                    setKeepAliveFlag(true)
+                    val granted = requestNotificationPermissionIfNeeded()
+                    LxForegroundService.start(this)
+                    // granted=false 表示正在向用户申请通知权限，服务仍已拉起
+                    result.success(granted)
+                }
+                "stopKeepAliveService" -> {
+                    setKeepAliveFlag(false)
+                    LxForegroundService.stop(this)
+                    result.success(true)
+                }
+                "isKeepAliveRunning" -> {
+                    result.success(isServiceRunning(LxForegroundService::class.java))
+                }
+                "isIgnoringBatteryOptimizations" -> {
+                    result.success(isIgnoringBatteryOptimizations())
+                }
+                "requestIgnoreBatteryOptimizations" -> {
+                    requestIgnoreBatteryOptimizationsInternal()
+                    // 该操作会跳转系统弹窗，返回值不代表用户已同意，仅表示已发起请求
+                    result.success(true)
                 }
                 else -> result.notImplemented()
             }
@@ -210,6 +259,61 @@ class MainActivity: FlutterActivity() {
         } catch (e: Exception) {
             e.printStackTrace()
             return false
+        }
+    }
+
+    // ==================== 常驻保活相关 ====================
+
+    /** 记录“是否开启常驻”，供 BootReceiver 在开机后决定是否自启。 */
+    private fun setKeepAliveFlag(enabled: Boolean) {
+        getSharedPreferences(LxForegroundService.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(LxForegroundService.KEY_KEEP_ALIVE, enabled)
+            .apply()
+    }
+
+    /** 常驻前台服务是否正在运行（读取进程内共享状态，比 getRunningServices 可靠）。 */
+    private fun isServiceRunning(serviceClass: Class<*>): Boolean {
+        return if (serviceClass == LxForegroundService::class.java) {
+            LxForegroundService.isRunning
+        } else {
+            false
+        }
+    }
+
+    /** 当前是否已加入电池优化白名单（未加入时系统更容易在后台回收进程）。 */
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return true
+        }
+        val manager = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        return manager.isIgnoringBatteryOptimizations(packageName)
+    }
+
+    /** 拉起系统“忽略电池优化”授权弹窗。 */
+    private fun requestIgnoreBatteryOptimizationsInternal() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return
+        }
+        if (isIgnoringBatteryOptimizations()) {
+            return
+        }
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            // 部分 ROM 屏蔽该 Intent，降级到电池优化设置列表页
+            try {
+                startActivity(
+                    Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
+            } catch (e2: Exception) {
+                e2.printStackTrace()
+            }
         }
     }
 }

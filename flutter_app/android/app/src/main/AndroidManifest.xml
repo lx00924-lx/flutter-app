@@ -12,6 +12,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
@@ -43,6 +45,36 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!--
+          常驻保活前台服务：
+          - stopWithTask="false" 是“划掉任务栏后服务继续运行”的关键开关（默认值为 true，会被一起停掉）
+          - foregroundServiceType="specialUse"：持续性的中继连接/消息接收不属于 dataSync
+            的短时同步语义；且 dataSync 在 Android 15+ 上有 6 小时/24 小时上限会被系统掐断，
+            specialUse 无时长限制（需要下面的 PROPERTY_SPECIAL_USE_FGS_SUBTYPE 说明用途）
+        -->
+        <service
+            android:name=".LxForegroundService"
+            android:enabled="true"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="维持与用户自建中继服务器的长连接，实时接收远程 Agent 的消息与状态，保证后台不被系统回收" />
+        </service>
+
+        <!-- 开机自启：仅在用户已登录并开启常驻时拉起前台服务 -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.QUICKBOOT_POWERON"/>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED"/>
+            </intent-filter>
+        </receiver>
 
         <provider
             android:name="androidx.core.content.FileProvider"
