@@ -22,6 +22,9 @@ DeepSeek Harness 本地安全反向桥接客户端 (DeepSeek Bridge v3.6 - 工�
 
 import argparse
 import asyncio
+import base64
+import hashlib
+import hmac
 from datetime import datetime
 import json
 import logging
@@ -35,6 +38,187 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import uuid
+
+
+# ============================================================================
+# DSH 浏览器会话鉴权（自签 Cookie）
+# ----------------------------------------------------------------------------
+# DSH 0.1.5 起，Web 服务对**所有真实路由**启用了浏览器会话鉴权：
+#   dsh-client-connection → BrowserAuth.isAuthenticated() 只认签名 Cookie，
+#   未携带时一律 401（这也是"桥接在线但取不到本地目录"的根因）。
+#
+# Cookie 算法（逆向自 dsh-client-connection/lib/index.js）：
+#   名称  : "dsh-auth-" + base64url( sha256(authority) )
+#   值    : "v1." + base64url(JSON{v,authority,issuedAt,expiresAt}) + "." + base64url(HMAC-SHA256)
+#   密钥  : ~/.dsh/.credentials.yaml 中 client-connection/browser-session 的
+#           payload.secret（base64url 编码的 32 字节，跨 DSH 重启持久）
+#
+# 由于 bridge 与 DSH 同机运行，这里直接读取该密钥在本地自签 Cookie，
+# 无需浏览器参与、也不会把本机凭证上传到云端中继。
+# ============================================================================
+
+DSH_AUTH_RECORD_KEY = "client-connection/browser-session"
+DSH_COOKIE_PREFIX = "dsh-auth-"
+DSH_COOKIE_PAYLOAD_VERSION = 1
+DSH_COOKIE_TTL_SECONDS = 30 * 24 * 3600  # DSH 默认 cookieMaxAgeDays = 30
+_dsh_auth_cache = {"authority": None, "header": None, "expiresAt": 0}
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(text: str):
+    if not text:
+        return None
+    try:
+        padding = "=" * ((4 - len(text) % 4) % 4)
+        return base64.urlsafe_b64decode(text.replace("-", "+").replace("_", "/") + padding)
+    except Exception:
+        return None
+
+
+def _dsh_home() -> str:
+    """定位 DSH 主目录（环境变量优先，否则默认 ~/.dsh）。"""
+    env_home = (os.getenv("DSH_HOME") or "").strip()
+    if env_home and os.path.isdir(env_home):
+        return env_home
+    return os.path.join(os.path.expanduser("~"), ".dsh")
+
+
+def _read_dsh_browser_session_secret():
+    """
+    从 .credentials.yaml 读取浏览器会话签名密钥。
+
+    只做最小限度的 YAML 解析（不引入 PyYAML 依赖）：定位顶层 records 段下的
+    client-connection/browser-session 记录，取其 payload.secret 字段。
+    返回原始字节（32 字节）或 None。
+    """
+    path = os.path.join(_dsh_home(), ".credentials.yaml")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except Exception:
+        # 本模块在 logger 初始化之前被定义，这里不做日志，交由调用方按 401 提示处理
+        return None
+
+    in_records = False
+    in_record = False
+    indent_record = None
+    secret_text = None
+
+    for raw_line in lines:
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        stripped = raw_line.strip()
+
+        if indent == 0:
+            # 顶层键：只在 records 段内查找
+            in_records = stripped.startswith("records:")
+            in_record = False
+            continue
+        if not in_records:
+            continue
+
+        # records 下的一级键即记录名
+        if indent_record is None or indent <= indent_record:
+            if stripped.endswith(":"):
+                record_name = stripped[:-1].strip().strip('"').strip("'")
+                in_record = record_name == DSH_AUTH_RECORD_KEY
+                indent_record = indent
+                continue
+        if in_record and stripped.startswith("secret:"):
+            secret_text = stripped.split(":", 1)[1].strip().strip('"').strip("'")
+            break
+
+    if not secret_text:
+        return None
+    raw = _b64url_decode(secret_text)
+    if not raw or len(raw) != 32:
+        return None
+    return raw
+
+
+def _dsh_request_authority(url: str, explicit_authority: str = "") -> str:
+    """计算 Cookie 绑定的 authority（即 Host 头内容，如 127.0.0.1:3080）。"""
+    if explicit_authority:
+        return explicit_authority
+    try:
+        parsed = urllib.parse.urlsplit(url if "//" in url else "//" + url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port
+        return f"{host}:{port}" if port else host
+    except Exception:
+        return ""
+
+
+def _build_dsh_cookie_header(url: str, explicit_authority: str = ""):
+    """
+    生成可直接附加到请求上的 Cookie 头。
+
+    成功返回 {"Cookie": "..."}；任何环节缺失（无凭据/无法解析 authority）返回 {}，
+    使 bridge 退化为原行为（此时 DSH 会返回 401，日志中给出明确指引）。
+    """
+    secret = _read_dsh_browser_session_secret()
+    if not secret:
+        return {}
+    authority = _dsh_request_authority(url, explicit_authority)
+    if not authority:
+        return {}
+
+    now_ms = int(time.time() * 1000)
+    if (
+        _dsh_auth_cache["header"]
+        and _dsh_auth_cache["authority"] == authority
+        and _dsh_auth_cache["expiresAt"] - now_ms > 3600 * 1000
+    ):
+        return _dsh_auth_cache["header"]
+
+    expires_at = now_ms + DSH_COOKIE_TTL_SECONDS * 1000
+    payload = {
+        "version": DSH_COOKIE_PAYLOAD_VERSION,
+        "authority": authority,
+        "issuedAt": now_ms,
+        "expiresAt": expires_at,
+    }
+    body = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signature = _b64url_encode(hmac.new(secret, body.encode("ascii"), hashlib.sha256).digest())
+    cookie_name = DSH_COOKIE_PREFIX + _b64url_encode(
+        hashlib.sha256(authority.encode("utf-8")).digest()
+    )
+    header = {"Cookie": f"{cookie_name}=v{DSH_COOKIE_PAYLOAD_VERSION}.{body}.{signature}"}
+    _dsh_auth_cache.update(
+        {"authority": authority, "header": header, "expiresAt": expires_at}
+    )
+    return header
+
+
+def dsh_headers(url: str, extra=None):
+    """
+    构造发往 DSH 的请求头：在业务头基础上附加会话 Cookie。
+
+    :param url: 目标地址（用于推导 Cookie 绑定的 authority）
+    :param extra: 额外的业务头
+    """
+    headers = {"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"}
+    if extra:
+        headers.update(extra)
+    cookie = _build_dsh_cookie_header(url)
+    if cookie:
+        headers.update(cookie)
+    return headers
+
+
+def dsh_auth_status():
+    """返回 (是否可用, 说明)，供启动自检打印。"""
+    secret = _read_dsh_browser_session_secret()
+    if not secret:
+        return False, f"未找到 DSH 会话密钥（{os.path.join(_dsh_home(), '.credentials.yaml')}）"
+    return True, "已加载 DSH 会话密钥，可为请求自签 Cookie"
+
 
 # 强制标准输出为 UTF-8 编码并激活 Windows 控制台 ANSI 颜色与高对比度字符支持
 if sys.platform == "win32":
@@ -706,7 +890,7 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
             req = urllib.request.Request(
                 url,
                 data=req_data,
-                headers={"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
+                headers=dsh_headers(url),
                 method=method
             )
             with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=2) as response:
@@ -750,7 +934,7 @@ async def query_dsh_models(harness_url: str):
         def do_req():
             req = urllib.request.Request(
                 url,
-                headers={"Accept": "application/json", "User-Agent": "AetherX-Bridge/3.7"},
+                headers=dsh_headers(url, {"User-Agent": "AetherX-Bridge/3.7"}),
                 method="GET"
             )
             with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=3) as resp:
@@ -786,7 +970,7 @@ async def abort_dsh_session(harness_url: str, session_id: str):
             req = urllib.request.Request(
                 url,
                 data=json.dumps({"sessionId": session_id, "reason": "user_cancelled"}).encode("utf-8"),
-                headers={"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
+                headers=dsh_headers(url),
                 method="POST"
             )
             with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=3) as resp:
@@ -814,7 +998,7 @@ async def approve_dsh_session(harness_url: str, session_id: str, approval_id: st
             req = urllib.request.Request(
                 url,
                 data=json.dumps({"approvalId": approval_id, "action": action}).encode("utf-8"),
-                headers={"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
+                headers=dsh_headers(url),
                 method="POST"
             )
             with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=4) as resp:
@@ -841,7 +1025,7 @@ async def rename_dsh_session(harness_url: str, session_id: str, title: str):
             req = urllib.request.Request(
                 url,
                 data=json.dumps({"title": title}).encode("utf-8"),
-                headers={"Content-Type": "application/json; charset=utf-8", "Accept": "application/json"},
+                headers=dsh_headers(url),
                 method="PATCH"
             )
             with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=3) as resp:
