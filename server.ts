@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import bcrypt from "bcryptjs";
 import FormData from "form-data";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -34,6 +35,41 @@ const SERVER_BASE_URL =
 // 历史问题：客户端设置的字段名是 harnessToken，服务端曾误读 agentToken，
 // 导致永远读不到 token、全部落进 default_agent_token（公共秘密＝无鉴权）。
 // 参考：https://github.com/lx00924-lx/flutter-app 多租户安全整改
+
+// ==================== 密码哈希（bcrypt） ====================
+// 历史问题：用户密码以明文落盘于 messages_data/users.json，比对也是明文相等判断。
+// 一旦服务器文件被读取，所有账号口令直接泄露（且用户往往复用口令）。
+// 现改为 bcrypt 哈希存储；存量明文账号在下次登录成功时自动升级为哈希。
+
+/** bcrypt 计算强度（12 ≈ 250ms/次，兼顾安全与登录体验） */
+const BCRYPT_ROUNDS = 12;
+/** bcrypt 只取前 72 字节，超长口令需显式截断，避免"不同长口令被判相同" */
+const MAX_PASSWORD_BYTES = 72;
+const isBcryptHash = (value: string): boolean =>
+  /^\$2[aby]?\$\d{2}\$/.test((value || "").trim());
+
+/** 生成密码哈希（超长部分按 72 字节截断，与 bcrypt 内部行为保持一致） */
+const hashPassword = async (plain: string): Promise<string> =>
+  bcrypt.hash((plain || "").slice(0, MAX_PASSWORD_BYTES), BCRYPT_ROUNDS);
+
+/**
+ * 校验密码。
+ * - 已哈希（$2a$/$2b$/$2y$ 开头）→ bcrypt 比对
+ * - 尚未升级的明文（含历史数据里以 "hash:" 前缀标记的情况）→ 明文比对
+ * @returns matched 是否正确；needsRehash 表示这次应当把明文升级为哈希
+ */
+const verifyPassword = async (
+  plain: string,
+  stored: string
+): Promise<{ matched: boolean; needsRehash: boolean }> => {
+  const record = (stored || "").trim();
+  const candidate = (plain || "").slice(0, MAX_PASSWORD_BYTES);
+  if (!record) return { matched: false, needsRehash: false };
+  if (isBcryptHash(record)) {
+    return { matched: await bcrypt.compare(candidate, record), needsRehash: false };
+  }
+  return { matched: record === candidate, needsRehash: true };
+};
 
 /** 明显非法的 token（空值、历史默认值、占位符）一律不接受。 */
 const isPlausibleAgentToken = (token: string): boolean => {
@@ -941,13 +977,17 @@ async function startServer() {
       let registeredUser: any = null;
       let errorMsg = "";
 
+      // 先把口令哈希算好再进锁，避免在文件锁内做 250ms 的 CPU 计算
+      const passwordHash = await hashPassword(password || "");
+
       await withFileLock(USERS_FILE, async () => {
         const users = await safeReadJSON<any[]>(USERS_FILE, []);
         if (users.find((u: any) => u.username === username)) {
           errorMsg = "User already exists";
           return;
         }
-        const newUser = { id: Date.now().toString(), username, password };
+        // 只存哈希，不存明文
+        const newUser = { id: Date.now().toString(), username, passwordHash };
         users.push(newUser);
         await safeWriteJSON(USERS_FILE, users);
         registeredUser = newUser;
@@ -981,9 +1021,32 @@ async function startServer() {
         return res.status(401).json({ error: "账号不存在" });
       }
       
-      if (user.password !== password) {
+      // 兼容存量：老数据是明文 password 字段，新数据是 passwordHash
+      const storedSecret = (user.passwordHash ?? user.password ?? "").toString();
+      const { matched, needsRehash } = await verifyPassword(password || "", storedSecret);
+      if (!matched) {
         console.log(`Login failed for username: ${username}. Incorrect password.`);
         return res.status(401).json({ error: "密码错误" });
+      }
+
+      // 存量明文账号：登录成功即升级为 bcrypt 哈希，并清除明文
+      if (needsRehash) {
+        try {
+          const upgradedHash = await hashPassword(password || "");
+          await withFileLock(USERS_FILE, async () => {
+            const all = await safeReadJSON<any[]>(USERS_FILE, []);
+            const idx = all.findIndex((u: any) => u.username === username);
+            if (idx !== -1) {
+              all[idx].passwordHash = upgradedHash;
+              delete all[idx].password;
+              await safeWriteJSON(USERS_FILE, all);
+            }
+          });
+          console.log(`[Security] 已将账号 ${username} 的明文口令升级为 bcrypt 哈希`);
+        } catch (upgradeError) {
+          // 升级失败不应影响本次登录，下次登录会重试
+          console.error(`[Security] 口令哈希升级失败 (${username}):`, upgradeError);
+        }
       }
 
       const cleanDeviceType: 'mobile' | 'desktop' = (deviceType === 'mobile') ? 'mobile' : 'desktop';
@@ -1483,23 +1546,39 @@ async function startServer() {
 
   app.post("/api/change-password", async (req, res) => {
     const { userId, oldPassword, newPassword } = req.body;
+    if (!newPassword || String(newPassword).length < 6) {
+      return res.status(400).json({ error: "新密码长度至少 6 位" });
+    }
     try {
+      // bcrypt 比对是异步的，不能放进同步的文件锁回调里，
+      // 因此先读取校验，再在锁内落盘（并在锁内复查用户仍存在）。
+      const snapshot = await safeReadJSON<any[]>(USERS_FILE, []);
+      const snapshotUser = snapshot.find((u: any) => u.id === userId);
+      if (!snapshotUser) {
+        return res.status(401).json({ error: "原密码错误" });
+      }
+      const storedSecret = (snapshotUser.passwordHash ?? snapshotUser.password ?? "").toString();
+      const { matched } = await verifyPassword(oldPassword || "", storedSecret);
+      if (!matched) {
+        return res.status(401).json({ error: "原密码错误" });
+      }
+
+      const newHash = await hashPassword(newPassword || "");
       let success = false;
-      let errorMsg = "";
       await withFileLock(USERS_FILE, async () => {
         const users = await safeReadJSON<any[]>(USERS_FILE, []);
-        const userIndex = users.findIndex((u: any) => u.id === userId && u.password === oldPassword);
+        const userIndex = users.findIndex((u: any) => u.id === userId);
         if (userIndex === -1) {
-          errorMsg = "原密码错误";
           return;
         }
-        users[userIndex].password = newPassword;
+        users[userIndex].passwordHash = newHash;
+        delete users[userIndex].password; // 清除可能残留的明文字段
         await safeWriteJSON(USERS_FILE, users);
         success = true;
       });
 
       if (!success) {
-        return res.status(401).json({ error: errorMsg || "修改失败" });
+        return res.status(401).json({ error: "用户不存在" });
       }
       res.json({ success: true });
     } catch (e) {
