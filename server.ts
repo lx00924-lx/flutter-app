@@ -1445,6 +1445,12 @@ async function startServer() {
       console.warn(`\x1b[31m[Security] 越权访问被拒绝: user=${claimed} 试图访问 owner=${owner} 的 Agent\x1b[0m`);
       return { status: 403, error: "该 Agent 不属于当前账号" };
     }
+    if (!owner) {
+      // 严格模式：token 必须能归属到某个真实用户。
+      // 此前这里直接放行，导致任意"格式合法"的字符串都能注册成 Agent，
+      // 而 App 拿着本账号真正的 token 永远查不到它（表现为"桥接已连接但手机显示离线"）。
+      return { status: 403, error: "该 Agent Token 未绑定任何账号，请在 App 中重新配对" };
+    }
     return undefined;
   };
 
@@ -1814,9 +1820,6 @@ async function startServer() {
   app.post("/api/agent/register", async (req, res) => {
     try {
       const token = ((req.body?.token as string) || "").trim();
-      if (!isPlausibleAgentToken(token)) {
-        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
-      }
       // 不再回退到 default_agent_token：默认值 = 公共秘密，等于没有鉴权
       if (!isPlausibleAgentToken(token)) {
         console.warn("[Security] 拒绝注册：非法或默认 Agent Token");
@@ -1827,8 +1830,15 @@ async function startServer() {
 
       console.log(`\x1b[32m[Agent Hub] Agent registered via HTTP [${token}] (${clientName}, mode: ${clientInfo.mode || 'polling'})\x1b[0m`);
 
-      // 绑定归属（若该 token 已在某用户设置中登记）
+      // 绑定归属；未能归属任何账号的 token 一律拒绝注册，
+      // 避免"孤儿 bridge 显示已连接、但手机端永远查不到"的假在线
       const ownerUserId = await resolveTokenOwnerUserId(token);
+      if (!ownerUserId) {
+        console.warn("[Security] 拒绝注册：该 Token 未绑定任何账号");
+        return res.status(403).json({
+          error: "该 Agent Token 未绑定任何账号，请在 App 中重新扫码配对或使用 App 显示的 Token",
+        });
+      }
       let agent = connectedAgents.get(token);
       if (!agent) {
         agent = {
@@ -2150,7 +2160,7 @@ if %errorlevel% neq 0 (
 
       res.json({
         online: !!isOnline,
-        workspaces: agent?.workspaces || ["deepseek-agent"],
+        workspaces: agent?.workspaces || [],
         sessions: agent?.sessions || [],
         clientName: agent?.clientName || "DeepSeek-Harness-Local"
       });
@@ -2266,7 +2276,7 @@ if %errorlevel% neq 0 (
 
         io.emit("agent_sessions_updated", {
           token: targetToken,
-          workspaces: agent.workspaces || ["deepseek-agent"],
+          workspaces: agent.workspaces || [],
           sessions: agent.sessions || []
         });
 
@@ -2292,7 +2302,7 @@ if %errorlevel% neq 0 (
       agent.sessions = [newSession, ...(agent.sessions || []).filter(s => (s.sessionId || s.id) !== newSid)];
       io.emit("agent_sessions_updated", {
         token: targetToken,
-        workspaces: agent.workspaces || [targetWs],
+        workspaces: agent.workspaces || [],
         sessions: agent.sessions
       });
       return res.json({
@@ -2300,7 +2310,7 @@ if %errorlevel% neq 0 (
         sessionId: newSid,
         session: newSession,
         sessions: agent.sessions,
-        workspaces: agent.workspaces || [targetWs]
+        workspaces: agent.workspaces || []
       });
     } catch (err: any) {
       console.error("[Create Session API Error]", err);
@@ -2331,7 +2341,7 @@ if %errorlevel% neq 0 (
         agent.lastPing = Date.now();
         io.emit("agent_sessions_updated", {
           token: targetToken,
-          workspaces: agent.workspaces || ["deepseek-agent"],
+          workspaces: agent.workspaces || [],
           sessions: agent.sessions || [],
           models: agent.models || []
         });
@@ -2600,6 +2610,100 @@ if %errorlevel% neq 0 (
     } catch (err: any) {
       console.error("rotate-token failed:", err);
       res.status(500).json({ error: err.message || "Failed to rotate token" });
+    }
+  });
+
+  // ==================== 设备凭证（bridge 自愈取回 token） ====================
+  // 场景：服务端换发 token 后，正在运行的 bridge 仍持有旧 token，会被拒绝注册，
+  // 表现为"手机端显示桥接离线"，而用户必须手动重新扫码。
+  // 方案：bridge 首次配对后领取一枚长期【设备凭证】，之后启动时用它向服务端
+  // 换取当前有效的 Agent Token，从而在 token 换发后自动跟上。
+
+  const DEVICE_TOKENS_FILE = path.join(DATA_DIR, "device_tokens.json");
+
+  const generateDeviceToken = (): string => {
+    const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const bytes = randomBytes(32);
+    let out = "dev_";
+    for (let i = 0; i < 32; i++) out += charset[bytes[i] % charset.length];
+    return out;
+  };
+
+  /** 校验 Agent Token 并换取该用户的设备凭证（同一 token 重复调用返回同一枚）。 */
+  app.post("/api/bridge/bootstrap-device", async (req, res) => {
+    try {
+      const agentToken = ((req.body?.token as string) || "").trim();
+      if (!isPlausibleAgentToken(agentToken)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
+      const ownerUserId = await resolveTokenOwnerUserId(agentToken);
+      if (!ownerUserId) {
+        return res.status(403).json({ error: "该 Agent Token 未绑定任何账号，请先在 App 中完成配对" });
+      }
+
+      let deviceToken: string | undefined;
+      await withFileLock(DEVICE_TOKENS_FILE, async () => {
+        const store = await safeReadJSON<Record<string, any>>(DEVICE_TOKENS_FILE, {});
+        for (const [dt, rec] of Object.entries(store)) {
+          if (rec?.userId === ownerUserId && rec?.agentToken === agentToken) {
+            deviceToken = dt;
+            return;
+          }
+        }
+        deviceToken = generateDeviceToken();
+        store[deviceToken] = {
+          userId: ownerUserId,
+          agentToken,
+          createdAt: Date.now(),
+          lastSeenAt: Date.now(),
+        };
+        await safeWriteJSON(DEVICE_TOKENS_FILE, store);
+      });
+
+      console.log(`[Device] 已为用户 ${ownerUserId} 签发设备凭证`);
+      res.json({ success: true, deviceToken, userId: ownerUserId });
+    } catch (err: any) {
+      console.error("bootstrap-device failed:", err);
+      res.status(500).json({ error: err.message || "Failed to bootstrap device" });
+    }
+  });
+
+  /** 用设备凭证换取该用户当前有效的 Agent Token（token 换发后 bridge 靠它自愈）。 */
+  app.post("/api/bridge/current-token", async (req, res) => {
+    try {
+      const deviceToken = ((req.body?.deviceToken as string) || "").trim();
+      if (!deviceToken) {
+        return res.status(401).json({ error: "缺少设备凭证" });
+      }
+      const store = await safeReadJSON<Record<string, any>>(DEVICE_TOKENS_FILE, {});
+      const record = store[deviceToken];
+      if (!record?.userId) {
+        return res.status(401).json({ error: "设备凭证无效或已被撤销" });
+      }
+
+      const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+      let currentToken = readUserAgentToken(allSettings[record.userId]);
+      if (!currentToken) {
+        currentToken = await resolveOrCreateUserAgentToken(record.userId);
+      }
+      if (!currentToken) {
+        return res.status(500).json({ error: "服务端未能提供有效 Token" });
+      }
+
+      // 凭证所记录的 token 已过期时同步刷新，便于后续按 token 反查
+      await withFileLock(DEVICE_TOKENS_FILE, async () => {
+        const latest = await safeReadJSON<Record<string, any>>(DEVICE_TOKENS_FILE, {});
+        if (latest[deviceToken]) {
+          latest[deviceToken].agentToken = currentToken;
+          latest[deviceToken].lastSeenAt = Date.now();
+          await safeWriteJSON(DEVICE_TOKENS_FILE, latest);
+        }
+      });
+
+      res.json({ success: true, token: currentToken, userId: record.userId });
+    } catch (err: any) {
+      console.error("current-token failed:", err);
+      res.status(500).json({ error: err.message || "Failed to resolve current token" });
     }
   });
 
@@ -2983,7 +3087,7 @@ if %errorlevel% neq 0 (
               });
             }
           } else if (msg.type === "sync_sessions" || msg.type === "sessions_result") {
-            agentInfo.workspaces = msg.workspaces || ["deepseek-agent"];
+            agentInfo.workspaces = msg.workspaces || [];
             agentInfo.sessions = msg.sessions || [];
             if (msg.models) agentInfo.models = msg.models;
             console.log(`[Agent Hub] Synced ${agentInfo.sessions.length} sessions and ${agentInfo.models?.length || 0} models for agent [${token}]`);

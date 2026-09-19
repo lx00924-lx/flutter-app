@@ -286,6 +286,119 @@ def clear_bridge_pair_token() -> bool:
         return False
 
 
+# ----------------------------------------------------------------------------
+# 设备凭证：服务端换发 token 后，bridge 靠它【自动取回】当前有效 token
+# ----------------------------------------------------------------------------
+# 背景：换发 token 后，正在运行的 bridge 仍持旧 token 会被拒绝注册，
+# 表现为"手机端显示桥接离线"，用户只能手动重新扫码。
+# 解决：首次配对后领取一枚长期设备凭证，之后启动时用它换取当前 token。
+
+def _read_bridge_config() -> dict:
+    if not os.path.isfile(BRIDGE_CONFIG_FILE):
+        return {}
+    try:
+        with open(BRIDGE_CONFIG_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_bridge_config(data: dict) -> bool:
+    try:
+        os.makedirs(BRIDGE_CONFIG_DIR, exist_ok=True)
+        with open(BRIDGE_CONFIG_FILE, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+        try:
+            os.chmod(BRIDGE_CONFIG_FILE, 0o600)
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def save_bridge_device_token(device_token: str) -> bool:
+    """保存服务端签发的设备凭证（与配对 Token 共存于同一配置文件）。"""
+    if not device_token:
+        return False
+    data = _read_bridge_config()
+    data["deviceToken"] = device_token
+    data["deviceSavedAt"] = int(time.time() * 1000)
+    return _write_bridge_config(data)
+
+
+def load_bridge_device_token():
+    """读取设备凭证；不存在时返回 None。"""
+    token = str(_read_bridge_config().get("deviceToken") or "").strip()
+    return token if token.startswith("dev_") and len(token) > 16 else None
+
+
+def http_post_json_ex(url: str, data: dict, timeout: int = 15):
+    """POST JSON 并返回 (http_status, 响应对象)，用于需要区分状态码的场景。"""
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(data, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            try:
+                return resp.status, json.loads(raw)
+            except Exception:
+                return resp.status, {"raw": raw}
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode("utf-8", "replace"))
+        except Exception:
+            return e.code, {}
+    except Exception as e:
+        return 0, {"error": str(e)}
+
+
+def ensure_device_token(server_base: str, pair_token: str) -> str:
+    """
+    确保本机持有设备凭证：已有则直接返回，否则用配对 Token 向服务端换取。
+    返回设备凭证；失败返回空字符串。
+    """
+    existing = load_bridge_device_token()
+    if existing:
+        return existing
+    if not pair_token:
+        return ""
+    status, body = http_post_json_ex(
+        f"{server_base}/api/bridge/bootstrap-device", {"token": pair_token}, timeout=15
+    )
+    if status == 200 and body.get("deviceToken"):
+        if save_bridge_device_token(body["deviceToken"]):
+            print("\033[90m[设备凭证] 已领取并保存，今后服务端换发 Token 将自动同步。\033[0m")
+        return body["deviceToken"]
+    return ""
+
+
+def recover_agent_token(server_base: str) -> str:
+    """
+    用设备凭证向服务端换取【当前有效】的 Agent Token。
+    服务端换发 token 后，bridge 靠它自动恢复，无需用户重新扫码。
+    返回新 token；无法恢复时返回空字符串。
+    """
+    device_token = load_bridge_device_token()
+    if not device_token:
+        return ""
+    status, body = http_post_json_ex(
+        f"{server_base}/api/bridge/current-token", {"deviceToken": device_token}, timeout=15
+    )
+    if status == 200 and body.get("token"):
+        new_token = str(body["token"]).strip()
+        if new_token:
+            save_bridge_pair_token(new_token, server_base, str(body.get("userId") or ""))
+        return new_token
+    return ""
+
+
+
 
 # 强制标准输出为 UTF-8 编码并激活 Windows 控制台 ANSI 颜色与高对比度字符支持
 if sys.platform == "win32":
@@ -1823,10 +1936,10 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
     try:
         init_workspaces, init_sessions = await query_dsh_workspaces_and_sessions(args.harness_url)
         init_models = await query_dsh_models(args.harness_url)
-        await loop.run_in_executor(
-            None,
-            lambda: http_post_json(register_url, {
-                "token": token,
+
+        def _register(tk: str):
+            return http_post_json_ex(register_url, {
+                "token": tk,
                 "clientInfo": {
                     "name": "DeepSeek-Harness-Local",
                     "version": "3.7.0",
@@ -1838,8 +1951,27 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                     "mode": "polling",
                     "models": init_models
                 }
-            })
-        )
+            }, timeout=15)
+
+        status, reg_body = await loop.run_in_executor(None, lambda: _register(token))
+
+        # token 失效（服务端已换发）→ 用设备凭证自动取回当前 token 并重试注册，
+        # 避免用户必须手动重新扫码
+        if status in (401, 403):
+            recovered = await loop.run_in_executor(None, lambda: recover_agent_token(server_base))
+            if recovered:
+                token = recovered
+                print(f"\033[93m[凭证自愈] 原 Token 已失效，已自动同步为服务端当前 Token 并重试注册\033[0m")
+                status, reg_body = await loop.run_in_executor(None, lambda: _register(token))
+
+        if status == 200:
+            print(f"\033[92m[✓ 注册成功] 已通过 HTTP 调度网关认证！发现 {len(init_sessions)} 个本地会话，{len(init_models)} 个可用模型。\033[0m")
+        else:
+            hint = reg_body.get("error") if isinstance(reg_body, dict) else ""
+            print(f"\033[91m[✗ 注册被拒] HTTP {status} {hint}\033[0m")
+            print("\033[93m  💡 请在手机 App 的「设置 ➔ 本地 Agent」中确认配对状态，或删除本机凭证后重新扫码：\033[0m")
+            print(f"\033[90m     {BRIDGE_CONFIG_FILE}\033[0m")
+
         try:
             await loop.run_in_executor(
                 None,
@@ -1852,7 +1984,6 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             )
         except Exception:
             pass
-        print(f"\033[92m[✓ 注册成功] 已通过 HTTP 调度网关认证！发现 {len(init_sessions)} 个本地会话，{len(init_models)} 个可用模型。Token: {token}\033[0m")
     except Exception as e:
         print(f"\033[93m[注册告警] 首次注册响应: {e}，将直接进入长轮询调度...\033[0m")
 
@@ -2103,6 +2234,9 @@ async def run_bridge_client(args):
         else:
             print("\033[90m[安全声明] 本次会话为纯内存即时连接，关闭终端即刻失效，不落盘持久化任何文件。\033[0m")
         print("")
+
+    # 领取/校验设备凭证：用于服务端换发 token 后自动同步（无需重新扫码）
+    ensure_device_token(server_base, token)
 
     proxy_mode_desc = "强制 Direct 直连" if args.no_proxy else (f"自定义代理 ({args.proxy})" if args.proxy else "自适应系统/VPN代理")
     print("=" * 70)
