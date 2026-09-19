@@ -271,6 +271,30 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     }
   }
 
+  /// 确保本地 bridge 脚本与 App 内置版本一致。
+  ///
+  /// 此前只在"文件不存在"时写入，导致**旧脚本永远不会被更新**：用户升级 App 后
+  /// 仍跑着几轮之前的老脚本（例如缺少 DSH 会话鉴权、缺少凭证自愈），
+  /// 表现为"桥接已启动但取不到工作区/会话"。
+  /// 现改为按内容比对，不一致即覆盖。
+  Future<void> _ensureBridgeScriptUpToDate(String scriptPath) async {
+    final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
+    try {
+      final file = File(scriptPath);
+      if (await file.exists()) {
+        final existing = await file.readAsString();
+        if (existing.trim() == pyContent.trim()) {
+          return; // 已是最新，无需重写
+        }
+        debugPrint('[Bridge] 检测到本地脚本与内置版本不一致，正在更新...');
+      }
+      await file.writeAsString(pyContent);
+    } catch (e) {
+      // 写失败不阻断启动：继续用磁盘上已有的脚本
+      debugPrint('[Bridge] 更新本地脚本失败（将沿用现有文件）: $e');
+    }
+  }
+
   /// 重启后台桥接进程：先停旧进程，再用新 Token 以相同参数启动。
   Future<void> _restartHeadlessBridge(String token, String harnessUrl) async {
     final running = _headlessBridgeProcess;
@@ -290,10 +314,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     setState(() => _isStartingBridge = true);
     try {
       final scriptPath = 'deepseek_bridge.py';
-      if (!await File(scriptPath).exists()) {
-        final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
-        await File(scriptPath).writeAsString(pyContent);
-      }
+      await _ensureBridgeScriptUpToDate(scriptPath);
 
       final executable = Platform.isWindows ? 'python' : 'python3';
       final process = await Process.start(
@@ -342,12 +363,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     setState(() => _isStartingBridge = true);
     try {
       final scriptPath = 'deepseek_bridge.py';
-      // 检查当前目录下是否存在脚本，不存在或需更新时从安装包内置资产读取完整工业级脚本
-      final fileExists = await File(scriptPath).exists();
-      if (!fileExists) {
-        final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
-        await File(scriptPath).writeAsString(pyContent);
-      }
+      await _ensureBridgeScriptUpToDate(scriptPath);
 
       final executable = Platform.isWindows ? 'python' : 'python3';
       final process = await Process.start(
