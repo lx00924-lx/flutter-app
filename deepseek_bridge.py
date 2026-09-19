@@ -287,52 +287,17 @@ def clear_bridge_pair_token() -> bool:
 
 
 # ----------------------------------------------------------------------------
-# 设备凭证：服务端换发 token 后，bridge 靠它【自动取回】当前有效 token
+# 说明：关于"免二次扫码"的历史尝试
 # ----------------------------------------------------------------------------
-# 背景：换发 token 后，正在运行的 bridge 仍持旧 token 会被拒绝注册，
-# 表现为"手机端显示桥接离线"，用户只能手动重新扫码。
-# 解决：首次配对后领取一枚长期设备凭证，之后启动时用它换取当前 token。
-
-def _read_bridge_config() -> dict:
-    if not os.path.isfile(BRIDGE_CONFIG_FILE):
-        return {}
-    try:
-        with open(BRIDGE_CONFIG_FILE, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _write_bridge_config(data: dict) -> bool:
-    try:
-        os.makedirs(BRIDGE_CONFIG_DIR, exist_ok=True)
-        with open(BRIDGE_CONFIG_FILE, "w", encoding="utf-8") as handle:
-            json.dump(data, handle, ensure_ascii=False, indent=2)
-        try:
-            os.chmod(BRIDGE_CONFIG_FILE, 0o600)
-        except Exception:
-            pass
-        return True
-    except Exception:
-        return False
-
-
-def save_bridge_device_token(device_token: str) -> bool:
-    """保存服务端签发的设备凭证（与配对 Token 共存于同一配置文件）。"""
-    if not device_token:
-        return False
-    data = _read_bridge_config()
-    data["deviceToken"] = device_token
-    data["deviceSavedAt"] = int(time.time() * 1000)
-    return _write_bridge_config(data)
-
-
-def load_bridge_device_token():
-    """读取设备凭证；不存在时返回 None。"""
-    token = str(_read_bridge_config().get("deviceToken") or "").strip()
-    return token if token.startswith("dev_") and len(token) > 16 else None
-
+# 曾实现过一套"装置凭证"机制（首次配对后领一枚长期凭证，之后启动或 token 被换发时
+# 用它静默换取当前 token，从而免去再次扫码）。实测该机制引入了**三方状态漂移**
+# （服务端真源 / 本机凭证文件 / App 本地设置互相覆盖），导致"重置 token 后连不上、
+# 需要依次点停止-重置-启动"等难以排查的问题。
+#
+# 现已移除该机制，恢复原始且可靠的语义：
+#   · 重置 token → 服务端作废旧 token 并通知本机 → 脚本退出（这是预期行为）
+#   · 重新运行脚本 → 打印二维码 → 手机扫码完成三方配对 → 获取新 token
+# 即"重置 = 重新配对"，不再有隐藏状态。
 
 def http_post_json_ex(url: str, data: dict, timeout: int = 15):
     """POST JSON 并返回 (http_status, 响应对象)，用于需要区分状态码的场景。"""
@@ -356,47 +321,6 @@ def http_post_json_ex(url: str, data: dict, timeout: int = 15):
             return e.code, {}
     except Exception as e:
         return 0, {"error": str(e)}
-
-
-def ensure_device_token(server_base: str, pair_token: str) -> str:
-    """
-    确保本机持有设备凭证：已有则直接返回，否则用配对 Token 向服务端换取。
-    返回设备凭证；失败返回空字符串。
-    """
-    existing = load_bridge_device_token()
-    if existing:
-        return existing
-    if not pair_token:
-        return ""
-    status, body = http_post_json_ex(
-        f"{server_base}/api/bridge/bootstrap-device", {"token": pair_token}, timeout=15
-    )
-    if status == 200 and body.get("deviceToken"):
-        if save_bridge_device_token(body["deviceToken"]):
-            print("\033[90m[设备凭证] 已领取并保存，今后服务端换发 Token 将自动同步。\033[0m")
-        return body["deviceToken"]
-    return ""
-
-
-def recover_agent_token(server_base: str) -> str:
-    """
-    用设备凭证向服务端换取【当前有效】的 Agent Token。
-    服务端换发 token 后，bridge 靠它自动恢复，无需用户重新扫码。
-    返回新 token；无法恢复时返回空字符串。
-    """
-    device_token = load_bridge_device_token()
-    if not device_token:
-        return ""
-    status, body = http_post_json_ex(
-        f"{server_base}/api/bridge/current-token", {"deviceToken": device_token}, timeout=15
-    )
-    if status == 200 and body.get("token"):
-        new_token = str(body["token"]).strip()
-        if new_token:
-            save_bridge_pair_token(new_token, server_base, str(body.get("userId") or ""))
-        return new_token
-    return ""
-
 
 
 
@@ -1955,22 +1879,17 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
 
         status, reg_body = await loop.run_in_executor(None, lambda: _register(token))
 
-        # token 失效（服务端已换发）→ 用设备凭证自动取回当前 token 并重试注册，
-        # 避免用户必须手动重新扫码
-        if status in (401, 403):
-            recovered = await loop.run_in_executor(None, lambda: recover_agent_token(server_base))
-            if recovered:
-                token = recovered
-                print(f"\033[93m[凭证自愈] 原 Token 已失效，已自动同步为服务端当前 Token 并重试注册\033[0m")
-                status, reg_body = await loop.run_in_executor(None, lambda: _register(token))
-
         if status == 200:
             print(f"\033[92m[✓ 注册成功] 已通过 HTTP 调度网关认证！发现 {len(init_sessions)} 个本地会话，{len(init_models)} 个可用模型。\033[0m")
         else:
             hint = reg_body.get("error") if isinstance(reg_body, dict) else ""
             print(f"\033[91m[✗ 注册被拒] HTTP {status} {hint}\033[0m")
-            print("\033[93m  💡 请在手机 App 的「设置 ➔ 本地 Agent」中确认配对状态，或删除本机凭证后重新扫码：\033[0m")
-            print(f"\033[90m     {BRIDGE_CONFIG_FILE}\033[0m")
+            if status in (401, 403):
+                # Token 已失效（通常是被 App 重置过）：不再静默换 token，
+                # 而是明确提示用户按"重新配对"流程处理。
+                print("\033[93m  💡 该 Token 已失效。请在电脑上重新运行本脚本并【用手机扫码】完成配对：\033[0m")
+                print(f"\033[90m     python deepseek_bridge.py --harness-url \"{args.harness_url}\"\033[0m")
+                print(f"\033[90m     （本机凭证文件：{BRIDGE_CONFIG_FILE}，如需彻底重置可删除它）\033[0m")
 
         try:
             await loop.run_in_executor(
@@ -2096,8 +2015,6 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             pass
 
     poll_fail_count = 0
-    # 防止在"确实无凭证"时反复重试换取 token
-    token_recovery_attempted = False
     while True:
         try:
             target_poll_url = f"{poll_url}?token={urllib.parse.quote(token)}&timeout=25"
@@ -2130,53 +2047,17 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                 s_id = resp.get("sessionId")
                 await archive_dsh_session(args.harness_url, s_id)
             elif mtype == "token_revoked":
-                # 服务端换发了新 Token（用户在 App 点了"重新生成"）。
-                # 旧 Token 已被作废，这里不再直接退出，而是立即用装置凭证
-                # 换取当前有效 Token 并重新注册 —— 实现"重置后自动重连"。
-                print("\033[93m[权限变更] 本机 Token 已被重置，正在自动同步服务端最新 Token...\033[0m")
-                new_tk = await loop.run_in_executor(None, lambda: recover_agent_token(server_base))
-                if not new_tk:
-                    print("\033[91m[无法自动同步] 未找到有效装置凭证。请用 App 中的新 Token 重新启动脚本。\033[0m")
-                    return
-                token = new_tk
-                try:
-                    st, _rb = await loop.run_in_executor(
-                        None,
-                        lambda: http_post_json_ex(register_url, {
-                            "token": token,
-                            "clientInfo": {
-                                "name": "DeepSeek-Harness-Local",
-                                "version": "3.7.0",
-                                "harnessUrl": args.harness_url,
-                                "model": args.harness_model,
-                                "platform": sys.platform,
-                                "pid": os.getpid(),
-                                "concurrency": concurrency_limit,
-                                "mode": "polling",
-                            },
-                        }, timeout=15),
-                    )
-                except Exception as reg_err:
-                    st = 0
-                    print(f"\033[93m[重连告警] 重新注册异常: {reg_err}\033[0m")
-                poll_fail_count = 0
-                token_recovery_attempted = False
-                if st == 200:
-                    print("\033[92m[✓ 已自动重连] 已用新 Token 重新注册成功，无需手动重启\033[0m")
-                else:
-                    print(f"\033[91m[✗ 自动重连失败] 注册返回 HTTP {st}，将持续重试\033[0m")
-                await asyncio.sleep(1)
+                # 服务端作废了本机 Token（用户在 App 点了"重新生成"）。
+                # 按原始设计：**立即停止脚本**，由用户重新运行并扫码完成三方配对。
+                # 这样旧 Token 立刻失效、连接立刻切断，且不引入任何隐藏状态。
+                print("\033[91m[权限注销] 当前配对 Token 已在 App 端被重置。桥接程序已停止。\033[0m")
+                print("\033[93m  💡 重新配对：在电脑上重新运行本脚本，并用手机扫描新生成的二维码 ——\033[0m")
+                print(f"\033[90m     python deepseek_bridge.py --harness-url \"{args.harness_url}\"\033[0m")
+                return
         except Exception as e:
             poll_fail_count += 1
-            # 连续失败说明很可能只是 Token 被换发（旧 Token 已被服务端拒绝）。
-            # 用装置凭证恢复一次，避免"桥接仍活着、手机端却显示未连接"。
-            if poll_fail_count == 4 and not token_recovery_attempted:
-                token_recovery_attempted = True
-                recovered = await loop.run_in_executor(None, lambda: recover_agent_token(server_base))
-                if recovered and recovered != token:
-                    token = recovered
-                    poll_fail_count = 0
-                    print("\033[93m[凭证自愈] 检测到 Token 失效，已自动同步服务端当前 Token\033[0m")
+            # 不再做任何"静默换 token"的自愈：注册/轮询被拒时交由用户按
+            # "重新运行 + 扫码"流程处理，行为可预期、状态不漂移。
             await asyncio.sleep(3)
 
 async def request_device_auth_session(server_base: str):
@@ -2235,17 +2116,12 @@ async def run_bridge_client(args):
     concurrency_limit = max(1, args.concurrency)
     init_global_http_client(force_no_proxy=args.no_proxy, custom_proxy=args.proxy, primary_server=server_base)
 
-    # 【优先】若本机持有设备凭证，直接向服务端换取当前有效 Token。
-    # 这一步必须放在 --token 之前：服务端换发 Token 后，App 传进来的 --token
-    # 可能已经过期，若让 --token 优先，bridge 会拿着旧 Token 注册被拒，
-    # 表现为"手机端显示桥接未连接"。以服务端为准则天然避免这种不一致。
-    self_healed_token = recover_agent_token(server_base)
-    if self_healed_token:
-        if self_healed_token != token:
-            print("\033[96m[凭证自愈] 已用设备凭证向服务端换取当前有效 Token\033[0m")
-        token = self_healed_token
-
-    # 未显式传入 Token 时：先尝试复用本机已保存的配对凭证，避免每次重启都要重新扫码
+    # Token 来源（按优先级）：
+    #   ① 命令行 --token（App 启动无头桥接时会传入）
+    #   ② 本机上次成功配对后保存的凭证（同一账号下重启免重扫）
+    #   ③ 都没有 → 进入扫码配对流程
+    # 注意：这里**不再**用任何"免验证"机制去静默换取服务端 token。
+    # 重置 token 后由用户重新运行本脚本并扫码完成三方配对，语义清晰、无隐藏状态。
     if not token or token in ("default_agent_token", "YOUR_AGENT_TOKEN_HERE", "<YOUR_AGENT_TOKEN>"):
         saved_token = load_bridge_pair_token()
         if saved_token:
@@ -2289,9 +2165,6 @@ async def run_bridge_client(args):
         else:
             print("\033[90m[安全声明] 本次会话为纯内存即时连接，关闭终端即刻失效，不落盘持久化任何文件。\033[0m")
         print("")
-
-    # 领取/校验设备凭证：用于服务端换发 token 后自动同步（无需重新扫码）
-    ensure_device_token(server_base, token)
 
     proxy_mode_desc = "强制 Direct 直连" if args.no_proxy else (f"自定义代理 ({args.proxy})" if args.proxy else "自适应系统/VPN代理")
     print("=" * 70)
