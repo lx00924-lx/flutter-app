@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -31,6 +32,11 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   bool _isStartingBridge = false;
   /// 正在向服务端换发配对 Token（防止重复点击）
   bool _isRotatingToken = false;
+  /// 桥接进程存活监控：进程意外退出时（例如 Token 被重置导致 bridge 自行退出）
+  /// 需要把界面状态同步回"未启动"，否则会出现"界面显示守护中、实际进程已死"的假状态。
+  Timer? _bridgeWatchTimer;
+  /// 用户主动停止时为 true，避免监控把"主动停止"误判为"意外退出"
+  bool _bridgeStoppedByUser = false;
   static Process? _headlessBridgeProcess; // 桌面端保持全局单例后台守护进程
   List<String> _workspaces = ['deepseek-agent', 'workspace-main', 'dev-sandbox'];
   List<Map<String, dynamic>> _rawSessions = [];
@@ -142,6 +148,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   @override
   void dispose() {
     _saveSilently();
+    _bridgeWatchTimer?.cancel();
     _tokenFocus.dispose();
     _harnessUrlFocus.dispose();
     _workspaceFocus.dispose();
@@ -295,6 +302,51 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     }
   }
 
+  /// 启动后监控桥接进程：退出即清理界面状态，并如实提示原因。
+  ///
+  /// bridge 在收到服务的 token_revoked 时会自行退出（这是"重置即切断连接"的一部分），
+  /// 此前 App 不会察觉，于是界面一直显示"电脑端后台守护中"，而实际进程早已结束 ——
+  /// 表现为"手机端显示未连接、电脑端点重启才能恢复"。这里把状态如实反映出来。
+  void _watchBridgeProcess(int pid) {
+    _bridgeWatchTimer?.cancel();
+    _bridgeWatchTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      final proc = _headlessBridgeProcess;
+      if (proc == null || proc.pid != pid) {
+        timer.cancel();
+        return;
+      }
+      int? code;
+      try {
+        code = await proc.exitCode.timeout(const Duration(milliseconds: 300));
+      } catch (_) {
+        code = null; // 仍在运行
+      }
+      if (code == null) return;
+
+      // 进程已退出
+      timer.cancel();
+      final stoppedByUser = _bridgeStoppedByUser;
+      _bridgeStoppedByUser = false;
+      _headlessBridgeProcess = null;
+      if (!mounted) return;
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            stoppedByUser
+                ? '已停止电脑后台桥接守护进程'
+                : '电脑端桥接进程已退出（退出码 $code）。若刚重置过 Token，请重新点击「启动」。',
+          ),
+          backgroundColor: stoppedByUser ? null : Colors.orange,
+        ),
+      );
+    });
+  }
+
   /// 重启后台桥接进程：先停旧进程，再用新 Token 以相同参数启动。
   Future<void> _restartHeadlessBridge(String token, String harnessUrl) async {
     final running = _headlessBridgeProcess;
@@ -328,6 +380,8 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         mode: ProcessStartMode.detachedWithStdio,
       );
       _headlessBridgeProcess = process;
+      _bridgeStoppedByUser = false;
+      _watchBridgeProcess(process.pid);
 
       // 启动后静默自检连接状态
       Future.delayed(const Duration(seconds: 2), () {
@@ -352,6 +406,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       } catch (_) {
         _headlessBridgeProcess!.kill();
       }
+      _bridgeStoppedByUser = true; // 告知监控：这是主动停止，不要误报异常退出
       _headlessBridgeProcess = null;
       setState(() {});
       ScaffoldMessenger.of(context).showSnackBar(
@@ -378,6 +433,8 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       );
 
       _headlessBridgeProcess = process;
+      _bridgeStoppedByUser = false;
+      _watchBridgeProcess(process.pid);
       setState(() => _isStartingBridge = false);
 
       ScaffoldMessenger.of(context).showSnackBar(

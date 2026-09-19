@@ -2096,6 +2096,8 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             pass
 
     poll_fail_count = 0
+    # 防止在"确实无凭证"时反复重试换取 token
+    token_recovery_attempted = False
     while True:
         try:
             target_poll_url = f"{poll_url}?token={urllib.parse.quote(token)}&timeout=25"
@@ -2128,10 +2130,53 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                 s_id = resp.get("sessionId")
                 await archive_dsh_session(args.harness_url, s_id)
             elif mtype == "token_revoked":
-                print("\033[91m[权限注销] 当前配对 Token 已在 App 端被重置或注销。桥接程序已停止。\033[0m")
-                return
+                # 服务端换发了新 Token（用户在 App 点了"重新生成"）。
+                # 旧 Token 已被作废，这里不再直接退出，而是立即用装置凭证
+                # 换取当前有效 Token 并重新注册 —— 实现"重置后自动重连"。
+                print("\033[93m[权限变更] 本机 Token 已被重置，正在自动同步服务端最新 Token...\033[0m")
+                new_tk = await loop.run_in_executor(None, lambda: recover_agent_token(server_base))
+                if not new_tk:
+                    print("\033[91m[无法自动同步] 未找到有效装置凭证。请用 App 中的新 Token 重新启动脚本。\033[0m")
+                    return
+                token = new_tk
+                try:
+                    st, _rb = await loop.run_in_executor(
+                        None,
+                        lambda: http_post_json_ex(register_url, {
+                            "token": token,
+                            "clientInfo": {
+                                "name": "DeepSeek-Harness-Local",
+                                "version": "3.7.0",
+                                "harnessUrl": args.harness_url,
+                                "model": args.harness_model,
+                                "platform": sys.platform,
+                                "pid": os.getpid(),
+                                "concurrency": concurrency_limit,
+                                "mode": "polling",
+                            },
+                        }, timeout=15),
+                    )
+                except Exception as reg_err:
+                    st = 0
+                    print(f"\033[93m[重连告警] 重新注册异常: {reg_err}\033[0m")
+                poll_fail_count = 0
+                token_recovery_attempted = False
+                if st == 200:
+                    print("\033[92m[✓ 已自动重连] 已用新 Token 重新注册成功，无需手动重启\033[0m")
+                else:
+                    print(f"\033[91m[✗ 自动重连失败] 注册返回 HTTP {st}，将持续重试\033[0m")
+                await asyncio.sleep(1)
         except Exception as e:
             poll_fail_count += 1
+            # 连续失败说明很可能只是 Token 被换发（旧 Token 已被服务端拒绝）。
+            # 用装置凭证恢复一次，避免"桥接仍活着、手机端却显示未连接"。
+            if poll_fail_count == 4 and not token_recovery_attempted:
+                token_recovery_attempted = True
+                recovered = await loop.run_in_executor(None, lambda: recover_agent_token(server_base))
+                if recovered and recovered != token:
+                    token = recovered
+                    poll_fail_count = 0
+                    print("\033[93m[凭证自愈] 检测到 Token 失效，已自动同步服务端当前 Token\033[0m")
             await asyncio.sleep(3)
 
 async def request_device_auth_session(server_base: str):
