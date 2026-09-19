@@ -260,12 +260,17 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       sp.updateSettings(s);
 
       if (bridgeWasRunning) {
-        await _restartHeadlessBridge(newToken, _harnessUrlCtrl.text.trim());
+        // 关键：重置后**不再把新 token 直接传给脚本**，而是让脚本走扫码配对流程。
+        // 原因：token 已由服务端换发，浏览器/App 侧尚无"扫码授权"这一步；
+        // 若直接塞 token，脚本会跳过三方配对直接注册，旧连接虽断但配对状态不完整，
+        // 表现为"手机端显示未连接"。扫码是唯一可靠的重新配对方式。
+        await _restartHeadlessBridge('', _harnessUrlCtrl.text.trim());
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('🔑 配对 Token 已更新，电脑端桥接已自动重启并重连'),
+            content: Text('🔑 Token 已重置，桥接已重启 —— 请用手机扫描电脑端新生成的二维码完成配对'),
             backgroundColor: Colors.green,
+            duration: Duration(seconds: 6),
           ),
         );
       } else {
@@ -369,14 +374,17 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       await _ensureBridgeScriptUpToDate(scriptPath);
 
       final executable = Platform.isWindows ? 'python' : 'python3';
+      // 只有拿到有效 token 时才传 --token；留空则让脚本进入扫码配对流程。
+      // 重置 token 后必须走扫码（见 _rotateToken 的说明），因此这里允许传空。
+      final args = <String>[
+        scriptPath,
+        if (token.trim().isNotEmpty) ...['--token', token.trim()],
+        '--harness-url', 'http://$harnessUrl',
+        '--server', AppConfig.normalizedServerBaseUrl,
+      ];
       final process = await Process.start(
         executable,
-        [
-          scriptPath,
-          '--token', token,
-          '--harness-url', 'http://$harnessUrl',
-          '--server', AppConfig.normalizedServerBaseUrl,
-        ],
+        args,
         mode: ProcessStartMode.detachedWithStdio,
       );
       _headlessBridgeProcess = process;
@@ -421,14 +429,15 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       await _ensureBridgeScriptUpToDate(scriptPath);
 
       final executable = Platform.isWindows ? 'python' : 'python3';
+      final args = <String>[
+        scriptPath,
+        if (token.trim().isNotEmpty) ...['--token', token.trim()],
+        '--harness-url', 'http://$harnessUrl',
+        '--server', AppConfig.normalizedServerBaseUrl,
+      ];
       final process = await Process.start(
         executable,
-        [
-          scriptPath,
-          '--token', token,
-          '--harness-url', 'http://$harnessUrl',
-          '--server', AppConfig.normalizedServerBaseUrl,
-        ],
+        args,
         mode: ProcessStartMode.detachedWithStdio,
       );
 
