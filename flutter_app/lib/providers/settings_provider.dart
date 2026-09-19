@@ -151,11 +151,25 @@ class SettingsProvider extends ChangeNotifier {
       onKicked: (reason) {
         handleForceLogout(reason);
       },
+      onTokenSynced: _applyServerAgentToken,
     );
 
     // 已登录：开启 Android 常驻保活前台服务，确保划掉任务栏后
     // Dart isolate 仍存活，上面的会话轮询与中继长连接得以继续运行
     KeepAliveService.enableAfterLogin();
+  }
+
+  /// 服务端下发新的 Agent Token 时同步到本地并刷新界面。
+  ///
+  /// 该回调由会话轮询（每 4 秒）驱动，因此任一端"重新生成"后，
+  /// 另一端无需重新登录即可收敛到同一枚 token，界面显示也会同步更新。
+  void _applyServerAgentToken(String token) {
+    final clean = token.trim();
+    if (clean.isEmpty || clean == _settings.harnessToken) return;
+    _settings.harnessToken = clean;
+    // 服务端已是唯一真源，无需再推回去
+    _save(pushToCloud: false);
+    debugPrint('[Settings] 已同步服务端下发的 Agent Token');
   }
 
   /// 处理顶号强制下线

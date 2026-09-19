@@ -2190,6 +2190,16 @@ async def run_bridge_client(args):
     concurrency_limit = max(1, args.concurrency)
     init_global_http_client(force_no_proxy=args.no_proxy, custom_proxy=args.proxy, primary_server=server_base)
 
+    # 【优先】若本机持有设备凭证，直接向服务端换取当前有效 Token。
+    # 这一步必须放在 --token 之前：服务端换发 Token 后，App 传进来的 --token
+    # 可能已经过期，若让 --token 优先，bridge 会拿着旧 Token 注册被拒，
+    # 表现为"手机端显示桥接未连接"。以服务端为准则天然避免这种不一致。
+    self_healed_token = recover_agent_token(server_base)
+    if self_healed_token:
+        if self_healed_token != token:
+            print("\033[96m[凭证自愈] 已用设备凭证向服务端换取当前有效 Token\033[0m")
+        token = self_healed_token
+
     # 未显式传入 Token 时：先尝试复用本机已保存的配对凭证，避免每次重启都要重新扫码
     if not token or token in ("default_agent_token", "YOUR_AGENT_TOKEN_HERE", "<YOUR_AGENT_TOKEN>"):
         saved_token = load_bridge_pair_token()

@@ -1113,6 +1113,17 @@ async function startServer() {
       return res.json({ valid: true });
     }
 
+    // 顺带下发当前有效的 Agent Token：这个接口每 4 秒被轮询一次，
+    // 是最合适的"token 变更通知"通道（服务端换发后各端无需重登即可收敛）。
+    const currentAgentToken = await (async () => {
+      try {
+        const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+        return readUserAgentToken(allSettings[userId]);
+      } catch {
+        return "";
+      }
+    })();
+
     try {
       const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
       const active = sessions[userId]?.[deviceType];
@@ -1129,9 +1140,9 @@ async function startServer() {
       if (active && active.clientSessionId === clientSessionId) {
         active.lastActive = Date.now();
       }
-      res.json({ valid: true });
+      res.json({ valid: true, ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}) });
     } catch (e) {
-      res.json({ valid: true });
+      res.json({ valid: true, ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}) });
     }
   });
 

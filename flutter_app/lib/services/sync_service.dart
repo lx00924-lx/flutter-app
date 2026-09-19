@@ -27,6 +27,8 @@ class SyncService {
   bool _isSyncing = false;
   Timer? _sessionWatcherTimer;
   void Function(String reason)? onForceLogout;
+  /// 服务端换发 Agent Token 时回调（用于刷新本地设置与界面显示）
+  void Function(String token)? onAgentTokenSynced;
 
   /// 获取服务器基地址（Web 端自适应 origin，App 原生端使用 AppConfig 中可配置的地址）
   String get serverBaseUrl {
@@ -72,6 +74,7 @@ class SyncService {
     required String clientSessionId,
     required String deviceType,
     required void Function(String reason) onKicked,
+    void Function(String token)? onTokenSynced,
   }) {
     stopSessionWatcher();
     final cleanUserId = userId.trim();
@@ -80,6 +83,7 @@ class SyncService {
     }
 
     onForceLogout = onKicked;
+    onAgentTokenSynced = onTokenSynced;
 
     // 立即执行一次健康核验
     _checkSessionOnce(cleanUserId, clientSessionId, deviceType);
@@ -114,6 +118,13 @@ class SyncService {
           final reason = data['reason']?.toString() ?? '您的账号已在另一台设备上登录，当前设备已被下线。';
           stopSessionWatcher();
           onForceLogout?.call(reason);
+        } else if (data is Map) {
+          // 服务端在此接口顺带下发当前 Agent Token：换发后各端无需重登即可收敛，
+          // 修复"点重置 token 后界面仍显示旧值、两端 token 不一致"的问题。
+          final serverToken = data['harnessToken']?.toString().trim();
+          if (serverToken != null && serverToken.isNotEmpty) {
+            onAgentTokenSynced?.call(serverToken);
+          }
         }
       }
     } catch (e) {
