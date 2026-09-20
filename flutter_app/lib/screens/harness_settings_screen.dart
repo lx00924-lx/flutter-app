@@ -37,6 +37,8 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   Timer? _bridgeWatchTimer;
   /// 用户主动停止时为 true，避免监控把"主动停止"误判为"意外退出"
   bool _bridgeStoppedByUser = false;
+  /// 自动重启次数上限（防止桥接反复失败时无限重启）
+  int _bridgeAutoRestartCount = 0;
   static Process? _headlessBridgeProcess; // 桌面端保持全局单例后台守护进程
   List<String> _workspaces = ['deepseek-agent', 'workspace-main', 'dev-sandbox'];
   List<Map<String, dynamic>> _rawSessions = [];
@@ -260,17 +262,15 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       sp.updateSettings(s);
 
       if (bridgeWasRunning) {
-        // 关键：重置后**不再把新 token 直接传给脚本**，而是让脚本走扫码配对流程。
-        // 原因：token 已由服务端换发，浏览器/App 侧尚无"扫码授权"这一步；
-        // 若直接塞 token，脚本会跳过三方配对直接注册，旧连接虽断但配对状态不完整，
-        // 表现为"手机端显示未连接"。扫码是唯一可靠的重新配对方式。
-        await _restartHeadlessBridge('', _harnessUrlCtrl.text.trim());
+        // 电脑端重置：直接用服务端换发的新 token 重启桥接（App 托管场景下
+        // 该 token 即配对凭据，无需再扫码）。
+        // 手机端重置导致的"桥接已停止"由 _watchBridgeProcess 自动重启处理。
+        await _restartHeadlessBridge(newToken, _harnessUrlCtrl.text.trim());
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('🔑 Token 已重置，桥接已重启 —— 请用手机扫描电脑端新生成的二维码完成配对'),
+            content: Text('🔑 配对 Token 已更新，电脑端桥接已自动重启并重连'),
             backgroundColor: Colors.green,
-            duration: Duration(seconds: 6),
           ),
         );
       } else {
@@ -339,16 +339,47 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       _headlessBridgeProcess = null;
       if (!mounted) return;
       setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            stoppedByUser
-                ? '已停止电脑后台桥接守护进程'
-                : '电脑端桥接进程已退出（退出码 $code）。若刚重置过 Token，请重新点击「启动」。',
+
+      if (stoppedByUser) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已停止电脑后台桥接守护进程')),
+        );
+        return;
+      }
+
+      // 非用户主动停止 —— 最典型的原因是「手机端点了重置 Token」：
+      // 服务端换发新 token 并通知本机，脚本按设计自行退出。
+      // 这里自动用服务端刚下发的新 token 把它拉起来，用户无需任何手动操作。
+      if (_bridgeAutoRestartCount < 3) {
+        _bridgeAutoRestartCount++;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('检测到 Token 已变更，正在自动重连桥接...'),
+            duration: Duration(seconds: 3),
           ),
-          backgroundColor: stoppedByUser ? null : Colors.orange,
-        ),
-      );
+        );
+        // 等待一次会话轮询（4 秒周期）把服务端的新 token 同步到本地，
+        // 否则会用旧 token 重启、立刻再次被拒。
+        await Future.delayed(const Duration(seconds: 5));
+        if (!mounted) return;
+        final sp = context.read<SettingsProvider>();
+        final token = sp.settings.harnessToken.trim();
+        await _restartHeadlessBridge(token, _harnessUrlCtrl.text.trim());
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('✅ 桥接已自动重连'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('电脑端桥接反复退出（退出码 $code），已停止自动重试，请手动点击「启动」。'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
     });
   }
 

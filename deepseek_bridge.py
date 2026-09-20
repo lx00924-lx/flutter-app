@@ -221,83 +221,23 @@ def dsh_auth_status():
 
 
 # ============================================================================
-# 设备凭证持久化（用于"扫码一次，之后免扫码"）
+# 关于 Token 的持久化：**本脚本刻意不落盘任何 Token**
 # ----------------------------------------------------------------------------
-# 设计取舍：按原设计，扫码得到的**配对 Token 本身不落盘**（纯内存，关闭即失效），
-# 以保证终端进程不留任何长期凭证。
-# 但 bridge 是常驻服务、系统重启或手动重启都很常见，若每次都要求重新扫码，
-# 不装桌面版的用户会非常痛苦。
+# 原始设计（也是现在恢复的设计）：扫码得到的配对 Token 只存在于内存中，
+# 关闭终端即刻失效，不在本机留下任何长期凭证。
 #
-# 折中：只在用户目录保存一个**设备凭证文件**，内含：
-#   - pairToken：最近一次扫码获得的配对 Token（供下次启动直接复用）
-# 该文件仅存于本机用户目录，权限受操作系统保护；用户删除即彻底注销，
-# 也可在 App 中撤销 Token 使其立即失效。
+# 历史上曾两次尝试"免二次扫码"的持久化方案，都因引入隐藏状态而被移除：
+#   1) "装置凭证"机制：首次配对后领一枚长期凭证，启动或 token 被换发时用它
+#      静默换取当前 token。它引入了三方状态（服务端 / 本机凭证文件 / App 本地
+#      设置）互相覆盖，导致"重置后连不上、需要依次点停止-重置-启动"。
+#   2) "配对凭证复用"：把最近一次的 token 存在 ~/.deepseek_bridge/config.json，
+#      下次启动直接复用。结果每次启动都跳过扫码，与"重置即重新配对"的语义冲突。
+#
+# 现在的语义简单且可预期：
+#   · 带 --token 启动（App 托管场景）→ 直接用该 token，不扫码
+#   · 不带 --token 启动（裸脚本场景）→ 打印二维码，等手机扫码完成三方配对
+#   · 重置 token → 服务端作废旧 token 并通知本机 → 脚本退出 → 重新运行即再次扫码
 # ============================================================================
-
-BRIDGE_CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".deepseek_bridge")
-BRIDGE_CONFIG_FILE = os.path.join(BRIDGE_CONFIG_DIR, "config.json")
-
-
-def save_bridge_pair_token(token: str, server_base: str = "", account: str = "") -> bool:
-    """保存最近一次扫码获得的配对 Token，供后续启动免扫码复用。"""
-    if not token:
-        return False
-    try:
-        os.makedirs(BRIDGE_CONFIG_DIR, exist_ok=True)
-        payload = {
-            "pairToken": token,
-            "server": server_base,
-            "account": account,
-            "savedAt": int(time.time() * 1000),
-        }
-        # 尽量以仅属主可读的权限写入（Windows 上忽略权限位）
-        with open(BRIDGE_CONFIG_FILE, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-        try:
-            os.chmod(BRIDGE_CONFIG_FILE, 0o600)
-        except Exception:
-            pass
-        return True
-    except Exception as exc:
-        print(f"\033[93m[提示] 保存配对凭证失败（不影响本次连接）: {exc}\033[0m")
-        return False
-
-
-def load_bridge_pair_token():
-    """读取本机保存的配对 Token；不存在或格式非法时返回 None。"""
-    if not os.path.isfile(BRIDGE_CONFIG_FILE):
-        return None
-    try:
-        with open(BRIDGE_CONFIG_FILE, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-        token = str(data.get("pairToken") or "").strip()
-        return token if len(token) >= 16 else None
-    except Exception:
-        return None
-
-
-def clear_bridge_pair_token() -> bool:
-    """清除本机保存的配对凭证（用户主动注销时使用）。"""
-    try:
-        if os.path.isfile(BRIDGE_CONFIG_FILE):
-            os.remove(BRIDGE_CONFIG_FILE)
-        return True
-    except Exception:
-        return False
-
-
-# ----------------------------------------------------------------------------
-# 说明：关于"免二次扫码"的历史尝试
-# ----------------------------------------------------------------------------
-# 曾实现过一套"装置凭证"机制（首次配对后领一枚长期凭证，之后启动或 token 被换发时
-# 用它静默换取当前 token，从而免去再次扫码）。实测该机制引入了**三方状态漂移**
-# （服务端真源 / 本机凭证文件 / App 本地设置互相覆盖），导致"重置 token 后连不上、
-# 需要依次点停止-重置-启动"等难以排查的问题。
-#
-# 现已移除该机制，恢复原始且可靠的语义：
-#   · 重置 token → 服务端作废旧 token 并通知本机 → 脚本退出（这是预期行为）
-#   · 重新运行脚本 → 打印二维码 → 手机扫码完成三方配对 → 获取新 token
-# 即"重置 = 重新配对"，不再有隐藏状态。
 
 def http_post_json_ex(url: str, data: dict, timeout: int = 15):
     """POST JSON 并返回 (http_status, 响应对象)，用于需要区分状态码的场景。"""
@@ -1889,7 +1829,6 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                 # 而是明确提示用户按"重新配对"流程处理。
                 print("\033[93m  💡 该 Token 已失效。请在电脑上重新运行本脚本并【用手机扫码】完成配对：\033[0m")
                 print(f"\033[90m     python deepseek_bridge.py --harness-url \"{args.harness_url}\"\033[0m")
-                print(f"\033[90m     （本机凭证文件：{BRIDGE_CONFIG_FILE}，如需彻底重置可删除它）\033[0m")
 
         try:
             await loop.run_in_executor(
@@ -2117,17 +2056,12 @@ async def run_bridge_client(args):
     init_global_http_client(force_no_proxy=args.no_proxy, custom_proxy=args.proxy, primary_server=server_base)
 
     # Token 来源（按优先级）：
-    #   ① 命令行 --token（App 启动无头桥接时会传入）
-    #   ② 本机上次成功配对后保存的凭证（同一账号下重启免重扫）
-    #   ③ 都没有 → 进入扫码配对流程
-    # 注意：这里**不再**用任何"免验证"机制去静默换取服务端 token。
-    # 重置 token 后由用户重新运行本脚本并扫码完成三方配对，语义清晰、无隐藏状态。
+    #   ① 命令行 --token（App 托管无头桥接时会传入）
+    #   ② 都没有 → 进入扫码配对流程（打印二维码，等手机扫描完成三方配对）
+    # 本脚本不落盘任何 Token：不读也不写本机凭证文件，避免出现隐藏状态。
+    # 重置 token 后重新运行本脚本即再次扫码，语义清晰、行为可预期。
     if not token or token in ("default_agent_token", "YOUR_AGENT_TOKEN_HERE", "<YOUR_AGENT_TOKEN>"):
-        saved_token = load_bridge_pair_token()
-        if saved_token:
-            token = saved_token
-            print("\033[96m[凭证复用] 已读取本机保存的配对凭证，跳过扫码。\033[0m")
-            print(f"\033[90m         （如需更换账号，请删除 {BRIDGE_CONFIG_FILE} 后重新运行以扫码配对）\033[0m")
+        pass  # 直接进入下方扫码流程
 
     # 如果仍未传入 Token 或为占位符：进入高安全【扫码动态授权模式】(OAuth 2.0 Device Flow)
     if not token or token in ("default_agent_token", "YOUR_AGENT_TOKEN_HERE", "<YOUR_AGENT_TOKEN>"):
@@ -2159,11 +2093,7 @@ async def run_bridge_client(args):
         token = auth_token
         account_tip = f" (用户: {auth_info})" if auth_info and auth_info != "expired" else ""
         print(f"\n\033[92m🎉 [授权成功!] 已成功获取手机端授权 Token{account_tip}！\033[0m")
-        # 保存到本机凭证文件，供后续启动免扫码复用
-        if save_bridge_pair_token(token, server_base, str(auth_info or "")):
-            print(f"\033[90m[凭证已保存] 下次启动将自动复用，无需重新扫码（存放于 {BRIDGE_CONFIG_FILE}）。\033[0m")
-        else:
-            print("\033[90m[安全声明] 本次会话为纯内存即时连接，关闭终端即刻失效，不落盘持久化任何文件。\033[0m")
+        print("\033[90m[安全声明] 本次会话为纯内存即时连接，关闭终端即刻失效，不落盘持久化任何文件。\033[0m")
         print("")
 
     proxy_mode_desc = "强制 Direct 直连" if args.no_proxy else (f"自定义代理 ({args.proxy})" if args.proxy else "自适应系统/VPN代理")
