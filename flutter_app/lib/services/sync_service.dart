@@ -59,7 +59,11 @@ class SyncService {
   final Dio _dio = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 10),
-      receiveTimeout: const Duration(seconds: 15),
+      // 15 秒太短：Agent 任务要等本地 DSH 跑完（服务端上限 300 秒），
+      // 请求发出后十几秒没有任何事件就会被 Dio 判成 receive timeout，
+      // 手机上表现为"发消息必失败：The request took longer than 0:00:15"。
+      // 这里放宽到 2 分钟，SSE 长连接另外单独设更长的超时。
+      receiveTimeout: const Duration(minutes: 2),
       sendTimeout: const Duration(seconds: 15),
     ),
   );
@@ -821,10 +825,60 @@ class SyncService {
     }
     return {
       'online': false,
-      'workspaces': ['deepseek-agent'],
-      'sessions': [],
+      // 取不到就返回空：界面显示空白框，绝不编一个 'deepseek-agent' 出来
+      'workspaces': <String>[],
+      'sessions': <dynamic>[],
       'clientName': 'DeepSeek-Harness-Local',
     };
+  }
+
+  /// 请求电脑端在本地 DSH 中新建一个会话，成功返回新会话 id。
+  ///
+  /// 服务端经中继把 create_session 转发给桥接脚本，桥接再调用本地 DSH 创建；
+  /// 失败（电脑端离线、DSH 不可达）返回 null —— 调用方据此保留原选择并提示，
+  /// 而不是伪造一个本地 id 发出去（那正是"发消息必然失败"的根源之一）。
+  Future<String?> createAgentSession({
+    required String token,
+    String userId = '',
+    String workspace = '',
+    String title = '',
+    String model = '',
+  }) async {
+    final cleanToken = token.trim();
+    if (cleanToken.isEmpty) return null;
+    try {
+      final resp = await _dio.post(
+        '$serverBaseUrl/api/agent/create-session',
+        data: {
+          'token': cleanToken,
+          'userId': userId.trim(),
+          'workspace': workspace.trim(),
+          'title': title.trim(),
+          if (model.trim().isNotEmpty) 'model': model.trim(),
+        },
+      );
+      if (resp.statusCode == 200 && resp.data is Map) {
+        final data = Map<String, dynamic>.from(resp.data as Map);
+        if (data['success'] == false) {
+          debugPrint('[SyncService] createAgentSession 被服务端拒绝: ${data['error']}');
+          return null;
+        }
+        if (data['online'] == false) {
+          debugPrint('[SyncService] createAgentSession：电脑端桥接不在线');
+          return null;
+        }
+        final sid = data['sessionId']?.toString().trim();
+        if (sid != null && sid.isNotEmpty && !sid.startsWith('session_')) {
+          return sid;
+        }
+        // 服务端在桥接离线时会回退造一个 session_xxx 假 id，这里拒绝它
+        debugPrint('[SyncService] createAgentSession：服务端未返回真实会话 id（$sid）');
+        return null;
+      }
+    } catch (e) {
+      debugPrint('[SyncService] createAgentSession error: $e');
+    }
+    return null;
   }
 
   /// 手机 App 扫码后确认绑定/授权电脑端临时 SessionCode
@@ -890,6 +944,10 @@ class SyncService {
         },
         options: Options(
           responseType: ResponseType.stream,
+          // SSE 是长连接：Agent 任务可能要跑几分钟，期间只要服务端没发事件，
+          // 就会按 receiveTimeout 掐断（这正是手机上报的 15 秒超时）。这里
+          // 单独放宽到 10 分钟，与服务端 300 秒任务上限匹配并留出余量。
+          receiveTimeout: const Duration(minutes: 10),
           headers: {
             'Accept': 'text/event-stream',
           },

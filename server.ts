@@ -684,7 +684,9 @@ async function runServerSideGeneration({
         });
 
         const selectedSessionId = (settings?.agentSessionId || "").trim();
-        const selectedWorkspace = (settings?.agentWorkspace || "deepseek-agent").trim();
+        // 不再回退到 'deepseek-agent'：本地没有这个工作区，回退过去只会让
+        // 本地 DSH 找不到目录、任务卡住直到超时。留空 = 用电脑端默认工作区。
+        const selectedWorkspace = (settings?.agentWorkspace || "").trim();
         
         // 自动绑定对话会话：若设置未指定特定会话，按用户维度维持一个稳定的活跃会话标识
         let sessionId = selectedSessionId;
@@ -1588,6 +1590,18 @@ async function startServer() {
       } catch {}
     };
 
+    // SSE 心跳：Agent 任务在电脑上可能要跑几十秒到几分钟，期间可能长时间没有
+    // 任何事件。客户端 Dio 的 receiveTimeout、以及中间的 Nginx/Cloudflare 都会
+    // 把"静默"的连接掐断 —— 手机上报的「The request took longer than 0:00:15
+    // to receive data」正是这么来的。每 10 秒发一个 SSE 注释行保活。
+    const heartbeat = setInterval(() => {
+      if (isClosed) return;
+      try {
+        res.write(`: ping ${Date.now()}\n\n`);
+        (res as any).flush?.();
+      } catch {}
+    }, 10000);
+
     const chunkHandler = (data: any) => {
       if (data.messageId === assistantMessageId) {
         sendEvent("chunk", {
@@ -1642,6 +1656,7 @@ async function startServer() {
     };
 
     const cleanup = () => {
+      clearInterval(heartbeat);
       generationEvents.off(`chunk_${assistantMessageId}`, chunkHandler);
       generationEvents.off(`step_${assistantMessageId}`, stepHandler);
       generationEvents.off(`task_started_${assistantMessageId}`, taskStartedHandler);
@@ -1650,7 +1665,12 @@ async function startServer() {
       generationEvents.off(`error_${assistantMessageId}`, errorHandler);
     };
 
-    req.on("close", () => {
+    // 客户端断开要监听 **res** 而不是 req：
+    // Node 14+ 的流在 'end' 之后会自动销毁并触发 'close'，而请求体被 body-parser
+    // 读完就会 'end'。也就是说 req.on('close') 在这次请求刚开始就会被触发，
+    // isClosed 立刻变 true，之后所有 sendEvent/心跳全部被静默丢弃 ——
+    // 表现就是"SSE 一个字节都收不到"，手机端一直等到 Dio 的 receive timeout。
+    res.on("close", () => {
       isClosed = true;
       cleanup();
     });
@@ -2461,7 +2481,8 @@ if %errorlevel% neq 0 (
     } catch (err: any) {
       res.json({
         online: false,
-        workspaces: ["deepseek-agent"],
+        // 取不到就返回空数组：客户端据此显示空白框，而不是显示一个假的工作区
+        workspaces: [],
         sessions: [],
         clientName: "DeepSeek-Harness-Local",
         error: err.message
@@ -2492,51 +2513,31 @@ if %errorlevel% neq 0 (
         return res.status(401).json({ error: "无效或缺失的 Agent Token" });
       }
       const agent = connectedAgents.get(targetToken);
-      const targetWs = (workspace || "").trim() || "deepseek-agent";
+      // 不再回退到 'deepseek-agent' 这个并不存在的预设工作区：
+      // 传空表示"用电脑端 DSH 的默认工作区"，由桥接决定。
+      const targetWs = (workspace || "").trim();
       const sessionTitle = (title || "").trim() || `新对话 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
 
       if (!agent) {
-        const fallbackSessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-        const fallbackSession = {
-          id: fallbackSessionId,
-          sessionId: fallbackSessionId,
-          title: sessionTitle,
-          workspace: targetWs,
-          updatedAt: Date.now(),
-          model: model || "deepseek-chat"
-        };
-        return res.json({
-          success: true,
-          sessionId: fallbackSessionId,
-          session: fallbackSession,
-          sessions: [fallbackSession],
-          workspaces: [targetWs],
-          notice: "本地尚未连接，已预置会话标识"
+        // 桥接不在线时不伪造会话 id：伪造出来的 id 后面发消息必然失败，
+        // 而且用户根本看不出问题出在哪。
+        return res.status(503).json({
+          success: false,
+          online: false,
+          error: "电脑端桥接未在线，无法新建会话"
         });
       }
 
       if (agent.ws && agent.ws.readyState === WSWebSocket.OPEN) {
         const createTaskId = `create_session_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        
+
         const createPromise = new Promise<any>((resolve) => {
+          // 超时不再伪造会话 id：假 id 拿回去发消息必然失败，
+          // 不如如实告诉用户"创建没成功，请稍后再试"。
           const timeout = setTimeout(() => {
-            const fallbackSessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-            const fbSession = {
-              id: fallbackSessionId,
-              sessionId: fallbackSessionId,
-              title: sessionTitle,
-              workspace: targetWs,
-              updatedAt: Date.now(),
-              model: model || "deepseek-chat"
-            };
-            resolve({
-              type: "create_session_result",
-              success: true,
-              sessionId: fallbackSessionId,
-              session: fbSession,
-              sessions: [fbSession, ...(agent.sessions || [])]
-            });
-          }, 3500);
+            agent.ws?.off("message", listener);
+            resolve({ type: "create_session_result", success: false, error: "电脑端创建会话超时（8 秒）" });
+          }, 8000);
 
           const listener = (raw: any) => {
             try {
@@ -2560,6 +2561,16 @@ if %errorlevel% neq 0 (
         }));
 
         const result = await createPromise;
+        const createdId = result?.sessionId || result?.session?.id || result?.session?.sessionId;
+        if (result?.success === false || !createdId) {
+          console.warn(
+            `[Agent Hub] 新建会话失败: ${result?.error || "桥接未返回会话 id"}`,
+          );
+          return res.status(502).json({
+            success: false,
+            error: result?.error || "电脑端未能创建会话，请确认本地 DSH 正常",
+          });
+        }
         if (result.workspaces && Array.isArray(result.workspaces)) agent.workspaces = result.workspaces;
         if (result.sessions && Array.isArray(result.sessions)) {
           agent.sessions = result.sessions;
@@ -2574,47 +2585,29 @@ if %errorlevel% neq 0 (
           sessions: agent.sessions || []
         });
 
+        console.log(`[Agent Hub] 已为工作区 ${targetWs || "(默认)"} 新建会话 ${createdId}`);
         return res.json({
           success: true,
-          sessionId: result.sessionId || result.session?.id || result.session?.sessionId,
+          online: true,
+          sessionId: createdId,
           session: result.session,
           sessions: agent.sessions,
           workspaces: agent.workspaces
         });
       }
 
-      // Polling mode or ws not open
-      const newSid = `session_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const newSession = {
-        id: newSid,
-        sessionId: newSid,
-        title: sessionTitle,
-        workspace: targetWs,
-        updatedAt: Date.now(),
-        model: model || "deepseek-chat"
-      };
-      agent.sessions = [newSession, ...(agent.sessions || []).filter(s => (s.sessionId || s.id) !== newSid)];
-      io.emit("agent_sessions_updated", {
-        token: targetToken,
-        workspaces: agent.workspaces || [],
-        sessions: agent.sessions
-      });
-      return res.json({
-        success: true,
-        sessionId: newSid,
-        session: newSession,
-        sessions: agent.sessions,
-        workspaces: agent.workspaces || []
+      // 长轮询模式：桥接不在 WS 上时无法即时创建，如实返回失败
+      return res.status(503).json({
+        success: false,
+        online: false,
+        error: "电脑端桥接当前不在实时通道上，无法新建会话"
       });
     } catch (err: any) {
       console.error("[Create Session API Error]", err);
-      const fallbackId = `session_${Date.now()}`;
-      res.json({
-        success: true,
-        sessionId: fallbackId,
-        session: { id: fallbackId, sessionId: fallbackId, title: "新会话", workspace: "deepseek-agent" },
-        sessions: [],
-        workspaces: ["deepseek-agent"]
+      // 异常时同样不伪造会话 id 与假工作区
+      res.status(500).json({
+        success: false,
+        error: err?.message || "新建会话失败",
       });
     }
   });

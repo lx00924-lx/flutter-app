@@ -782,10 +782,17 @@ def extract_text_from_obj(obj) -> str:
             return extract_text_from_obj(obj["parts"])
     return ""
 
-def extract_dsh_sessions_and_workspaces(obj, default_ws="deepseek-agent"):
+def extract_dsh_sessions_and_workspaces(obj, default_ws=""):
+    """
+    从 DSH 的响应里提取工作区与会话。
+
+    注意 default_ws 默认为空：此前默认填 "deepseek-agent"，而本地根本没有这个
+    目录，结果 App 的工作区下拉里永远挂着一个并不存在的选项，用户选中它发消息
+    必然失败。取不到工作区就留空，让 App 显示"暂无目录"。
+    """
     workspaces = set()
     sessions = []
-    
+
     if isinstance(obj, str) and is_html_content(obj):
         return list(workspaces), sessions
 
@@ -795,7 +802,8 @@ def extract_dsh_sessions_and_workspaces(obj, default_ws="deepseek-agent"):
         sid = it.get("sessionId") or it.get("sessionID") or it.get("id") or it.get("session_id") or it.get("uuid")
         if sid:
             ws = it.get("workspace") or default_ws
-            workspaces.add(ws)
+            if ws:
+                workspaces.add(ws)
             title = str(it.get("title") or it.get("name") or it.get("topic") or it.get("summary") or it.get("prompt") or f"会话_{str(sid)[:6]}")
             updated = it.get("updatedAt") or it.get("createdAt") or it.get("time") or int(time.time() * 1000)
             sessions.append({
@@ -841,7 +849,9 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
     global LOCAL_SESSION_CACHE
     harness_base = harness_url.rstrip("/")
     loop = asyncio.get_running_loop()
-    workspaces = ["deepseek-agent"]
+    # 不再预置 "deepseek-agent"：本地没有这个工作区，预置会让 App 显示一个
+    # 并不存在的选项。真实列表由下面的 session.list RPC 结果填充。
+    workspaces = []
     sessions = []
     seen_ids = set()
 
@@ -850,8 +860,8 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
         if sid and sid not in seen_ids:
             seen_ids.add(sid)
             sessions.append(s)
-            ws = s.get("workspace") or "deepseek-agent"
-            if ws not in workspaces:
+            ws = s.get("workspace") or ""
+            if ws and ws not in workspaces:
                 workspaces.append(ws)
 
     rpc_list_payload = {
@@ -867,7 +877,9 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
         "rpcId": f"rpc_list_ws_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}",
         "mode": "steer",
         "method": "session.list",
-        "payload": {"workspace": "deepseek-agent"}
+        # 这里此前写死 "deepseek-agent"，等于拿一个不存在的目录去查，
+        # 查不到还会把这个名字带进工作区列表。改为不指定工作区。
+        "payload": {}
     }
 
     rpc_workspace_payload = {
@@ -1139,7 +1151,7 @@ async def execute_dsh_sse_stream(
     payload = {
         "prompt": prompt or "",
         "model": model_name or "deepseek-v4-flash",
-        "workspace": target_workspace or "deepseek-agent"
+        "workspace": target_workspace or ""
     }
     if real_session_id:
         payload["sessionId"] = real_session_id
@@ -1293,16 +1305,20 @@ async def execute_dsh_sse_stream(
 
     return False, None
 
-async def create_dsh_session_explicit(harness_url: str, workspace: str = "deepseek-agent", title: str = None, model: str = "deepseek-chat"):
+async def create_dsh_session_explicit(harness_url: str, workspace: str = "", title: str = None, model: str = "deepseek-chat"):
     global LOCAL_SESSION_CACHE
     harness_base = harness_url.rstrip("/")
     loop = asyncio.get_running_loop()
     from datetime import datetime
     session_title = title or f"对话_{datetime.now().strftime('%m%d_%H%M%S')}"
-    target_ws = workspace or "deepseek-agent"
+    # 不再回退到本地并不存在的 "deepseek-agent"：留空表示用 DSH 的默认工作区
+    target_ws = (workspace or "").strip()
 
-    create_payloads = [
-        {
+    # 只有在确实知道工作区时才带上它；留空则让 DSH 用默认工作区，
+    # 避免拿一个空字符串（或以前那个并不存在的 deepseek-agent）去建会话。
+    create_payloads = []
+    if target_ws:
+        create_payloads.append({
             "type": "client-request",
             "rpcId": f"rpc_create_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}",
             "mode": "steer",
@@ -1311,8 +1327,8 @@ async def create_dsh_session_explicit(harness_url: str, workspace: str = "deepse
                 "workspace": target_ws,
                 "title": session_title
             }
-        },
-        {
+        })
+        create_payloads.append({
             "type": "client-request",
             "rpcId": f"rpc_create_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}",
             "mode": "steer",
@@ -1320,15 +1336,21 @@ async def create_dsh_session_explicit(harness_url: str, workspace: str = "deepse
             "payload": {
                 "workspace": target_ws
             }
-        },
-        {
-            "type": "client-request",
-            "rpcId": f"rpc_create_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}",
-            "mode": "steer",
-            "method": "session.create",
-            "payload": {}
-        }
-    ]
+        })
+    create_payloads.append({
+        "type": "client-request",
+        "rpcId": f"rpc_create_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}",
+        "mode": "steer",
+        "method": "session.create",
+        "payload": {"title": session_title}
+    })
+    create_payloads.append({
+        "type": "client-request",
+        "rpcId": f"rpc_create_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}",
+        "mode": "steer",
+        "method": "session.create",
+        "payload": {}
+    })
 
     # 首先通过本地 WebSocket 创建会话 (DSH Local Cordis RPC 核心通道)
     if HAS_WEBSOCKETS and not harness_base.startswith("https://"):
@@ -1570,12 +1592,12 @@ async def execute_local_harness(
     session_id: str,
     on_step_callback,
     extra_chat_config: dict = None,
-    target_workspace: str = "deepseek-agent",
+    target_workspace: str = "",
     on_approval_callback = None
 ):
     harness_base = harness_url.rstrip("/")
     extra_chat_config = extra_chat_config or {}
-    target_workspace = target_workspace or "deepseek-agent"
+    target_workspace = (target_workspace or "").strip()
     
     is_cloud_api = harness_base.startswith("https://") or "volces.com" in harness_base or "deepseek.com" in harness_base or "openai.com" in harness_base
     if not is_cloud_api and not is_host_safe(harness_base):
@@ -1866,7 +1888,7 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
         harness_url = task_data.get("harnessUrl", args.harness_url)
         model_name = task_data.get("model", args.harness_model)
         session_id = task_data.get("agentSessionId") or task_data.get("sessionId", "default_session")
-        target_ws = task_data.get("agentWorkspace") or task_data.get("workspace") or "deepseek-agent"
+        target_ws = task_data.get("agentWorkspace") or task_data.get("workspace") or ""
 
         print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
         steps_collected = []
@@ -2251,7 +2273,7 @@ async def run_bridge_client(args):
                         if mtype == "create_session":
                             create_task_id = msg.get("taskId")
                             target_h_url = msg.get("harnessUrl", args.harness_url)
-                            target_workspace = msg.get("workspace", "deepseek-agent")
+                            target_workspace = (msg.get("workspace") or "").strip()
                             title_text = msg.get("title")
                             model_text = msg.get("model", args.harness_model)
 
@@ -2279,7 +2301,7 @@ async def run_bridge_client(args):
                             harness_url = msg.get("harnessUrl", args.harness_url)
                             model_name = msg.get("model", args.harness_model)
                             session_id = msg.get("agentSessionId") or msg.get("sessionId", "default_session")
-                            target_ws = msg.get("agentWorkspace") or msg.get("workspace") or "deepseek-agent"
+                            target_ws = msg.get("agentWorkspace") or msg.get("workspace") or ""
 
                             print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
                             steps_collected = []

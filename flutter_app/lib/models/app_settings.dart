@@ -234,7 +234,9 @@ class AppSettings {
     this.harnessServiceUrl = 'http://127.0.0.1:3080',
     this.localBridgeWsUrl = 'http://127.0.0.1:3080',
     this.localAgentToken = '',
-    this.targetWorkspace = 'deepseek-agent',
+    // 不再预设 'deepseek-agent' 这类并不存在的假工作区：默认留空，
+    // 由「刷新列表」从电脑端 DSH 取真实目录；没取到就显示空白框。
+    this.targetWorkspace = '',
     this.targetSessionId = '',
     this.isHarnessOnline = false,
     this.agentReasoningEffort = 'high',
@@ -434,7 +436,10 @@ class AppSettings {
       harnessServiceUrl: map['harnessServiceUrl']?.toString() ?? 'http://127.0.0.1:3080',
       localBridgeWsUrl: map['localBridgeWsUrl']?.toString() ?? 'http://127.0.0.1:3080',
       localAgentToken: map['localAgentToken']?.toString() ?? '',
-      targetWorkspace: map['targetWorkspace']?.toString() ?? 'deepseek-agent',
+      // 历史数据里可能残留 'deepseek-agent' 这个并不存在的预设工作区，一并清空
+      targetWorkspace: (map['targetWorkspace']?.toString() ?? '') == 'deepseek-agent'
+          ? ''
+          : (map['targetWorkspace']?.toString() ?? ''),
       targetSessionId: map['targetSessionId']?.toString() ?? '',
       isHarnessOnline: map['isHarnessOnline'] as bool? ?? false,
       agentReasoningEffort: map['agentReasoningEffort']?.toString() ?? 'high',

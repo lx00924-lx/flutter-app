@@ -481,6 +481,98 @@ class SettingsProvider extends ChangeNotifier {
     return data;
   }
 
+  // ==================== 电脑端工作区 / 会话目录缓存 ====================
+  //
+  // 放在 Provider 里而不是设置页的 State：设置页每次重建都会用假的预设值
+  // （'deepseek-agent' 等）初始化，用户返回再进来就看到一堆并不存在的选项，
+  // 选中后又把假目录发给 Agent，任务自然失败。目录只应由电脑端 DSH 提供，
+  // 取不到就保持为空 —— 界面上就是个空白框，而不是编一个出来。
+
+  List<String> _agentWorkspaces = [];
+  List<Map<String, dynamic>> _agentSessions = [];
+  bool _agentCatalogLoaded = false;
+  bool _agentCatalogLoading = false;
+
+  /// 电脑端真实存在的工作区列表（未取到过则为空）。
+  List<String> get agentWorkspaces => List.unmodifiable(_agentWorkspaces);
+
+  /// 电脑端真实存在的会话列表（每条含 id / title / workspace）。
+  List<Map<String, dynamic>> get agentSessions => List.unmodifiable(_agentSessions);
+
+  /// 是否成功取到过一次目录（用于区分"还没取"与"取到空"）。
+  bool get agentCatalogLoaded => _agentCatalogLoaded;
+  bool get agentCatalogLoading => _agentCatalogLoading;
+
+  /// 会话显示名：优先标题，其次 id。
+  static String agentSessionLabel(Map<String, dynamic> session) {
+    final title = session['title']?.toString().trim() ?? '';
+    if (title.isNotEmpty) return title;
+    final id = session['id']?.toString().trim() ?? '';
+    return id.isEmpty ? '未命名会话' : id;
+  }
+
+  /// 按当前工作区过滤会话（工作区为空则返回全部）。
+  List<Map<String, dynamic>> sessionsForWorkspace(String workspace) {
+    final ws = workspace.trim();
+    if (ws.isEmpty) return agentSessions;
+    return _agentSessions.where((s) {
+      final sw = s['workspace']?.toString().trim() ?? '';
+      return sw.isEmpty || sw == ws;
+    }).toList();
+  }
+
+  /// 拉取一次电脑端工作区与会话，并缓存下来供设置页与聊天快捷栏共用。
+  Future<bool> refreshAgentCatalog({bool silent = true}) async {
+    if (_agentCatalogLoading) return false;
+    _agentCatalogLoading = true;
+    try {
+      final res = await fetchAgentWorkspacesAndSessions();
+      final wsList = (res['workspaces'] as List<dynamic>?)
+              ?.map((e) => e.toString().trim())
+              .where((e) => e.isNotEmpty)
+              .toList() ??
+          <String>[];
+      final sessList = (res['sessions'] as List<dynamic>?)
+              ?.whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList() ??
+          <Map<String, dynamic>>[];
+
+      _agentWorkspaces = wsList;
+      _agentSessions = sessList;
+      // 只有真的取到内容才算"已加载"，避免把一次失败当成"电脑上确实没有"
+      _agentCatalogLoaded = _agentCatalogLoaded || wsList.isNotEmpty || sessList.isNotEmpty;
+      debugPrint('[Settings] 目录刷新: ${wsList.length} 个工作区 / ${sessList.length} 个会话'
+          '${_agentCatalogLoaded ? "" : "（未取到，界面保持空白）"}');
+      notifyListeners();
+      return wsList.isNotEmpty || sessList.isNotEmpty;
+    } catch (e) {
+      debugPrint('[Settings] refreshAgentCatalog 失败: $e');
+      if (!silent) rethrow;
+      return false;
+    } finally {
+      _agentCatalogLoading = false;
+    }
+  }
+
+  /// 在电脑端新建一个会话，成功后刷新目录并返回新会话 id（失败返回 null）。
+  Future<String?> createAgentSessionOnPc({
+    String workspace = '',
+    String title = '',
+    String model = '',
+  }) async {
+    final sessionId = await SyncService.instance.createAgentSession(
+      token: _settings.harnessToken,
+      userId: _settings.loginAccount,
+      workspace: workspace.trim(),
+      title: title.trim(),
+      model: model.trim(),
+    );
+    if (sessionId == null || sessionId.isEmpty) return null;
+    await refreshAgentCatalog();
+    return sessionId;
+  }
+
   /// 从云端拉取配置并合并
   Future<void> pullCloudSettings() async {
     if (!_settings.isLoggedIn || _settings.loginAccount.trim().isEmpty || _settings.loginAccount.trim() == 'guest') {

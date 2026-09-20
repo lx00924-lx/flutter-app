@@ -13,6 +13,7 @@ import '../services/audio_recorder_service.dart';
 import '../utils/image_picker_helper.dart';
 import '../screens/voice_call_screen.dart';
 import '../screens/scanner_screen.dart';
+import 'agent_quick_bar.dart';
 
 class ChatInputBar extends StatefulWidget {
   final Function(String text, {List<String>? attachments}) onSend;
@@ -355,6 +356,9 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // 0. Agent 模式快捷栏：工作区 / 会话 / 思考深度 / 执行权限。
+              //    只在 Agent 模式打开时出现，关掉（左下角切回普通模式）即隐藏。
+              if (isAgentMode) const AgentQuickBar(),
               // 1. 引用消息卡片预览
               Consumer<ChatProvider>(
                 builder: (context, chat, _) {

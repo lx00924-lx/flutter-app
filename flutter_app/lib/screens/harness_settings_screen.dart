@@ -32,6 +32,8 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
 
   bool _isRefreshing = false;
   bool _isStartingBridge = false;
+  /// 正在电脑端新建会话（避免连点建出好几个空会话）
+  bool _isCreatingSession = false;
   /// 正在向服务端换发配对 Token（防止重复点击）
   bool _isRotatingToken = false;
 
@@ -72,10 +74,14 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   // 本页面不再持有进程句柄（否则会与远端指令的执行路径产生两个进程）。
   /// 页面初始化时抓住的 Provider 引用：dispose 阶段不能再走 context 查找。
   SettingsProvider? _settingsProvider;
-  List<String> _workspaces = ['deepseek-agent', 'workspace-main', 'dev-sandbox'];
-  List<Map<String, dynamic>> _rawSessions = [];
-  List<String> _filteredSessions = ['智能选择 / 自动新建会话 (推荐)'];
-  String _selectedSession = '智能选择 / 自动新建会话 (推荐)';
+
+  /// 「新建会话」选项的值（下拉里与真实会话 id 区分开）。
+  ///
+  /// 含义：**现在就去电脑端建一个新会话并选中它**，之后的每条消息都发进这个
+  /// 会话；旧版的「智能选择 / 自动新建会话」是每条消息都让服务端另建一个，
+  /// 于是每问一句就多出一个新会话。
+  static const String _kNewSessionOption = '__lx_new_session__';
+  String _selectedSessionId = '';
 
   /// 桥接是否在运行。
   ///
@@ -204,19 +210,13 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       text: s.localBridgeWsUrl.isNotEmpty ? s.localBridgeWsUrl : 'http://127.0.0.1:3080',
     );
     _localAgentTokenCtrl = TextEditingController(text: s.localAgentToken);
-
-    if (!_workspaces.contains(s.targetWorkspace)) {
-      _workspaces.insert(0, s.targetWorkspace);
-    }
+    _selectedSessionId = s.targetSessionId.trim();
 
     // 绑定失焦自动保存监听，解决每次击键卡顿问题
     _tokenFocus.addListener(_handleFocusChange);
     _harnessUrlFocus.addListener(_handleFocusChange);
     _workspaceFocus.addListener(() {
       _handleFocusChange();
-      if (!_workspaceFocus.hasFocus) {
-        _updateFilteredSessions();
-      }
     });
     _localWsUrlFocus.addListener(_handleFocusChange);
     _localAgentTokenFocus.addListener(_handleFocusChange);
@@ -224,6 +224,17 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     // 服务端换发/下发 Token 时同步刷新本页显示（详见 _syncTokenFromProvider）
     _settingsProvider = context.read<SettingsProvider>();
     _settingsProvider!.addListener(_syncTokenFromProvider);
+
+    // 会话/工作区目录由电脑端提供，且缓存在 Provider 里（返回再进不会丢）。
+    // 首次进入若还没取过、而桥接又在线，就自动拉一次，不必让用户手动点刷新。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final sp = _settingsProvider;
+      if (sp == null) return;
+      if (!sp.agentCatalogLoaded && sp.settings.isHarnessOnline) {
+        unawaited(_refreshWorkspacesAndSessions());
+      }
+    });
   }
 
   void _handleFocusChange() {
@@ -236,22 +247,86 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     }
   }
 
-  void _updateFilteredSessions() {
-    final currentWs = _workspaceCtrl.text.trim();
-    final list = <String>['智能选择 / 自动新建会话 (推荐)'];
-    for (final sess in _rawSessions) {
-      final sessWs = sess['workspace']?.toString() ?? '';
-      if (sessWs.isEmpty || sessWs == currentWs) {
-        final title = sess['title']?.toString() ?? sess['id']?.toString() ?? '未命名会话';
-        list.add(title);
-      }
+  /// 当前工作区下的会话（Provider 里缓存的那份）。
+  List<Map<String, dynamic>> _sessionsForCurrentWorkspace() {
+    final sp = _settingsProvider;
+    if (sp == null) return const [];
+    return sp.sessionsForWorkspace(_workspaceCtrl.text.trim());
+  }
+
+  /// 下拉里展示的会话选项：第一项固定是「新建会话」，其余是真实会话。
+  List<DropdownMenuItem<String>> _sessionItems() {
+    final items = <DropdownMenuItem<String>>[
+      const DropdownMenuItem(
+        value: _kNewSessionOption,
+        child: Text('新建会话', style: TextStyle(fontSize: 13)),
+      ),
+    ];
+    for (final sess in _sessionsForCurrentWorkspace()) {
+      final id = sess['id']?.toString().trim() ?? '';
+      if (id.isEmpty) continue;
+      items.add(
+        DropdownMenuItem(
+          value: id,
+          child: Text(
+            SettingsProvider.agentSessionLabel(sess),
+            style: const TextStyle(fontSize: 13),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      );
     }
-    setState(() {
-      _filteredSessions = list;
-      if (!_filteredSessions.contains(_selectedSession)) {
-        _selectedSession = _filteredSessions.first;
+    return items;
+  }
+
+  /// 会话下拉的当前值：必须落在选项里，否则 Flutter 会断言失败。
+  String? _sessionDropdownValue() {
+    final items = _sessionItems();
+    if (_selectedSessionId.isEmpty) return _kNewSessionOption;
+    for (final it in items) {
+      if (it.value == _selectedSessionId) return _selectedSessionId;
+    }
+    // 已选会话不在当前工作区的列表里（例如换了工作区）：退回「新建会话」，
+    // 但不偷偷改写用户的选择，等他自己确认。
+    return _kNewSessionOption;
+  }
+
+  /// 选中「新建会话」→ 立刻在电脑端建一个并选中它。
+  ///
+  /// 这样后续每条消息都发进同一个会话；旧逻辑是每条消息都让服务端另建一个，
+  /// 于是每问一句就多出一个空会话。
+  Future<void> _createAndSelectSession(SettingsProvider sp) async {
+    if (sp.settings.isHarnessOnline != true) {
+      _snack('电脑端桥接未在线，无法新建会话：请先启动桥接', isError: true);
+      return;
+    }
+    final workspace = _workspaceCtrl.text.trim();
+    setState(() => _isCreatingSession = true);
+    try {
+      final newId = await sp.createAgentSessionOnPc(workspace: workspace);
+      if (!mounted) return;
+      if (newId == null) {
+        // 保留原选择，不写任何伪造的 id —— 否则发消息必然失败
+        _snack('新建会话失败：请确认电脑端 LxAI 在运行且本地 DSH 正常', isError: true);
+        return;
       }
-    });
+      setState(() => _selectedSessionId = newId);
+      sp.settings.targetSessionId = newId;
+      sp.updateSettings(sp.settings);
+      _snack('已新建并选中会话', isError: false);
+    } finally {
+      if (mounted) setState(() => _isCreatingSession = false);
+    }
+  }
+
+  void _snack(String text, {required bool isError}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(text),
+        backgroundColor: isError ? Colors.redAccent : Colors.green,
+      ),
+    );
   }
 
   void _saveSilently() {
@@ -267,6 +342,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       s.harnessServiceUrl = rawUrl;
     }
     s.targetWorkspace = _workspaceCtrl.text.trim();
+    s.targetSessionId = _selectedSessionId.trim();
     s.localBridgeWsUrl = _localWsUrlCtrl.text.trim().isNotEmpty
         ? _localWsUrlCtrl.text.trim()
         : 'http://127.0.0.1:3080';
@@ -304,53 +380,31 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     setState(() => _isRefreshing = true);
     final sp = context.read<SettingsProvider>();
     try {
-      final res = await sp.fetchAgentWorkspacesAndSessions();
-      final isOnline = res['online'] == true;
-      final wsList = (res['workspaces'] as List<dynamic>?)?.map((e) => e.toString()).toList();
-      final sessList = (res['sessions'] as List<dynamic>?)?.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+      final gotReal = await sp.refreshAgentCatalog(silent: false);
+      if (!mounted) return;
+      setState(() => _isRefreshing = false);
 
-      if (mounted) {
-        setState(() {
-          _isRefreshing = false;
-          if (wsList != null && wsList.isNotEmpty) {
-            _workspaces = wsList;
-            if (!_workspaces.contains(_workspaceCtrl.text.trim())) {
-              _workspaceCtrl.text = _workspaces.first;
-            }
-          }
-          if (sessList != null) {
-            _rawSessions = sessList;
-            _updateFilteredSessions();
-          }
-        });
+      final wsList = sp.agentWorkspaces;
+      if (wsList.isNotEmpty && !wsList.contains(_workspaceCtrl.text.trim())) {
+        // 之前选的工作区在电脑上已经不存在了：清掉它，不要拿假值顶替，
+        // 也不要随便替用户选一个 —— 界面显示空白，让用户自己挑。
+        _workspaceCtrl.text = '';
+        sp.settings.targetWorkspace = '';
+        sp.updateSettings(sp.settings);
+      }
 
-        if (isOnline) {
-          // 关键：不能只看 online 就报成功——bridge 在线但没取到真实工作区时，
-          // _workspaces 仍是本地预设占位值，必须明确告知用户，避免“假成功”。
-          final gotReal = wsList != null && wsList.isNotEmpty;
-          ScaffoldMessenger.of(context).showSnackBar(
-            gotReal
-                ? SnackBar(content: Text('✅ 成功同步本地 Agent 工作区（共 ${_workspaces.length} 个工作区）'))
-                : const SnackBar(
-                    content: Text('⚠️ 桥接已在线，但未取到本地目录列表（请检查电脑端 DSH 是否正常）'),
-                    backgroundColor: Colors.orange,
-                  ),
-          );
-        } else {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('⚠️ 电脑端桥接脚本当前未在线，已载入本地预设工作区'),
-              backgroundColor: Colors.orange,
-            ),
-          );
-        }
+      if (gotReal) {
+        _snack('✅ 已同步电脑端目录（${wsList.length} 个工作区 / ${sp.agentSessions.length} 个会话）',
+            isError: false);
+      } else if (sp.settings.isHarnessOnline) {
+        _snack('⚠️ 桥接已在线，但没取到目录：请确认电脑端 DSH 正常工作', isError: true);
+      } else {
+        _snack('⚠️ 电脑端桥接未在线，暂无可用目录（启动桥接后会自动获取）', isError: true);
       }
     } catch (e) {
       if (mounted) {
         setState(() => _isRefreshing = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('刷新异常: $e'), backgroundColor: Colors.redAccent),
-        );
+        _snack('刷新异常: $e', isError: true);
       }
     }
   }
@@ -570,6 +624,13 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       Future.delayed(const Duration(seconds: 2), () {
         if (mounted) context.read<SettingsProvider>().refreshAgentStatus();
       });
+      // 桥接刚起来：顺手把电脑端的工作区/会话目录拉一次，
+      // 省得用户还要自己点「刷新列表」（目录由此才有真实内容）。
+      if (ok && target) {
+        Future.delayed(const Duration(seconds: 3), () {
+          if (mounted) unawaited(_refreshWorkspacesAndSessions());
+        });
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1095,24 +1156,34 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                       ],
                     ),
                     const SizedBox(height: 14),
-                    // 目标工作区下拉选择与自定义输入
+                    // 目标工作区下拉：只列电脑端真实存在的目录。
+                    // 还没取到过就一个选项都没有（空白框），绝不显示假的工作区名。
                     DropdownButtonFormField<String>(
-                      value: _workspaces.contains(_workspaceCtrl.text.trim()) ? _workspaceCtrl.text.trim() : null,
-                      decoration: const InputDecoration(
+                      value: sp.agentWorkspaces.contains(_workspaceCtrl.text.trim())
+                          ? _workspaceCtrl.text.trim()
+                          : null,
+                      decoration: InputDecoration(
                         labelText: '目标工作区 (下拉选择)',
-                        border: OutlineInputBorder(),
+                        border: const OutlineInputBorder(),
                         isDense: true,
-                        helperText: '选择电脑上已配置的代码仓或专属目录',
+                        hintText: sp.agentWorkspaces.isEmpty ? '暂无目录（点右上角刷新列表）' : null,
+                        helperText: sp.agentWorkspaces.isEmpty
+                            ? '尚未从电脑端取到目录：启动桥接后会自动获取，也可点「刷新列表」'
+                            : '选择电脑上已配置的代码仓或专属目录（共 ${sp.agentWorkspaces.length} 个）',
                       ),
-                      items: _workspaces.map((ws) {
+                      items: sp.agentWorkspaces.map((ws) {
                         return DropdownMenuItem(value: ws, child: Text(ws, style: const TextStyle(fontSize: 13)));
                       }).toList(),
                       onChanged: (val) {
                         if (val != null) {
-                          _workspaceCtrl.text = val;
+                          setState(() {
+                            _workspaceCtrl.text = val;
+                            // 换工作区后，原会话多半不属于新工作区，回到「新建会话」
+                            _selectedSessionId = '';
+                          });
                           s.targetWorkspace = val;
+                          s.targetSessionId = '';
                           sp.updateSettings(s);
-                          _updateFilteredSessions();
                         }
                       },
                     ),
@@ -1122,31 +1193,43 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                       focusNode: _workspaceFocus,
                       decoration: const InputDecoration(
                         labelText: '自定义工作区路径/名称',
-                        hintText: 'deepseek-agent 或 C:\\workspace',
+                        hintText: '例如 C:\\workspace（留空则用电脑端默认工作区）',
                         border: OutlineInputBorder(),
                         isDense: true,
                       ),
+                      onChanged: (val) {
+                        // 手动改路径后同样要重算会话列表
+                        if (mounted) setState(() {});
+                        s.targetWorkspace = val.trim();
+                        sp.updateSettings(s);
+                      },
                     ),
                     const SizedBox(height: 14),
                     // 目标会话下拉（联动当前工作区）
                     DropdownButtonFormField<String>(
-                      value: _filteredSessions.contains(_selectedSession) ? _selectedSession : _filteredSessions.first,
-                      decoration: const InputDecoration(
+                      value: _sessionDropdownValue(),
+                      isExpanded: true,
+                      decoration: InputDecoration(
                         labelText: '目标会话 (已联动当前工作区)',
-                        border: OutlineInputBorder(),
+                        border: const OutlineInputBorder(),
                         isDense: true,
-                        helperText: '选择已存在的上下文会话或自动开启新会话',
+                        helperText: _isCreatingSession
+                            ? '正在电脑端新建会话…'
+                            : '选「新建会话」会立刻建一个并选中它，之后的消息都发进这个会话',
                       ),
-                      items: _filteredSessions.map((sess) {
-                        return DropdownMenuItem(value: sess, child: Text(sess, style: const TextStyle(fontSize: 13)));
-                      }).toList(),
-                      onChanged: (val) {
-                        if (val != null) {
-                          setState(() => _selectedSession = val);
-                          s.targetSessionId = val == '智能选择 / 自动新建会话 (推荐)' ? '' : val;
-                          sp.updateSettings(s);
-                        }
-                      },
+                      items: _sessionItems(),
+                      onChanged: (_isCreatingSession || _isBridgeBusy)
+                          ? null
+                          : (val) {
+                              if (val == null) return;
+                              if (val == _kNewSessionOption) {
+                                unawaited(_createAndSelectSession(sp));
+                                return;
+                              }
+                              setState(() => _selectedSessionId = val);
+                              s.targetSessionId = val;
+                              sp.updateSettings(s);
+                            },
                     ),
                   ],
                 ),
