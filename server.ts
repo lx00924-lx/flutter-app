@@ -100,6 +100,15 @@ interface DeviceSession {
   lastActive: number;
 }
 
+/**
+ * 待下发的「桥接控制指令」队列：userId -> command。
+ *
+ * 用途：手机端点「启动 / 停止 / 重启」时无法直接操作电脑上的脚本，
+ * 因此把指令排队，由该用户的电脑端 App 在每 4 秒一次的会话轮询中取走并本地执行。
+ * 复用既有轮询通道，无需新建长连接。
+ */
+const pendingBridgeCommands = new Map<string, string>();
+
 // File lock mechanism to prevent race conditions during concurrent JSON writes
 const fileLocks: Map<string, Promise<any>> = new Map();
 
@@ -1124,6 +1133,13 @@ async function startServer() {
       }
     })();
 
+    // 下发并消费"桥接控制指令"：手机点启停/重置时排队，电脑端 App 在下一次轮询
+    // （≤4 秒）取到并本地执行 —— 复用已有的会话轮询通道，无需新建长连接。
+    const pendingCommand = pendingBridgeCommands.get(userId);
+    if (pendingCommand) {
+      pendingBridgeCommands.delete(userId);
+    }
+
     try {
       const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
       const active = sessions[userId]?.[deviceType];
@@ -1140,9 +1156,40 @@ async function startServer() {
       if (active && active.clientSessionId === clientSessionId) {
         active.lastActive = Date.now();
       }
-      res.json({ valid: true, ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}) });
+      res.json({
+        valid: true,
+        ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}),
+        ...(pendingCommand ? { bridgeCommand: pendingCommand } : {}),
+      });
     } catch (e) {
-      res.json({ valid: true, ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}) });
+      res.json({
+        valid: true,
+        ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}),
+        ...(pendingCommand ? { bridgeCommand: pendingCommand } : {}),
+      });
+    }
+  });
+
+  /**
+   * 手机端下发桥接控制指令。
+   * 电脑端 App 在会话轮询中取走并本地执行（启动/停止/重启本机的 bridge 脚本）。
+   */
+  app.post("/api/agent/bridge-command", async (req, res) => {
+    try {
+      const userId = ((req.body?.userId as string) || "").trim();
+      const command = ((req.body?.command as string) || "").trim().toLowerCase();
+      const allowed = ["start", "stop", "restart"];
+      if (!userId || userId === "guest") {
+        return res.status(401).json({ error: "缺少 userId，无法下发指令" });
+      }
+      if (!allowed.includes(command)) {
+        return res.status(400).json({ error: `不支持的指令：${command}，可选 ${allowed.join(" / ")}` });
+      }
+      pendingBridgeCommands.set(userId, command);
+      console.log(`[Bridge Cmd] 已为用户 ${userId} 排队指令: ${command}`);
+      res.json({ success: true, command, note: "电脑端将在数秒内执行" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to queue bridge command" });
     }
   });
 

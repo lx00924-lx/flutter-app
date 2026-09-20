@@ -7,6 +7,7 @@ import '../services/storage_service.dart';
 import '../services/storage_path_service.dart';
 import '../services/sync_service.dart';
 import '../services/keep_alive_service.dart';
+import '../services/bridge_process_manager.dart';
 import '../utils/image_picker_helper.dart';
 import '../main.dart' show rootNavigatorKey;
 
@@ -152,11 +153,52 @@ class SettingsProvider extends ChangeNotifier {
         handleForceLogout(reason);
       },
       onTokenSynced: _applyServerAgentToken,
+      onCommand: _handleBridgeCommand,
     );
+
+    // 让 BridgeProcessManager 在自动重启时能拿到「当前有效 Token / Harness 地址」
+    BridgeProcessManager.instance.tokenProvider = () async => _settings.harnessToken;
+    BridgeProcessManager.instance.harnessUrlProvider = () async => _harnessUrlForBridge();
 
     // 已登录：开启 Android 常驻保活前台服务，确保划掉任务栏后
     // Dart isolate 仍存活，上面的会话轮询与中继长连接得以继续运行
     KeepAliveService.enableAfterLogin();
+  }
+
+  /// 把设置里的 Harness 地址整理成 bridge 需要的 `host:port` 形式。
+  String _harnessUrlForBridge() {
+    var url = _settings.harnessServiceUrl.trim();
+    if (url.startsWith('http://')) {
+      url = url.substring(7);
+    } else if (url.startsWith('https://')) {
+      url = url.substring(8);
+    }
+    url = url.replaceAll(RegExp(r'/+$'), '');
+    return url.isEmpty ? '127.0.0.1:3080' : url;
+  }
+
+  /// 执行手机端下发的桥接控制指令（电脑端 App 收到后在本机操作脚本）。
+  ///
+  /// 手机点「重置 Token」时服务端会换发新 Token 并踢掉旧连接，脚本按设计退出；
+  /// 随后手机排队一条 restart 指令，电脑端这里用【刚同步到的新 Token】把它拉起来。
+  Future<void> _handleBridgeCommand(String command) async {
+    final manager = BridgeProcessManager.instance;
+    final token = _settings.harnessToken.trim();
+    final harness = _harnessUrlForBridge();
+    debugPrint('[Bridge] 收到远端指令: $command');
+    switch (command) {
+      case 'start':
+        await manager.start(token: token, harnessUrl: harness);
+        break;
+      case 'stop':
+        await manager.stop();
+        break;
+      case 'restart':
+        await manager.restart(token: token, harnessUrl: harness);
+        break;
+      default:
+        debugPrint('[Bridge] 未知指令，已忽略: $command');
+    }
   }
 
   /// 服务端下发新的 Agent Token 时同步到本地并刷新界面。

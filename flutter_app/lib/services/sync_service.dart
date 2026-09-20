@@ -29,6 +29,8 @@ class SyncService {
   void Function(String reason)? onForceLogout;
   /// 服务端换发 Agent Token 时回调（用于刷新本地设置与界面显示）
   void Function(String token)? onAgentTokenSynced;
+  /// 收到手机端下发的桥接控制指令时回调（电脑端据此启停本机脚本）
+  void Function(String command)? onBridgeCommand;
 
   /// 获取服务器基地址（Web 端自适应 origin，App 原生端使用 AppConfig 中可配置的地址）
   String get serverBaseUrl {
@@ -75,6 +77,7 @@ class SyncService {
     required String deviceType,
     required void Function(String reason) onKicked,
     void Function(String token)? onTokenSynced,
+    void Function(String command)? onCommand,
   }) {
     stopSessionWatcher();
     final cleanUserId = userId.trim();
@@ -84,6 +87,7 @@ class SyncService {
 
     onForceLogout = onKicked;
     onAgentTokenSynced = onTokenSynced;
+    onBridgeCommand = onCommand;
 
     // 立即执行一次健康核验
     _checkSessionOnce(cleanUserId, clientSessionId, deviceType);
@@ -124,6 +128,11 @@ class SyncService {
           final serverToken = data['harnessToken']?.toString().trim();
           if (serverToken != null && serverToken.isNotEmpty) {
             onAgentTokenSynced?.call(serverToken);
+          }
+          // 手机端下发的桥接控制指令（start / stop / restart），由电脑端在此执行
+          final command = data['bridgeCommand']?.toString().trim();
+          if (command != null && command.isNotEmpty) {
+            onBridgeCommand?.call(command);
           }
         }
       }
@@ -621,6 +630,28 @@ class SyncService {
       }
     } catch (_) {}
     return false;
+  }
+
+  /// 下发桥接控制指令（start / stop / restart）给该账号的**电脑端** App 执行。
+  ///
+  /// 手机无法直接启动电脑上的脚本，因此指令先排到服务端，电脑端 App 在
+  /// 会话轮询（≤4 秒）中取走并在本机执行。返回是否成功排队。
+  Future<bool> sendBridgeCommand({
+    required String userId,
+    required String command,
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty || cleanUserId == 'guest') return false;
+    try {
+      final resp = await _dio.post(
+        '$serverBaseUrl/api/agent/bridge-command',
+        data: {'userId': cleanUserId, 'command': command},
+      );
+      return resp.statusCode == 200 && (resp.data is Map) && resp.data['success'] == true;
+    } catch (e) {
+      debugPrint('[SyncService] sendBridgeCommand error: $e');
+      return false;
+    }
   }
 
   /// 换发 Agent 配对 Token（服务端为唯一真源）。

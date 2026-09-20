@@ -7,6 +7,7 @@ import '../providers/settings_provider.dart';
 import '../config/app_config.dart';
 import '../utils/bridge_script_helper.dart';
 import '../services/sync_service.dart';
+import '../services/bridge_process_manager.dart';
 
 class HarnessSettingsScreen extends StatefulWidget {
   const HarnessSettingsScreen({super.key});
@@ -32,18 +33,24 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   bool _isStartingBridge = false;
   /// 正在向服务端换发配对 Token（防止重复点击）
   bool _isRotatingToken = false;
-  /// 桥接进程存活监控：进程意外退出时（例如 Token 被重置导致 bridge 自行退出）
-  /// 需要把界面状态同步回"未启动"，否则会出现"界面显示守护中、实际进程已死"的假状态。
-  Timer? _bridgeWatchTimer;
-  /// 用户主动停止时为 true，避免监控把"主动停止"误判为"意外退出"
-  bool _bridgeStoppedByUser = false;
-  /// 自动重启次数上限（防止桥接反复失败时无限重启）
-  int _bridgeAutoRestartCount = 0;
-  static Process? _headlessBridgeProcess; // 桌面端保持全局单例后台守护进程
+  // 桥接进程与退出监控已统一交给全局 BridgeProcessManager 管理，
+  // 本页面不再持有进程句柄（否则会与远端指令的执行路径产生两个进程）。
   List<String> _workspaces = ['deepseek-agent', 'workspace-main', 'dev-sandbox'];
   List<Map<String, dynamic>> _rawSessions = [];
   List<String> _filteredSessions = ['智能选择 / 自动新建会话 (推荐)'];
   String _selectedSession = '智能选择 / 自动新建会话 (推荐)';
+
+  /// 桥接是否在运行。
+  ///
+  /// 电脑端：看本地进程（由 BridgeProcessManager 管理）；
+  /// 手机端：本机没有进程，改看服务端上报的 Agent 在线状态。
+  bool get _bridgeRunning {
+    final isDesktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+    if (isDesktop) {
+      return BridgeProcessManager.instance.isRunning;
+    }
+    return context.read<SettingsProvider>().settings.isHarnessOnline;
+  }
 
   /// 对 Token 进行脱敏展示（例如: sk-1234******************）
   static String _maskToken(String token) {
@@ -150,7 +157,6 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   @override
   void dispose() {
     _saveSilently();
-    _bridgeWatchTimer?.cancel();
     _tokenFocus.dispose();
     _harnessUrlFocus.dispose();
     _workspaceFocus.dispose();
@@ -254,23 +260,50 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         return;
       }
 
-      final bridgeWasRunning = _headlessBridgeProcess != null;
+      final isDesktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+      final manager = BridgeProcessManager.instance;
+      // 电脑端看本地进程；手机端看服务端上报的 Agent 在线状态
+      final bridgeWasRunning = isDesktop ? manager.isRunning : s.isHarnessOnline;
+
       setState(() {
         _tokenCtrl.text = newToken;
         s.harnessToken = newToken;
       });
       sp.updateSettings(s);
 
-      if (bridgeWasRunning) {
+      if (bridgeWasRunning && isDesktop) {
         // 电脑端重置：直接用服务端换发的新 token 重启桥接（App 托管场景下
         // 该 token 即配对凭据，无需再扫码）。
-        // 手机端重置导致的"桥接已停止"由 _watchBridgeProcess 自动重启处理。
-        await _restartHeadlessBridge(newToken, _harnessUrlCtrl.text.trim());
+        await manager.restart(
+          token: newToken,
+          harnessUrl: _harnessUrlCtrl.text.trim().isEmpty
+              ? '127.0.0.1:3080'
+              : _harnessUrlCtrl.text.trim(),
+        );
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('🔑 配对 Token 已更新，电脑端桥接已自动重启并重连'),
             backgroundColor: Colors.green,
+          ),
+        );
+      } else if (bridgeWasRunning) {
+        // 手机端重置：本机无法操作电脑脚本，改为下发重启指令，
+        // 由电脑端 App 在会话轮询中取走并用新 Token 重启桥接。
+        final ok = await SyncService.instance.sendBridgeCommand(
+          userId: sp.syncUserId,
+          command: 'restart',
+        );
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              ok
+                  ? '🔑 Token 已重置，已通知电脑端用新 Token 重启桥接（数秒内生效）'
+                  : '🔑 Token 已重置，但通知电脑端失败：请确认电脑端已打开 LxAI 应用',
+            ),
+            backgroundColor: ok ? Colors.green : Colors.orange,
+            duration: const Duration(seconds: 5),
           ),
         );
       } else {
@@ -282,225 +315,71 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       if (mounted) setState(() => _isRotatingToken = false);
     }
   }
-
-  /// 确保本地 bridge 脚本与 App 内置版本一致。
+  /// 启停桥接。
   ///
-  /// 此前只在"文件不存在"时写入，导致**旧脚本永远不会被更新**：用户升级 App 后
-  /// 仍跑着几轮之前的老脚本（例如缺少 DSH 会话鉴权、缺少凭证自愈），
-  /// 表现为"桥接已启动但取不到工作区/会话"。
-  /// 现改为按内容比对，不一致即覆盖。
-  Future<void> _ensureBridgeScriptUpToDate(String scriptPath) async {
-    final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
-    try {
-      final file = File(scriptPath);
-      if (await file.exists()) {
-        final existing = await file.readAsString();
-        if (existing.trim() == pyContent.trim()) {
-          return; // 已是最新，无需重写
-        }
-        debugPrint('[Bridge] 检测到本地脚本与内置版本不一致，正在更新...');
-      }
-      await file.writeAsString(pyContent);
-    } catch (e) {
-      // 写失败不阻断启动：继续用磁盘上已有的脚本
-      debugPrint('[Bridge] 更新本地脚本失败（将沿用现有文件）: $e');
-    }
-  }
-
-  /// 启动后监控桥接进程：退出即清理界面状态，并如实提示原因。
+  /// 进程由全局 `BridgeProcessManager` 统一管理（不再由本页面持有），这样：
+  /// · 切到别的页面时，进程退出监控依然有效，可自动恢复；
+  /// · 手机端下发的启停指令也能在任意时刻被执行。
   ///
-  /// bridge 在收到服务的 token_revoked 时会自行退出（这是"重置即切断连接"的一部分），
-  /// 此前 App 不会察觉，于是界面一直显示"电脑端后台守护中"，而实际进程早已结束 ——
-  /// 表现为"手机端显示未连接、电脑端点重启才能恢复"。这里把状态如实反映出来。
-  void _watchBridgeProcess(int pid) {
-    _bridgeWatchTimer?.cancel();
-    _bridgeWatchTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
-      if (!mounted) {
-        timer.cancel();
-        return;
-      }
-      final proc = _headlessBridgeProcess;
-      if (proc == null || proc.pid != pid) {
-        timer.cancel();
-        return;
-      }
-      int? code;
-      try {
-        code = await proc.exitCode.timeout(const Duration(milliseconds: 300));
-      } catch (_) {
-        code = null; // 仍在运行
-      }
-      if (code == null) return;
-
-      // 进程已退出
-      timer.cancel();
-      final stoppedByUser = _bridgeStoppedByUser;
-      _bridgeStoppedByUser = false;
-      _headlessBridgeProcess = null;
-      if (!mounted) return;
-      setState(() {});
-
-      if (stoppedByUser) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已停止电脑后台桥接守护进程')),
-        );
-        return;
-      }
-
-      // 非用户主动停止 —— 最典型的原因是「手机端点了重置 Token」：
-      // 服务端换发新 token 并通知本机，脚本按设计自行退出。
-      // 这里自动用服务端刚下发的新 token 把它拉起来，用户无需任何手动操作。
-      if (_bridgeAutoRestartCount < 3) {
-        _bridgeAutoRestartCount++;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('检测到 Token 已变更，正在自动重连桥接...'),
-            duration: Duration(seconds: 3),
-          ),
-        );
-        // 等待一次会话轮询（4 秒周期）把服务端的新 token 同步到本地，
-        // 否则会用旧 token 重启、立刻再次被拒。
-        await Future.delayed(const Duration(seconds: 5));
-        if (!mounted) return;
-        final sp = context.read<SettingsProvider>();
-        final token = sp.settings.harnessToken.trim();
-        await _restartHeadlessBridge(token, _harnessUrlCtrl.text.trim());
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('✅ 桥接已自动重连'),
-            backgroundColor: Colors.green,
-          ),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('电脑端桥接反复退出（退出码 $code），已停止自动重试，请手动点击「启动」。'),
-            backgroundColor: Colors.orange,
-          ),
-        );
-      }
-    });
-  }
-
-  /// 重启后台桥接进程：先停旧进程，再用新 Token 以相同参数启动。
-  Future<void> _restartHeadlessBridge(String token, String harnessUrl) async {
-    final running = _headlessBridgeProcess;
-    if (running != null) {
-      try {
-        running.kill(ProcessSignal.sigterm);
-      } catch (_) {
-        try {
-          running.kill();
-        } catch (_) {}
-      }
-      _headlessBridgeProcess = null;
-      // 给进程一点退出时间，避免端口/连接残留
-      await Future.delayed(const Duration(milliseconds: 600));
-    }
+  /// 手机端点到这个按钮时无法直接操作电脑上的脚本，因此改为把指令交给服务端，
+  /// 由电脑端 App 在会话轮询（≤4 秒）中取走并在本机执行。
+  Future<void> _toggleHeadlessBridge(String token, String harnessUrl) async {
+    final manager = BridgeProcessManager.instance;
+    final isDesktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+    final normalizedHarness = harnessUrl.trim().isEmpty ? '127.0.0.1:3080' : harnessUrl.trim();
 
     setState(() => _isStartingBridge = true);
     try {
-      final scriptPath = 'deepseek_bridge.py';
-      await _ensureBridgeScriptUpToDate(scriptPath);
+      if (!isDesktop) {
+        // 手机端：按电脑端 Agent 的在线状态决定下发 start 还是 stop
+        final sp = context.read<SettingsProvider>();
+        final online = sp.settings.isHarnessOnline;
+        final command = online ? 'stop' : 'start';
+        final ok = await SyncService.instance.sendBridgeCommand(
+          userId: sp.syncUserId,
+          command: command,
+        );
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              ok
+                  ? '指令已发送（${command == 'start' ? '启动' : '停止'}），电脑端将在数秒内执行'
+                  : '指令发送失败：请确认电脑端已安装并打开 LxAI 应用，且已登录同一账号',
+            ),
+            backgroundColor: ok ? Colors.green : Colors.redAccent,
+          ),
+        );
+        return;
+      }
 
-      final executable = Platform.isWindows ? 'python' : 'python3';
-      // 只有拿到有效 token 时才传 --token；留空则让脚本进入扫码配对流程。
-      // 重置 token 后必须走扫码（见 _rotateToken 的说明），因此这里允许传空。
-      final args = <String>[
-        scriptPath,
-        if (token.trim().isNotEmpty) ...['--token', token.trim()],
-        '--harness-url', 'http://$harnessUrl',
-        '--server', AppConfig.normalizedServerBaseUrl,
-      ];
-      final process = await Process.start(
-        executable,
-        args,
-        mode: ProcessStartMode.detachedWithStdio,
-      );
-      _headlessBridgeProcess = process;
-      _bridgeStoppedByUser = false;
-      _watchBridgeProcess(process.pid);
-
-      // 启动后静默自检连接状态
+      // 电脑端：本地直接启停
+      if (manager.isRunning) {
+        await manager.stop();
+      } else {
+        await manager.start(token: token, harnessUrl: normalizedHarness);
+      }
+      if (!mounted) return;
+      final msg = manager.takeMessage();
+      if (msg != null) {
+        final launched = manager.isRunning && !manager.lastMessageIsError;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(launched ? '🚀 $msg' : msg),
+            backgroundColor: manager.lastMessageIsError
+                ? Colors.redAccent
+                : (launched ? Colors.green : null),
+          ),
+        );
+      }
+      // 启动后 2 秒静默自检连接状态
       Future.delayed(const Duration(seconds: 2), () {
         if (mounted) context.read<SettingsProvider>().refreshAgentStatus();
       });
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('桥接重启失败: $e')),
-        );
-      }
     } finally {
       if (mounted) setState(() => _isStartingBridge = false);
     }
   }
-
-  Future<void> _toggleHeadlessBridge(String token, String harnessUrl) async {
-    if (_headlessBridgeProcess != null) {
-      // 停止后台进程
-      try {
-        _headlessBridgeProcess!.kill(ProcessSignal.sigterm);
-      } catch (_) {
-        _headlessBridgeProcess!.kill();
-      }
-      _bridgeStoppedByUser = true; // 告知监控：这是主动停止，不要误报异常退出
-      _headlessBridgeProcess = null;
-      setState(() {});
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已停止电脑后台桥接守护进程')),
-      );
-      return;
-    }
-
-    setState(() => _isStartingBridge = true);
-    try {
-      final scriptPath = 'deepseek_bridge.py';
-      await _ensureBridgeScriptUpToDate(scriptPath);
-
-      final executable = Platform.isWindows ? 'python' : 'python3';
-      final args = <String>[
-        scriptPath,
-        if (token.trim().isNotEmpty) ...['--token', token.trim()],
-        '--harness-url', 'http://$harnessUrl',
-        '--server', AppConfig.normalizedServerBaseUrl,
-      ];
-      final process = await Process.start(
-        executable,
-        args,
-        mode: ProcessStartMode.detachedWithStdio,
-      );
-
-      _headlessBridgeProcess = process;
-      _bridgeStoppedByUser = false;
-      _watchBridgeProcess(process.pid);
-      setState(() => _isStartingBridge = false);
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('🚀 本地桥接服务已在后台静默运行，无需保持黑窗口！'),
-          backgroundColor: Colors.green,
-        ),
-      );
-
-      // 启动后 2 秒静默自检连接状态
-      Future.delayed(const Duration(seconds: 2), () {
-        if (mounted) {
-          context.read<SettingsProvider>().refreshAgentStatus();
-        }
-      });
-    } catch (e) {
-      setState(() => _isStartingBridge = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('启动失败: $e (请确保电脑已安装 Python 并加入环境变量)'),
-          backgroundColor: Colors.redAccent,
-        ),
-      );
-    }
-  }
-
   void _showQrScanPairingDialog() {
     final token = _tokenCtrl.text.trim();
     final url = _harnessUrlCtrl.text.trim();
@@ -706,8 +585,8 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         child: Row(
                           children: [
                             Icon(
-                              _headlessBridgeProcess != null ? Icons.bolt : Icons.play_circle_outline,
-                              color: _headlessBridgeProcess != null ? Colors.green : const Color(0xFF0284C7),
+                              _bridgeRunning ? Icons.bolt : Icons.play_circle_outline,
+                              color: _bridgeRunning ? Colors.green : const Color(0xFF0284C7),
                               size: 28,
                             ),
                             const SizedBox(width: 10),
@@ -716,13 +595,15 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    _headlessBridgeProcess != null ? '电脑端后台守护中 (无头模式)' : '一键无头后台启动',
+                                    _bridgeRunning ? '桥接运行中 (无头模式)' : '一键无头后台启动',
                                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                                   ),
                                   const SizedBox(height: 2),
                                   Text(
-                                    _headlessBridgeProcess != null
-                                        ? 'PID: ${_headlessBridgeProcess!.pid}，长连接已建立，无黑色控制台窗口'
+                                    _bridgeRunning
+                                        ? (BridgeProcessManager.instance.isRunning
+                                            ? 'PID: ${BridgeProcessManager.instance.pid}，长连接已建立，无黑色控制台窗口'
+                                            : '长连接已建立（由电脑端 LxAI 应用托管运行）')
                                         : '点击即可在后台静默运行 py 桥接，无需手动打开 CMD 或保留黑窗口',
                                     style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
                                   ),
@@ -738,17 +619,17 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                   )
                                 : ElevatedButton.icon(
                                     style: ElevatedButton.styleFrom(
-                                      backgroundColor: _headlessBridgeProcess != null ? Colors.redAccent : const Color(0xFF0284C7),
+                                      backgroundColor: _bridgeRunning ? Colors.redAccent : const Color(0xFF0284C7),
                                       foregroundColor: Colors.white,
                                       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                                     ),
                                     icon: Icon(
-                                      _headlessBridgeProcess != null ? Icons.stop : Icons.play_arrow,
+                                      _bridgeRunning ? Icons.stop : Icons.play_arrow,
                                       size: 16,
                                     ),
                                     label: Text(
-                                      _headlessBridgeProcess != null ? '停止' : '启动',
+                                      _bridgeRunning ? '停止' : '启动',
                                       style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
                                     ),
                                     onPressed: () => _toggleHeadlessBridge(
