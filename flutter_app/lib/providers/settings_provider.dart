@@ -156,6 +156,7 @@ class SettingsProvider extends ChangeNotifier {
       onTokenSynced: _applyServerAgentToken,
       onCommand: _handleBridgeCommand,
       onOnlineChanged: _applyAgentOnline,
+      onTransition: _applyBridgeTransition,
     );
 
     // 让 BridgeProcessManager 在自动重启时能拿到「当前有效 Token / Harness 地址」
@@ -176,6 +177,36 @@ class SettingsProvider extends ChangeNotifier {
     _settings.isHarnessOnline = online;
     _save(pushToCloud: false);
     debugPrint('[Settings] Agent 在线状态更新: $online');
+  }
+
+  /// 服务端下发的「桥接状态切换中」标记（null = 已切换完成/无切换）。
+  BridgeTransition? _bridgeTransition;
+  BridgeTransition? get bridgeTransition => _bridgeTransition;
+
+  /// 当前是否有设备正在切换桥接状态（含本机或其他端发起的）。
+  ///
+  /// 这是**账号级**互斥：手机点了启动、电脑还没执行完的这几秒里，
+  /// 电脑端界面同样必须置灰按钮，否则又点一次就会下发相反指令。
+  bool get isBridgeSwitching => _bridgeTransition != null;
+
+  /// 本机之外的另一台设备正在切换（用于提示文案）。
+  bool get isBridgeSwitchingByOtherDevice =>
+      _bridgeTransition != null &&
+      _bridgeTransition!.by != AppSettings.currentDeviceType;
+
+  void _applyBridgeTransition(BridgeTransition? transition) {
+    final changed = (_bridgeTransition?.command != transition?.command) ||
+        (_bridgeTransition?.by != transition?.by) ||
+        ((_bridgeTransition == null) != (transition == null));
+    _bridgeTransition = transition;
+    if (changed) {
+      debugPrint(
+        transition == null
+            ? '[Settings] 桥接状态切换完成，按钮恢复可点'
+            : '[Settings] 桥接状态切换中（${transition.command} by ${transition.by}），两端按钮置灰',
+      );
+      notifyListeners();
+    }
   }
 
   /// 把设置里的 Harness 地址整理成 bridge 需要的 `host:port` 形式。
@@ -240,6 +271,8 @@ class SettingsProvider extends ChangeNotifier {
   void handleForceLogout(String reason) {
     if (!_settings.isLoggedIn) return;
 
+    // 被顶下线后不应再保留"切换中"的置灰状态，否则重新登录后按钮是灰的
+    _bridgeTransition = null;
     _settings.isLoggedIn = false;
     _save();
 

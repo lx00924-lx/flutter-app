@@ -9,6 +9,46 @@ import '../models/chat_session.dart';
 import '../utils/http_client_helper.dart';
 import 'storage_service.dart';
 
+/// 桥接控制指令的下发结果。
+///
+/// [busy] 与 [failed] 必须区分开：前者是「另一台设备正在切换状态，服务端按
+/// 账号级互斥拒绝了这次点击」（属于正常保护，提示"稍候"即可），后者才是真的
+/// 发不出去（没网、电脑端没登录等）。
+enum BridgeCommandResult { ok, busy, failed }
+
+/// 账号级「桥接状态切换中」标记（服务端下发，手机与电脑共用同一份真相）。
+///
+/// 任一端发起启停/重置后，服务端登记一条标记并通过会话轮询下发给**所有**设备；
+/// 两端据此统一置灰按钮，直到 agentOnline 达到期望终态或超时。
+class BridgeTransition {
+  final String command;
+  final bool target;
+  final String by;
+  final int since;
+
+  const BridgeTransition({
+    required this.command,
+    required this.target,
+    required this.by,
+    required this.since,
+  });
+
+  static BridgeTransition? fromJson(dynamic raw) {
+    if (raw is! Map) return null;
+    final command = raw['command']?.toString().trim() ?? '';
+    if (command.isEmpty) return null;
+    return BridgeTransition(
+      command: command,
+      target: raw['target'] == true,
+      by: raw['by']?.toString() ?? 'unknown',
+      since: int.tryParse(raw['since']?.toString() ?? '') ?? 0,
+    );
+  }
+
+  /// 发起端是不是本机（'mobile' / 'desktop'）。
+  bool initiatedBy(String deviceType) => by == deviceType;
+}
+
 /// 后台静默实时同步服务：实现 Flutter 客户端与服务端的自动增量同步及多端互斥下线监控
 class SyncService {
   static final SyncService instance = SyncService._();
@@ -33,8 +73,9 @@ class SyncService {
   void Function(String command)? onBridgeCommand;
   /// Agent 在线状态变化回调（服务端每次轮询下发，用于自动刷新界面）
   void Function(bool online)? onAgentOnlineChanged;
+  /// 账号级「桥接状态切换中」标记变化回调（null 表示已切换完成）
+  void Function(BridgeTransition? transition)? onBridgeTransition;
 
-  /// 获取服务器基地址（Web 端自适应 origin，App 原生端使用 AppConfig 中可配置的地址）
   String get serverBaseUrl {
     if (kIsWeb) {
       final uri = Uri.base;
@@ -81,6 +122,7 @@ class SyncService {
     void Function(String token)? onTokenSynced,
     void Function(String command)? onCommand,
     void Function(bool online)? onOnlineChanged,
+    void Function(BridgeTransition? transition)? onTransition,
   }) {
     stopSessionWatcher();
     final cleanUserId = userId.trim();
@@ -92,6 +134,7 @@ class SyncService {
     onAgentTokenSynced = onTokenSynced;
     onBridgeCommand = onCommand;
     onAgentOnlineChanged = onOnlineChanged;
+    onBridgeTransition = onTransition;
 
     // 立即执行一次健康核验
     _checkSessionOnce(cleanUserId, clientSessionId, deviceType);
@@ -143,6 +186,9 @@ class SyncService {
           if (data['agentOnline'] is bool) {
             onAgentOnlineChanged?.call(data['agentOnline'] as bool);
           }
+          // 账号级「切换中」标记：任一端发起启停/重置后出现，两端据此统一置灰按钮，
+          // 直到状态真的切换到位（服务端确认后不再下发该字段）。
+          onBridgeTransition?.call(BridgeTransition.fromJson(data['bridgeTransition']));
         }
       }
     } catch (e) {
@@ -644,22 +690,80 @@ class SyncService {
   /// 下发桥接控制指令（start / stop / restart）给该账号的**电脑端** App 执行。
   ///
   /// 手机无法直接启动电脑上的脚本，因此指令先排到服务端，电脑端 App 在
-  /// 会话轮询（≤4 秒）中取走并在本机执行。返回是否成功排队。
-  Future<bool> sendBridgeCommand({
+  /// 会话轮询（≤4 秒）中取走并在本机执行。
+  /// 服务端按账号级互斥：已有设备在切换状态时返回 409（[BridgeCommandResult.busy]）。
+  Future<BridgeCommandResult> sendBridgeCommand({
     required String userId,
     required String command,
   }) async {
     final cleanUserId = userId.trim();
-    if (cleanUserId.isEmpty || cleanUserId == 'guest') return false;
+    if (cleanUserId.isEmpty || cleanUserId == 'guest') return BridgeCommandResult.failed;
     try {
       final resp = await _dio.post(
         '$serverBaseUrl/api/agent/bridge-command',
-        data: {'userId': cleanUserId, 'command': command},
+        data: {
+          'userId': cleanUserId,
+          'command': command,
+          'device': AppSettings.currentDeviceType,
+        },
       );
-      return resp.statusCode == 200 && (resp.data is Map) && resp.data['success'] == true;
+      final ok = resp.statusCode == 200 && (resp.data is Map) && resp.data['success'] == true;
+      return ok ? BridgeCommandResult.ok : BridgeCommandResult.failed;
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 409) {
+        debugPrint('[SyncService] 桥接状态切换中，服务端拒绝了本次指令');
+        return BridgeCommandResult.busy;
+      }
+      debugPrint('[SyncService] sendBridgeCommand error: $e');
+      return BridgeCommandResult.failed;
     } catch (e) {
       debugPrint('[SyncService] sendBridgeCommand error: $e');
-      return false;
+      return BridgeCommandResult.failed;
+    }
+  }
+
+  /// 电脑端**本地**启停前登记一次「切换中」，让手机端也同步置灰按钮。
+  ///
+  /// 本地启停不走指令队列，若不登记，手机在状态回传前仍能下发相反指令。
+  /// 账号已有切换在进行时返回 [BridgeCommandResult.busy]，调用方应放弃本次操作。
+  Future<BridgeCommandResult> beginBridgeTransition({
+    required String userId,
+    required String command,
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty || cleanUserId == 'guest') return BridgeCommandResult.failed;
+    try {
+      final resp = await _dio.post(
+        '$serverBaseUrl/api/agent/bridge-transition',
+        data: {
+          'userId': cleanUserId,
+          'command': command,
+          'device': AppSettings.currentDeviceType,
+        },
+      );
+      final ok = resp.statusCode == 200 && (resp.data is Map) && resp.data['success'] == true;
+      return ok ? BridgeCommandResult.ok : BridgeCommandResult.failed;
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 409) return BridgeCommandResult.busy;
+      debugPrint('[SyncService] beginBridgeTransition error: $e');
+      return BridgeCommandResult.failed;
+    } catch (e) {
+      debugPrint('[SyncService] beginBridgeTransition error: $e');
+      return BridgeCommandResult.failed;
+    }
+  }
+
+  /// 撤销「状态切换中」标记（本地启停失败时用，避免两端按钮白等 20 秒兜底）。
+  Future<void> cancelBridgeTransition({required String userId}) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty || cleanUserId == 'guest') return;
+    try {
+      await _dio.post(
+        '$serverBaseUrl/api/agent/bridge-transition/cancel',
+        data: {'userId': cleanUserId, 'device': AppSettings.currentDeviceType},
+      );
+    } catch (e) {
+      debugPrint('[SyncService] cancelBridgeTransition error: $e');
     }
   }
 
@@ -677,7 +781,11 @@ class SyncService {
     try {
       final resp = await _dio.post(
         '$serverBaseUrl/api/agent/rotate-token',
-        data: {'userId': cleanUserId, 'oldToken': oldToken.trim()},
+        data: {
+          'userId': cleanUserId,
+          'oldToken': oldToken.trim(),
+          'device': AppSettings.currentDeviceType,
+        },
       );
       if (resp.statusCode == 200 && resp.data is Map) {
         final token = resp.data['token']?.toString().trim();

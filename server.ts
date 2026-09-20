@@ -166,6 +166,84 @@ interface DeviceSession {
 const BRIDGE_COMMAND_TTL_MS = 2 * 60 * 1000;
 const pendingBridgeCommands = new Map<string, { command: string; createdAt: number }>();
 
+/**
+ * 账号级「桥接状态切换中」标记：userId -> 切换信息。
+ *
+ * 为什么必须放在服务端：手机点「启动」只是把指令排队，电脑端 App 要等下一次
+ * 轮询（≤4 秒）才真正执行，这段时间电脑界面还显示"未运行"，用户很可能在电脑上
+ * 又点一次「启动/停止」，两条相反指令打架，桥接被反复启停。
+ * 服务端是两端唯一共同的真相，因此：
+ *   · 任一端发起 启停 / 重置，都在这里登记一条切换标记；
+ *   · 每次会话轮询把标记下发给**所有**设备，两端据此统一置灰按钮；
+ *   · 观察到 agentOnline 达到期望终态（且中途确实偏离过）才清除；
+ *   · 超时兜底清除，避免按钮永久卡住。
+ */
+interface BridgeTransition {
+  command: string;
+  target: boolean;
+  by: string;
+  startedAt: number;
+}
+const bridgeTransitions = new Map<string, BridgeTransition>();
+/** 兜底时限：超过就作废，防止异常情况下两端按钮永久置灰。 */
+const BRIDGE_TRANSITION_TTL_MS = 20 * 1000;
+
+const armBridgeTransition = (userId: string, command: string, target: boolean, by: string): void => {
+  bridgeTransitions.set(userId, {
+    command,
+    target,
+    by: by || "unknown",
+    startedAt: Date.now(),
+  });
+};
+
+const describeBridgeTransition = (t: BridgeTransition) => ({
+  command: t.command,
+  target: t.target,
+  by: t.by,
+  since: t.startedAt,
+});
+
+/** 仍在切换中的标记（未超时）。 */
+const activeBridgeTransition = (userId: string): BridgeTransition | null => {
+  const t = bridgeTransitions.get(userId);
+  if (!t) return null;
+  if (Date.now() - t.startedAt > BRIDGE_TRANSITION_TTL_MS) {
+    bridgeTransitions.delete(userId);
+    return null;
+  }
+  return t;
+};
+
+/**
+ * 结算切换标记：agentOnline 达到期望终态（或超时）就清除，
+ * 返回仍需下发给设备的标记；null 表示切换已完成/无切换。
+ *
+ * 判据刻意只认「在线状态是否等于期望终态」，不依赖"有没有观察到中途偏离"：
+ * 后者要靠轮询采样，桥接上线很快时可能一次都没采到，标记就会一直挂到超时，
+ * 表现为按钮白灰 20 秒。
+ */
+const resolveBridgeTransition = (userId: string, agentOnline: boolean) => {
+  const t = activeBridgeTransition(userId);
+  if (!t) return null;
+  if (agentOnline === t.target) {
+    bridgeTransitions.delete(userId);
+    return null;
+  }
+  return describeBridgeTransition(t);
+};
+
+/** 某个 Agent Token 当前是否在线（WS 活着，或轮询模式心跳未超时）。 */
+const isAgentOnlineByToken = (token: string): boolean => {
+  if (!token) return false;
+  const agent = connectedAgents.get(token);
+  if (!agent) return false;
+  return (
+    (agent.ws && agent.ws.readyState === WSWebSocket.OPEN) ||
+    Date.now() - agent.lastPing < 45000
+  );
+};
+
 // File lock mechanism to prevent race conditions during concurrent JSON writes
 const fileLocks: Map<string, Promise<any>> = new Map();
 
@@ -1193,13 +1271,11 @@ async function startServer() {
     // 顺带下发 Agent 在线状态：手机上点击启动/停止后，界面需要自动反映真实状态，
     // 而手机端无法本地探测电脑进程。挂在这次轮询里，两端都能在 ≤4 秒内自动更新，
     // 不必再手动点"刷新"。
-    const agentOnline = (() => {
-      if (!currentAgentToken) return false;
-      const agent = connectedAgents.get(currentAgentToken);
-      if (!agent) return false;
-      return (agent.ws && agent.ws.readyState === WSWebSocket.OPEN) ||
-        (Date.now() - agent.lastPing < 45000);
-    })();
+    const agentOnline = isAgentOnlineByToken(currentAgentToken);
+
+    // 「桥接状态切换中」标记：任一端发起启停/重置后登记，两端据此统一置灰按钮，
+    // 直到状态真的切换到位才解除。这里是结算点（能拿到最新 agentOnline）。
+    const bridgeTransition = resolveBridgeTransition(userId, agentOnline);
 
     // 下发并消费"桥接控制指令"：手机点启停/重置时排队，电脑端 App 在下一次轮询
     // （≤4 秒）取到并本地执行 —— 复用已有的会话轮询通道，无需新建长连接。
@@ -1243,6 +1319,7 @@ async function startServer() {
         agentOnline,
         ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}),
         ...(pendingCommand ? { bridgeCommand: pendingCommand } : {}),
+        ...(bridgeTransition ? { bridgeTransition } : {}),
       });
     } catch (e) {
       res.json({
@@ -1250,6 +1327,7 @@ async function startServer() {
         agentOnline,
         ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}),
         ...(pendingCommand ? { bridgeCommand: pendingCommand } : {}),
+        ...(bridgeTransition ? { bridgeTransition } : {}),
       });
     }
   });
@@ -1269,11 +1347,85 @@ async function startServer() {
       if (!allowed.includes(command)) {
         return res.status(400).json({ error: `不支持的指令：${command}，可选 ${allowed.join(" / ")}` });
       }
+
+      // 账号级互斥：任一端正在切换状态时，另一端（含发起端自己连点）一律拒绝，
+      // 否则 start/stop 会互相打架，桥接被反复启停。
+      const occupied = activeBridgeTransition(userId);
+      if (occupied) {
+        return res.status(409).json({
+          error: "桥接状态正在切换中，请等这次切换完成后再操作",
+          code: "BRIDGE_BUSY",
+          bridgeTransition: describeBridgeTransition(occupied),
+        });
+      }
+
+      const device = ((req.body?.device as string) || "unknown").trim();
       pendingBridgeCommands.set(userId, { command, createdAt: Date.now() });
-      console.log(`[Bridge Cmd] 已为用户 ${userId} 排队指令: ${command}（等待电脑端 App 轮询取走）`);
+      armBridgeTransition(userId, command, command === "stop" ? false : true, device);
+      console.log(
+        `[Bridge Cmd] 已为用户 ${userId} 排队指令: ${command}（发起端 ${device}，等待电脑端 App 轮询取走）` +
+          `；账号已锁定，切换到位前两端按钮都会置灰`,
+      );
       res.json({ success: true, command, note: "电脑端将在数秒内执行" });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to queue bridge command" });
+    }
+  });
+
+  /**
+   * 电脑端**本地**启停前先来登记一次「状态切换中」。
+   *
+   * 电脑端在自己机器上直接启停不经过指令队列，若不登记，手机端在状态回传前
+   * 仍可点击并下发相反指令。登记后两端都会在轮询里拿到标记并置灰按钮。
+   */
+  app.post("/api/agent/bridge-transition", async (req, res) => {
+    try {
+      const userId = ((req.body?.userId as string) || "").trim();
+      const command = ((req.body?.command as string) || "").trim().toLowerCase();
+      const device = ((req.body?.device as string) || "unknown").trim();
+      const allowed = ["start", "stop", "restart"];
+      if (!userId || userId === "guest") {
+        return res.status(401).json({ error: "缺少 userId，无法登记状态切换" });
+      }
+      if (!allowed.includes(command)) {
+        return res.status(400).json({ error: `不支持的指令：${command}，可选 ${allowed.join(" / ")}` });
+      }
+      const occupied = activeBridgeTransition(userId);
+      if (occupied) {
+        return res.status(409).json({
+          error: "另一台设备正在切换桥接状态，请稍候",
+          code: "BRIDGE_BUSY",
+          bridgeTransition: describeBridgeTransition(occupied),
+        });
+      }
+      const target = command === "stop" ? false : true;
+      armBridgeTransition(userId, command, target, device);
+      console.log(`[Bridge Cmd] ${device} 端在本地发起 ${command}，已锁定账号切换状态`);
+      res.json({ success: true, command, target, note: "已登记，两端界面将在数秒内同步为切换中" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to register bridge transition" });
+    }
+  });
+
+  /**
+   * 撤销「状态切换中」标记。
+   *
+   * 电脑端本地启停失败（例如没装 Python）时用得上：登记已经发生，但状态永远
+   * 不会变成期望值，若不撤销，两端按钮要白等 20 秒兜底才恢复。
+   */
+  app.post("/api/agent/bridge-transition/cancel", async (req, res) => {
+    try {
+      const userId = ((req.body?.userId as string) || "").trim();
+      if (!userId || userId === "guest") {
+        return res.status(401).json({ error: "缺少 userId" });
+      }
+      const existed = bridgeTransitions.delete(userId);
+      if (existed) {
+        console.log(`[Bridge Cmd] 用户 ${userId} 的切换标记已撤销，两端按钮立即恢复`);
+      }
+      res.json({ success: true, cancelled: existed });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to cancel bridge transition" });
     }
   });
 
@@ -2724,6 +2876,24 @@ if %errorlevel% neq 0 (
       }
       const ownerUserId = (user.username || user.id).toString();
 
+      // 账号级互斥：切换中不允许再重置，避免两端连点把 Token 连换几次、
+      // 桥接被反复踢下线又拉起。
+      const occupied = activeBridgeTransition(ownerUserId);
+      if (occupied) {
+        return res.status(409).json({
+          error: "桥接状态正在切换中，请等这次切换完成后再重置 Token",
+          code: "BRIDGE_BUSY",
+          bridgeTransition: describeBridgeTransition(occupied),
+        });
+      }
+
+      const device = ((req.body?.device as string) || "unknown").trim();
+
+      // 重置前先看桥接是否在线：在线的话换发后必然要被踢掉再拉回来，
+      // 期间两端都该置灰；本来就不在线则无需锁定。
+      const settingsBefore = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+      const wasOnline = isAgentOnlineByToken(readUserAgentToken(settingsBefore[ownerUserId]));
+
       // 先断开旧 token 上的 Agent 连接
       let kickedAgent = false;
       if (oldToken && connectedAgents.has(oldToken)) {
@@ -2748,11 +2918,19 @@ if %errorlevel% neq 0 (
 
       // 广播给该用户所有设备，使手机与电脑立刻收敛到同一枚 token
       io.to(`user_${ownerUserId}`).emit("settings_updated", { harnessToken: newToken });
+
+      // 换发后桥接要带着新 Token 重新上线：登记切换标记，两端按钮置灰，
+      // 直到 agentOnline 回到 true（或超时兜底）才解除。
+      if (wasOnline) {
+        armBridgeTransition(ownerUserId, "restart", true, device);
+      }
+
       console.log(
-        `[Agent Hub] 用户 ${ownerUserId} 重置了配对 Token` +
+        `[Agent Hub] 用户 ${ownerUserId} 重置了配对 Token（发起端 ${device}）` +
           (kickedAgent
             ? "：已向旧 Token 上的电脑端桥接下发 token_revoked 并断开（脚本会自行退出，等待电脑端 App 用新 Token 拉起）"
-            : "：旧 Token 上没有在线桥接连接，无需踢线"),
+            : "：旧 Token 上没有在线桥接连接，无需踢线") +
+          (wasOnline ? "；已锁定账号，切换到位前两端按钮置灰" : "；桥接本来不在线，无需锁定"),
       );
 
       res.json({ success: true, token: newToken });

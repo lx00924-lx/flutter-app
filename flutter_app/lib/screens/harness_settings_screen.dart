@@ -41,7 +41,26 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   /// 要等电脑端 App 下一次轮询（≤4 秒）执行、服务端再把 agentOnline 回传，
   /// 界面才知道结果。此前的写法在 HTTP 请求返回后就立刻解锁，用户看着没反应
   /// 就会连点 —— 于是 start/stop 指令一条接一条下发，桥接被反复启停。
-  bool get _isBridgeBusy => _isStartingBridge || _isRotatingToken;
+  ///
+  /// 这里除了本机发起的操作，还包括**服务端下发的账号级切换标记**：
+  /// 手机点了启动，电脑端界面在这几秒内同样必须置灰，反之亦然。
+  bool get _isBridgeBusy =>
+      _isStartingBridge ||
+      _isRotatingToken ||
+      (_settingsProvider?.isBridgeSwitching ?? false);
+
+  /// 切换中的提示文案（优先用服务端标记，它代表账号当前的切换）。
+  String get _bridgeSwitchLabel {
+    final provider = _settingsProvider;
+    final remote = provider?.bridgeTransition;
+    final target = remote?.target ?? _bridgeSwitchTarget ?? true;
+    final action = target ? '上线' : '停止';
+    if (remote != null && (provider?.isBridgeSwitchingByOtherDevice ?? false)) {
+      final who = remote.by == 'mobile' ? '手机端' : '电脑端';
+      return '$who正在$action…';
+    }
+    return '正在$action…';
+  }
 
   /// 本次操作期望的最终在线状态；非 null 表示"正在切换中"。
   bool? _bridgeSwitchTarget;
@@ -408,20 +427,23 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       } else if (bridgeWasRunning) {
         // 手机端重置：本机无法操作电脑脚本，改为下发重启指令，
         // 由电脑端 App 在会话轮询中取走并用新 Token 重启桥接。
-        final ok = await SyncService.instance.sendBridgeCommand(
+        final result = await SyncService.instance.sendBridgeCommand(
           userId: sp.syncUserId,
           command: 'restart',
         );
         if (!mounted) return;
-        if (!ok) _releaseBridgeSwitch();
+        if (result != BridgeCommandResult.ok) _releaseBridgeSwitch();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              ok
-                  ? '🔑 Token 已重置，已通知电脑端用新 Token 重启桥接（数秒内生效）'
-                  : '🔑 Token 已重置，但通知电脑端失败：请确认电脑端已打开 LxAI 应用',
+              switch (result) {
+                BridgeCommandResult.ok => '🔑 Token 已重置，已通知电脑端用新 Token 重启桥接（数秒内生效）',
+                BridgeCommandResult.busy => '🔑 Token 已重置；另一台设备正在切换状态，无需重复操作',
+                BridgeCommandResult.failed =>
+                  '🔑 Token 已重置，但通知电脑端失败：请确认电脑端已打开 LxAI 应用',
+              },
             ),
-            backgroundColor: ok ? Colors.green : Colors.orange,
+            backgroundColor: result == BridgeCommandResult.ok ? Colors.green : Colors.orange,
             duration: const Duration(seconds: 5),
           ),
         );
@@ -460,19 +482,19 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     try {
       // 期望终态：点了「停止」就是要离线，点了「启动」就是要在线。
       final target = !_bridgeRunning;
+      final sp = context.read<SettingsProvider>();
 
       if (!isDesktop) {
         // 手机端：按电脑端 Agent 的在线状态决定下发 start 还是 stop
-        final sp = context.read<SettingsProvider>();
         final online = sp.settings.isHarnessOnline;
         final command = online ? 'stop' : 'start';
-        final ok = await SyncService.instance.sendBridgeCommand(
+        final result = await SyncService.instance.sendBridgeCommand(
           userId: sp.syncUserId,
           command: command,
         );
         if (!mounted) return;
         // 指令只是"排上队"，要等电脑端执行 + 轮询回传，状态才算真的变。
-        if (ok) {
+        if (result == BridgeCommandResult.ok) {
           _armBridgeSwitchWatchdog(target);
         } else {
           _releaseBridgeSwitch();
@@ -480,11 +502,36 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              ok
-                  ? '指令已发送（${command == 'start' ? '启动' : '停止'}），电脑端将在数秒内执行'
-                  : '指令发送失败：请确认电脑端已安装并打开 LxAI 应用，且已登录同一账号',
+              switch (result) {
+                BridgeCommandResult.ok =>
+                  '指令已发送（${command == 'start' ? '启动' : '停止'}），电脑端将在数秒内执行',
+                BridgeCommandResult.busy =>
+                  '另一台设备正在切换桥接状态，请等它完成后再操作',
+                BridgeCommandResult.failed =>
+                  '指令发送失败：请确认电脑端已安装并打开 LxAI 应用，且已登录同一账号',
+              },
             ),
-            backgroundColor: ok ? Colors.green : Colors.redAccent,
+            backgroundColor: result == BridgeCommandResult.ok
+                ? Colors.green
+                : (result == BridgeCommandResult.busy ? Colors.orange : Colors.redAccent),
+          ),
+        );
+        return;
+      }
+
+      // 电脑端：先在服务端登记"切换中"，这样手机端界面也会同步置灰，
+      // 不会在电脑执行期间又下发一条相反指令。
+      final reg = await SyncService.instance.beginBridgeTransition(
+        userId: sp.syncUserId,
+        command: target ? 'start' : 'stop',
+      );
+      if (!mounted) return;
+      if (reg == BridgeCommandResult.busy) {
+        _releaseBridgeSwitch();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('另一台设备正在切换桥接状态，请等它完成后再操作'),
+            backgroundColor: Colors.orange,
           ),
         );
         return;
@@ -502,7 +549,10 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       if (ok) {
         _armBridgeSwitchWatchdog(target);
       } else {
+        // 本地都起不来（例如没装 Python），状态永远不会变成期望值，
+        // 必须立刻撤销服务端标记，否则两端按钮要白等 20 秒兜底才恢复。
         _releaseBridgeSwitch();
+        unawaited(SyncService.instance.cancelBridgeTransition(userId: sp.syncUserId));
       }
       final msg = manager.takeMessage();
       if (msg != null) {
@@ -789,7 +839,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                       const SizedBox(width: 6),
                                       Text(
                                         // 明确告诉用户"在等什么"，否则按钮变灰会被当成卡死
-                                        _bridgeSwitchTarget == false ? '正在停止…' : '正在上线…',
+                                        _bridgeSwitchLabel,
                                         style: TextStyle(
                                           fontSize: 11,
                                           color: Colors.grey.shade600,
