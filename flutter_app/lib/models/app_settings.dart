@@ -14,14 +14,18 @@ const String kLegacyDefaultAgentToken =
 
 /// 生成一个设备唯一的 Agent 配对 Token。
 ///
-/// 格式：`sk-agent` + 43 位随机字符（URL 安全字母表，共 51 字符）。
+/// 格式：`lx-` + 43 位随机字符（URL 安全字母表，共 46 字符）。
 /// 使用 [Random.secure] → 密码学安全随机，不可预测；配合服务端 `isPlausibleAgentToken`
 /// 的最小长度校验（≥16）与归属校验，构成完整的配对鉴权闭环。
+///
+/// 前缀曾长期固定为 `sk-agent`，界面脱敏后永远显示成 `sk-agent************`，
+/// 让人误以为 Token 从未更新；改成 `lx-` 后，脱敏显示里前缀后面紧跟的几位
+/// 随机字符每次都不同，换没换一目了然。
 String generateAgentPairingToken() {
   const charset =
       'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
   final rnd = Random.secure();
-  final buf = StringBuffer('sk-agent');
+  final buf = StringBuffer('lx-');
   for (var i = 0; i < 43; i++) {
     buf.write(charset[rnd.nextInt(charset.length)]);
   }

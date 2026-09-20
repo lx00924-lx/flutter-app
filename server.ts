@@ -2975,11 +2975,18 @@ if %errorlevel% neq 0 (
     return token;
   };
 
-  /** 生成服务端 Agent Token（格式与客户端一致：sk-agent + 43 位随机，共 51 字符） */
+  /**
+   * 生成服务端 Agent Token（格式：`lx-` + 43 位随机字符，共 46 字符）。
+   *
+   * 前缀从 `sk-agent` 改为 `lx-`：旧前缀恒定不变，界面脱敏后永远显示成
+   * `sk-agent************`，用户根本看不出 Token 到底换没换（错觉的来源）。
+   * 随机部分仍是 43 位密码学安全随机字符，强度不变。
+   * 老 Token（`sk-agent…`）继续有效 —— 校验只看长度与占位符，不看前缀。
+   */
   const generateServerAgentToken = (): string => {
     const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     const bytes = randomBytes(43);
-    let out = "sk-agent";
+    let out = "lx-";
     for (let i = 0; i < 43; i++) {
       out += charset[bytes[i] % charset.length];
     }

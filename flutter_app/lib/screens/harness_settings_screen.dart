@@ -8,6 +8,7 @@ import '../config/app_config.dart';
 import '../utils/bridge_script_helper.dart';
 import '../services/sync_service.dart';
 import '../services/bridge_process_manager.dart';
+import 'scanner_screen.dart';
 
 class HarnessSettingsScreen extends StatefulWidget {
   const HarnessSettingsScreen({super.key});
@@ -33,8 +34,25 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   bool _isStartingBridge = false;
   /// 正在向服务端换发配对 Token（防止重复点击）
   bool _isRotatingToken = false;
-  // 桥接进程与退出监控已统一交给全局 BridgeProcessManager 管理，
+
+  /// 「启停 / 重置」这类会改变桥接状态的操作用它统一互斥。
+  ///
+  /// 为什么要跨到"状态真正切换完"才解锁：手机端点一下只是把指令丢给服务端，
+  /// 要等电脑端 App 下一次轮询（≤4 秒）执行、服务端再把 agentOnline 回传，
+  /// 界面才知道结果。此前的写法在 HTTP 请求返回后就立刻解锁，用户看着没反应
+  /// 就会连点 —— 于是 start/stop 指令一条接一条下发，桥接被反复启停。
+  bool get _isBridgeBusy => _isStartingBridge || _isRotatingToken;
+
+  /// 本次操作期望的最终在线状态；非 null 表示"正在切换中"。
+  bool? _bridgeSwitchTarget;
+  Timer? _bridgeSwitchWatchdog;
+  /// 切换看门狗的兜底时限：超过就解锁并提示，避免按钮永久卡住。
+  static const Duration _bridgeSwitchTimeout = Duration(seconds: 20);
+
+  /// 桥接进程与退出监控已统一交给全局 BridgeProcessManager 管理，
   // 本页面不再持有进程句柄（否则会与远端指令的执行路径产生两个进程）。
+  /// 页面初始化时抓住的 Provider 引用：dispose 阶段不能再走 context 查找。
+  SettingsProvider? _settingsProvider;
   List<String> _workspaces = ['deepseek-agent', 'workspace-main', 'dev-sandbox'];
   List<Map<String, dynamic>> _rawSessions = [];
   List<String> _filteredSessions = ['智能选择 / 自动新建会话 (推荐)'];
@@ -52,20 +70,99 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     return context.read<SettingsProvider>().settings.isHarnessOnline;
   }
 
-  /// 对 Token 进行脱敏展示（例如: sk-1234******************）
+  /// 对 Token 进行脱敏展示（例如: lx-oSdk******************）。
+  ///
+  /// 规则：保留「前缀 + 随机部分前 4 位」，其余全部用 `*` 盖掉。
+  /// 这样每次重新生成后，`lx-` 后面露出的 4 位随机字符必然变化 —— 用户一眼
+  /// 就能确认 Token 真的换了（旧版前缀恒为 sk-agent，脱敏后千篇一律）。
   static String _maskToken(String token) {
     final t = token.trim();
     if (t.isEmpty) return '';
-    if (t.startsWith('sk-')) {
-      final prefix = t.substring(0, t.length >= 7 ? 7 : t.length); // 保留 sk- 及前4位
-      return '$prefix${'*' * 18}';
-    } else if (t.startsWith('agent_')) {
-      final prefix = t.substring(0, t.length >= 10 ? 10 : t.length);
-      return '$prefix${'*' * 18}';
+    int prefixLen;
+    if (t.startsWith('lx-')) {
+      prefixLen = 3;
+    } else if (t.startsWith('sk-agent')) {
+      prefixLen = 8; // 历史 Token 格式，兼容展示
+    } else if (t.startsWith('sk-')) {
+      prefixLen = 3;
     } else {
-      final prefix = t.substring(0, t.length >= 4 ? 4 : t.length);
-      return '$prefix${'*' * 18}';
+      prefixLen = 0;
     }
+    final visibleEnd = (prefixLen + 4).clamp(0, t.length);
+    return '${t.substring(0, visibleEnd)}${'*' * 18}';
+  }
+
+  /// 等桥接状态真正切换到 [target] 后再解锁按钮；超时兜底解锁并提示。
+  void _armBridgeSwitchWatchdog(bool target) {
+    _bridgeSwitchWatchdog?.cancel();
+    _bridgeSwitchTarget = target;
+    final deadline = DateTime.now().add(_bridgeSwitchTimeout);
+    _bridgeSwitchWatchdog = Timer.periodic(const Duration(milliseconds: 500), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      final converged = _bridgeRunning == target;
+      if (!converged && DateTime.now().isBefore(deadline)) return;
+      timer.cancel();
+      if (!mounted) return;
+      setState(() {
+        _isStartingBridge = false;
+        _isRotatingToken = false;
+        _bridgeSwitchTarget = null;
+      });
+      if (!converged) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('状态切换超时未确认：请检查电脑端 LxAI 是否在运行、是否已登录同一账号'),
+            backgroundColor: Colors.orange,
+            duration: Duration(seconds: 5),
+          ),
+        );
+      }
+    });
+  }
+
+  /// 操作失败/无需等待时立刻解锁按钮。
+  void _releaseBridgeSwitch() {
+    _bridgeSwitchWatchdog?.cancel();
+    _bridgeSwitchWatchdog = null;
+    _bridgeSwitchTarget = null;
+    if (!mounted) return;
+    setState(() {
+      _isStartingBridge = false;
+      _isRotatingToken = false;
+    });
+  }
+
+  /// 打开扫一扫（与聊天界面工具栏里的「扫一扫」是同一个页面）。
+  Future<void> _openScanner() async {
+    final paired = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const ScannerScreen(),
+        fullscreenDialog: true,
+      ),
+    );
+    if (!mounted) return;
+    if (paired == true) {
+      // 配对成功后服务端会下发/换发 Token，主动拉一次状态并让显示跟着收敛
+      await context.read<SettingsProvider>().refreshAgentStatus();
+      if (!mounted) return;
+      _syncTokenFromProvider();
+    }
+  }
+
+  /// 让输入框里的 Token 始终等于设置里的当前值。
+  ///
+  /// 服务端换发 Token 后（本机重置、或另一端点重置）会经 4 秒轮询写入设置，
+  /// 此前本页的显示只在 initState 与手动重置时赋值，因此会一直停在旧值上，
+  /// 这也加重了"Token 好像从来没更新过"的错觉。
+  void _syncTokenFromProvider() {
+    if (!mounted) return;
+    final latest = (_settingsProvider?.settings.harnessToken ?? '').trim();
+    if (latest.isEmpty || latest == _tokenCtrl.text.trim()) return;
+    setState(() => _tokenCtrl.text = latest);
   }
 
   @override
@@ -104,6 +201,10 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     });
     _localWsUrlFocus.addListener(_handleFocusChange);
     _localAgentTokenFocus.addListener(_handleFocusChange);
+
+    // 服务端换发/下发 Token 时同步刷新本页显示（详见 _syncTokenFromProvider）
+    _settingsProvider = context.read<SettingsProvider>();
+    _settingsProvider!.addListener(_syncTokenFromProvider);
   }
 
   void _handleFocusChange() {
@@ -156,6 +257,8 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
 
   @override
   void dispose() {
+    _bridgeSwitchWatchdog?.cancel();
+    _settingsProvider?.removeListener(_syncTokenFromProvider);
     _saveSilently();
     _tokenFocus.dispose();
     _harnessUrlFocus.dispose();
@@ -240,6 +343,10 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   /// 换发后若桥接进程仍在运行，它会继续用旧 token 连接（表现为"界面显示新 token
   /// 但电脑端仍是旧 token、手机连不上"），因此必须同步重启桥接。
   Future<void> _rotateToken(SettingsProvider sp) async {
+    // 状态切换期间禁止重复点击：连点会连续换发 Token 并连发重启指令，
+    // 桥接被反复踢下线又拉起，最终谁也没连上。
+    if (_isBridgeBusy) return;
+
     final s = sp.settings;
     final oldToken = s.harnessToken.trim();
 
@@ -265,6 +372,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
             backgroundColor: Colors.redAccent,
           ),
         );
+        _releaseBridgeSwitch();
         return;
       }
 
@@ -273,6 +381,13 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         s.harnessToken = newToken;
       });
       sp.updateSettings(s);
+
+      if (bridgeWasRunning) {
+        // 桥接要带着新 Token 重新上线，等它真的回到在线状态再解锁按钮。
+        _armBridgeSwitchWatchdog(true);
+      } else {
+        _armBridgeSwitchWatchdog(false);
+      }
 
       if (bridgeWasRunning && isDesktop) {
         // 电脑端重置：直接用服务端换发的新 token 重启桥接（App 托管场景下
@@ -298,6 +413,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
           command: 'restart',
         );
         if (!mounted) return;
+        if (!ok) _releaseBridgeSwitch();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -314,8 +430,13 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
           const SnackBar(content: Text('🔑 配对 Token 已更新（桥接未运行，下次启动将使用新 Token）')),
         );
       }
-    } finally {
-      if (mounted) setState(() => _isRotatingToken = false);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('换发异常: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+      _releaseBridgeSwitch();
     }
   }
   /// 启停桥接。
@@ -327,12 +448,19 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   /// 手机端点到这个按钮时无法直接操作电脑上的脚本，因此改为把指令交给服务端，
   /// 由电脑端 App 在会话轮询（≤4 秒）中取走并在本机执行。
   Future<void> _toggleHeadlessBridge(String token, String harnessUrl) async {
+    // 状态切换（含重置 Token）未完成前一律不接受新的点击：
+    // 连点会连发 start/stop，桥接被反复启停，最后停在哪个状态全凭运气。
+    if (_isBridgeBusy) return;
+
     final manager = BridgeProcessManager.instance;
     final isDesktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
     final normalizedHarness = harnessUrl.trim().isEmpty ? '127.0.0.1:3080' : harnessUrl.trim();
 
     setState(() => _isStartingBridge = true);
     try {
+      // 期望终态：点了「停止」就是要离线，点了「启动」就是要在线。
+      final target = !_bridgeRunning;
+
       if (!isDesktop) {
         // 手机端：按电脑端 Agent 的在线状态决定下发 start 还是 stop
         final sp = context.read<SettingsProvider>();
@@ -343,6 +471,12 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
           command: command,
         );
         if (!mounted) return;
+        // 指令只是"排上队"，要等电脑端执行 + 轮询回传，状态才算真的变。
+        if (ok) {
+          _armBridgeSwitchWatchdog(target);
+        } else {
+          _releaseBridgeSwitch();
+        }
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
@@ -357,12 +491,19 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       }
 
       // 电脑端：本地直接启停
+      bool ok;
       if (manager.isRunning) {
         await manager.stop();
+        ok = true;
       } else {
-        await manager.start(token: token, harnessUrl: normalizedHarness);
+        ok = await manager.start(token: token, harnessUrl: normalizedHarness);
       }
       if (!mounted) return;
+      if (ok) {
+        _armBridgeSwitchWatchdog(target);
+      } else {
+        _releaseBridgeSwitch();
+      }
       final msg = manager.takeMessage();
       if (msg != null) {
         final launched = manager.isRunning && !manager.lastMessageIsError;
@@ -375,12 +516,17 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
           ),
         );
       }
-      // 启动后 2 秒静默自检连接状态
+      // 启动后 2 秒静默自检连接状态（也会让看门狗更快确认到位）
       Future.delayed(const Duration(seconds: 2), () {
         if (mounted) context.read<SettingsProvider>().refreshAgentStatus();
       });
-    } finally {
-      if (mounted) setState(() => _isStartingBridge = false);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('启停异常: $e'), backgroundColor: Colors.redAccent),
+        );
+      }
+      _releaseBridgeSwitch();
     }
   }
   void _showQrScanPairingDialog() {
@@ -521,6 +667,16 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('DeepSeek Harness 设置'),
+        actions: [
+          // 与聊天界面工具栏里的「扫一扫」是同一个页面（ScannerScreen），
+          // 这里只是多一个入口：扫码配对后不用再退回聊天页去扫。
+          IconButton(
+            icon: const Icon(Icons.qr_code_scanner_rounded),
+            tooltip: '扫一扫',
+            onPressed: _isBridgeBusy ? null : _openScanner,
+          ),
+          const SizedBox(width: 4),
+        ],
       ),
       body: GestureDetector(
         behavior: HitTestBehavior.translucent,
@@ -621,11 +777,25 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                               ),
                             ),
                             const SizedBox(width: 8),
-                            _isStartingBridge
-                                ? const SizedBox(
-                                    width: 24,
-                                    height: 24,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
+                            _isBridgeBusy
+                                ? Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(strokeWidth: 2),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        // 明确告诉用户"在等什么"，否则按钮变灰会被当成卡死
+                                        _bridgeSwitchTarget == false ? '正在停止…' : '正在上线…',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      ),
+                                    ],
                                   )
                                 : ElevatedButton.icon(
                                     style: ElevatedButton.styleFrom(
@@ -697,7 +867,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         IconButton(
                           icon: const Icon(Icons.refresh),
                           tooltip: '重新生成配对 Token',
-                          onPressed: _isRotatingToken ? null : () => _rotateToken(sp),
+                          onPressed: _isBridgeBusy ? null : () => _rotateToken(sp),
                         ),
                         IconButton(
                           icon: const Icon(Icons.copy),
