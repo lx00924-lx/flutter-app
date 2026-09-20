@@ -75,12 +75,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   /// 页面初始化时抓住的 Provider 引用：dispose 阶段不能再走 context 查找。
   SettingsProvider? _settingsProvider;
 
-  /// 「新建会话」选项的值（下拉里与真实会话 id 区分开）。
-  ///
-  /// 含义：**现在就去电脑端建一个新会话并选中它**，之后的每条消息都发进这个
-  /// 会话；旧版的「智能选择 / 自动新建会话」是每条消息都让服务端另建一个，
-  /// 于是每问一句就多出一个新会话。
-  static const String _kNewSessionOption = '__lx_new_session__';
+  /// 当前选中的会话 id（'' 表示尚未选择/未取到列表）。
   String _selectedSessionId = '';
 
   /// 桥接是否在运行。
@@ -254,14 +249,12 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     return sp.sessionsForWorkspace(_workspaceCtrl.text.trim());
   }
 
-  /// 下拉里展示的会话选项：第一项固定是「新建会话」，其余是真实会话。
+  /// 下拉里展示的会话选项：只列电脑端真实存在的会话。
+  ///
+  /// 「新建会话」不再混在下拉里当选项 —— 它是动作而不是可选项，混在一起既容易
+  /// 被误当成"当前选中"，也没法在建的时候给会话起名字。现在改成旁边的独立按钮。
   List<DropdownMenuItem<String>> _sessionItems() {
-    final items = <DropdownMenuItem<String>>[
-      const DropdownMenuItem(
-        value: _kNewSessionOption,
-        child: Text('新建会话', style: TextStyle(fontSize: 13)),
-      ),
-    ];
+    final items = <DropdownMenuItem<String>>[];
     for (final sess in _sessionsForCurrentWorkspace()) {
       final id = sess['id']?.toString().trim() ?? '';
       if (id.isEmpty) continue;
@@ -281,17 +274,65 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
 
   /// 会话下拉的当前值：必须落在选项里，否则 Flutter 会断言失败。
   String? _sessionDropdownValue() {
-    final items = _sessionItems();
-    if (_selectedSessionId.isEmpty) return _kNewSessionOption;
-    for (final it in items) {
+    if (_selectedSessionId.isEmpty) return null;
+    for (final it in _sessionItems()) {
       if (it.value == _selectedSessionId) return _selectedSessionId;
     }
-    // 已选会话不在当前工作区的列表里（例如换了工作区）：退回「新建会话」，
-    // 但不偷偷改写用户的选择，等他自己确认。
-    return _kNewSessionOption;
+    // 已选会话不在当前列表里（例如换了工作区）：显示为空，不偷偷改写用户的选择
+    return null;
   }
 
-  /// 选中「新建会话」→ 立刻在电脑端建一个并选中它。
+  /// 弹出输入框，问一个会话名字（可留空，留空则由电脑端自动命名）。
+  Future<String?> _promptSessionName() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.create_new_folder_outlined, color: Color(0xFF0284C7)),
+            SizedBox(width: 8),
+            Text('新建会话', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              _workspaceCtrl.text.trim().isEmpty
+                  ? '将使用电脑端默认工作区'
+                  : '工作区：${_workspaceCtrl.text.trim()}',
+              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              maxLength: 40,
+              decoration: const InputDecoration(
+                labelText: '会话名称',
+                hintText: '例如：登录页重构（留空则自动命名）',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              onSubmitted: (_) => Navigator.pop(ctx, true),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('创建')),
+        ],
+      ),
+    );
+    final name = ctrl.text.trim();
+    ctrl.dispose();
+    if (ok != true) return null;
+    return name; // 空字符串表示"让电脑端自动命名"
+  }
+
+  /// 新建会话：先问名字，再到电脑端真建一个并选中它。
   ///
   /// 这样后续每条消息都发进同一个会话；旧逻辑是每条消息都让服务端另建一个，
   /// 于是每问一句就多出一个空会话。
@@ -300,10 +341,12 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       _snack('电脑端桥接未在线，无法新建会话：请先启动桥接', isError: true);
       return;
     }
+    final title = await _promptSessionName();
+    if (title == null || !mounted) return; // 用户取消
     final workspace = _workspaceCtrl.text.trim();
     setState(() => _isCreatingSession = true);
     try {
-      final newId = await sp.createAgentSessionOnPc(workspace: workspace);
+      final newId = await sp.createAgentSessionOnPc(workspace: workspace, title: title);
       if (!mounted) return;
       if (newId == null) {
         // 保留原选择，不写任何伪造的 id —— 否则发消息必然失败
@@ -327,6 +370,41 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         backgroundColor: isError ? Colors.redAccent : Colors.green,
       ),
     );
+  }
+
+  /// 把「思考深度 / 执行权限」立即下发到电脑端当前会话。
+  ///
+  /// 以前这两项只在下一轮对话开始时由桥接顺带带给 DSH，而且失败会被静默吞掉，
+  /// 用户看到的就是"选了没反应"。现在即时下发，并把真实失败原因弹出来。
+  Future<void> _applySessionOption({required String kind}) async {
+    final sp = _settingsProvider;
+    if (sp == null) return;
+    final s = sp.settings;
+    final sessionId = _selectedSessionId.trim().isEmpty
+        ? s.targetSessionId.trim()
+        : _selectedSessionId.trim();
+    if (sessionId.isEmpty) {
+      // 还没选会话：下一轮对话会带上这个设置，不算错
+      _snack(kind == 'permission' ? '权限已保存，将在下一条消息生效' : '思考深度已保存，将在下一条消息生效',
+          isError: false);
+      return;
+    }
+    final res = await SyncService.instance.applyAgentSessionOption(
+      token: s.harnessToken,
+      userId: sp.syncUserId,
+      kind: kind,
+      sessionId: sessionId,
+      permission: s.agentPermission,
+      reasoningEffort: s.agentReasoningEffort,
+      model: s.agentModel,
+      harnessUrl: s.harnessServiceUrl,
+    );
+    if (!mounted) return;
+    if (res.ok) {
+      _snack(kind == 'permission' ? '🔐 已切换电脑端会话权限' : '🧠 已切换电脑端思考深度', isError: false);
+    } else {
+      _snack('切换失败：${res.message}', isError: true);
+    }
   }
 
   void _saveSilently() {
@@ -1096,6 +1174,9 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         if (val != null) {
                           s.agentReasoningEffort = val;
                           sp.updateSettings(s);
+                          // 立即下发到电脑端当前会话（插件提供 /v1/session/model），
+                          // 不必等下一轮对话；失败会把原因弹出来
+                          unawaited(_applySessionOption(kind: 'model'));
                         }
                       },
                     ),
@@ -1110,14 +1191,27 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         helperText: '本地执行高危命令或文件修改时的防护策略',
                       ),
                       items: const [
-                        DropdownMenuItem(value: 'ask', child: Text('安全拦截 - 敏感操作每次弹窗确认 (推荐)')),
-                        DropdownMenuItem(value: 'auto_allow', child: Text('自治执行 - 自动放行白名单内操作')),
-                        DropdownMenuItem(value: 'read_only', child: Text('只读审查 - 仅允许读取，禁止修改/写入')),
+                        // 取值必须是 DSH 真实存在的「权限预设 id」——
+                        // 此前填的 ask / auto_allow / read_only 在 DSH 里都不存在，
+                        // 插件下发 /permission 后 DSH 直接返回 unknown preset，
+                        // 表现就是"权限怎么选都没反应"。默认部署只有下面两个预设
+                        // （见 dsh-permission-presets 的 presets 配置）。
+                        DropdownMenuItem(
+                          value: 'workspace-write',
+                          child: Text('工作区可写 - 沙箱内可写，越界操作需确认 (默认)'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'danger-full-access',
+                          child: Text('完全访问 - 不做沙箱限制、不再弹窗确认'),
+                        ),
                       ],
                       onChanged: (val) {
                         if (val != null) {
                           s.agentPermission = val;
                           sp.updateSettings(s);
+                          // 立即下发权限预设（插件 /v1/session/permission）；
+                          // 取值必须是 DSH 真实预设名，否则 DSH 会回 unknown preset
+                          unawaited(_applySessionOption(kind: 'permission'));
                         }
                       },
                     ),
@@ -1205,31 +1299,50 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                       },
                     ),
                     const SizedBox(height: 14),
-                    // 目标会话下拉（联动当前工作区）
-                    DropdownButtonFormField<String>(
-                      value: _sessionDropdownValue(),
-                      isExpanded: true,
-                      decoration: InputDecoration(
-                        labelText: '目标会话 (已联动当前工作区)',
-                        border: const OutlineInputBorder(),
-                        isDense: true,
-                        helperText: _isCreatingSession
-                            ? '正在电脑端新建会话…'
-                            : '选「新建会话」会立刻建一个并选中它，之后的消息都发进这个会话',
-                      ),
-                      items: _sessionItems(),
-                      onChanged: (_isCreatingSession || _isBridgeBusy)
-                          ? null
-                          : (val) {
-                              if (val == null) return;
-                              if (val == _kNewSessionOption) {
-                                unawaited(_createAndSelectSession(sp));
-                                return;
-                              }
-                              setState(() => _selectedSessionId = val);
-                              s.targetSessionId = val;
-                              sp.updateSettings(s);
-                            },
+                    // 目标会话：下拉只列真实会话，新建走右边的独立按钮
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: DropdownButtonFormField<String>(
+                            value: _sessionDropdownValue(),
+                            isExpanded: true,
+                            decoration: InputDecoration(
+                              labelText: '目标会话 (已联动当前工作区)',
+                              border: const OutlineInputBorder(),
+                              isDense: true,
+                              hintText: _sessionItems().isEmpty ? '暂无会话（点右侧「新建会话」）' : '请选择会话',
+                              helperText: _isCreatingSession ? '正在电脑端新建会话…' : '选中的会话会一直沿用，不会每条消息新建',
+                            ),
+                            items: _sessionItems(),
+                            onChanged: (_isCreatingSession || _isBridgeBusy)
+                                ? null
+                                : (val) {
+                                    if (val == null) return;
+                                    setState(() => _selectedSessionId = val);
+                                    s.targetSessionId = val;
+                                    sp.updateSettings(s);
+                                  },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          height: 48,
+                          child: OutlinedButton.icon(
+                            icon: _isCreatingSession
+                                ? const SizedBox(
+                                    width: 13,
+                                    height: 13,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  )
+                                : const Icon(Icons.add, size: 16),
+                            label: const Text('新建会话', style: TextStyle(fontSize: 12)),
+                            onPressed: (_isCreatingSession || _isBridgeBusy)
+                                ? null
+                                : () => _createAndSelectSession(sp),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),

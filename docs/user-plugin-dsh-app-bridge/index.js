@@ -655,6 +655,84 @@ export function apply(ctx) {
     if (pathname === '/v1/agent/prompt' && method === 'POST') return promptSync(await body(request))
     if (pathname === '/v1/agent/prompt/stream' && method === 'POST') return promptStream(await body(request))
 
+    // ── 权限预设：列出 + 立即切换 ───────────────────────────────
+    //
+    // 为什么需要专门的接口：原先"切权限"只是把 /permission <值> 塞进下一轮对话，
+    // 而且值一旦不是真实预设，DSH 会回 unknown preset 并被静默吞掉 ——
+    // App 上改了看着像生效，其实什么都没发生（旧版 App 填的 ask/auto_allow/
+    // read_only 全都不是合法预设名）。这里把可用预设列出来，并在切换时**立即**
+    // 下发、把失败原因如实带回 App。
+    if (pathname === '/v1/permission-presets' && method === 'GET') {
+      const service = ctx.get('permissionPresets')
+      const names = Array.isArray(service?.names) ? service.names : []
+      return json(200, {
+        status: 'success',
+        presets: names.map((id) => ({
+          id,
+          name: service?.presets?.[id]?.name ?? id,
+          description: service?.presets?.[id]?.description ?? '',
+          sandbox: service?.presets?.[id]?.sandbox,
+          approval: service?.presets?.[id]?.approval,
+        })),
+      })
+    }
+
+    if (pathname === '/v1/session/permission' && method === 'POST') {
+      const input = await body(request)
+      const sessionId = readSessionId(input.sessionId)
+      if (sessionId === undefined) return json(400, { status: 'error', error: { code: 'bad-id', message: '缺少 sessionId' } })
+      if (sessions() === undefined) return json(503, { status: 'error', error: { code: 'unavailable', message: 'sessions() 缺失' } })
+      const preset = typeof input.preset === 'string' ? input.preset.trim() : ''
+      const service = ctx.get('permissionPresets')
+      const names = Array.isArray(service?.names) ? service.names : []
+      if (preset.length === 0) return json(400, { status: 'error', error: { code: 'bad-preset', message: '缺少 preset' } })
+      if (names.length > 0 && !names.includes(preset)) {
+        return json(400, {
+          status: 'error',
+          error: { code: 'unknown-preset', message: `未知权限预设 "${preset}"（可用：${names.join(', ')}）` },
+        })
+      }
+      // 与 /permission 命令同一路径：往该会话排一条命令，DSH 会真正切换预设
+      await sessions().prompt({
+        requestId: randomUUID(),
+        sessionId,
+        mode: 'queue',
+        content: [{ type: 'text', text: `/permission ${preset}` }],
+      }, turnSignal())
+      return json(200, { status: 'success', sessionId, preset, applied: true })
+    }
+
+    // ── 思考深度：立即切换（不必等下一轮对话才生效）─────────────
+    if (pathname === '/v1/session/model' && method === 'POST') {
+      const input = await body(request)
+      const sessionId = readSessionId(input.sessionId)
+      if (sessionId === undefined) return json(400, { status: 'error', error: { code: 'bad-id', message: '缺少 sessionId' } })
+      if (sessions() === undefined) return json(503, { status: 'error', error: { code: 'unavailable', message: 'sessions() 缺失' } })
+      const effort = input.reasoningEffort ?? input.reasoning_effort
+      const model = typeof input.model === 'string' && input.model.length > 0 ? input.model : undefined
+      const provider = typeof input.provider === 'string' && input.provider.length > 0
+        ? input.provider
+        : await providerOf(model ?? '')
+      if (provider === undefined && model === undefined) {
+        return json(400, { status: 'error', error: { code: 'bad-model', message: '需要 provider 或 model' } })
+      }
+      try {
+        const selected = await sessions().selectModel({
+          sessionId,
+          ...(provider === undefined ? {} : { provider }),
+          ...(model === undefined ? {} : { model }),
+          ...(typeof effort === 'string' && effort.length > 0 && effort !== 'default' ? { reasoningEffort: effort } : {}),
+        })
+        return json(200, { status: 'success', sessionId, selected })
+      } catch (error) {
+        // 这里不再 swallow：把真实原因带回 App，用户才知道为什么没切过去
+        return json(400, {
+          status: 'error',
+          error: { code: 'select-model-failed', message: String(error?.message ?? error) },
+        })
+      }
+    }
+
     // /v1/sessions/<id>[/abort|/approve]
     if (pathname.startsWith('/v1/sessions/')) {
       const rest = pathname.slice('/v1/sessions/'.length)

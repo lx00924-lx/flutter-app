@@ -2535,6 +2535,144 @@ if %errorlevel% neq 0 (
     res.json({ success: true });
   });
 
+  /**
+   * 通过中继把「立即切换权限预设 / 思考深度」转发给本地桥接，并把结果原样带回。
+   *
+   * 为什么要单独做：以前这两项只在"下一轮对话开始时"由桥接顺手带给 DSH，
+   * 而且失败会被静默吞掉 —— App 上点了看着像生效，实际没变。现在按需即时下发，
+   * 成功/失败都能回到界面。
+   */
+  app.post("/api/agent/session-option", async (req, res) => {
+    try {
+      const { token, userId, kind, sessionId, permission, reasoningEffort, model } = req.body || {};
+      const targetToken = (token || "").trim();
+      if (!isPlausibleAgentToken(targetToken)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
+      const ownerId = await resolveTokenOwnerUserId(targetToken);
+      if (!ownerId || (userId && String(userId).trim() && String(userId).trim() !== ownerId)) {
+        return res.status(403).json({ error: "该 Token 不属于当前账号" });
+      }
+      const agent = connectedAgents.get(targetToken);
+      if (!agent || !agent.ws || agent.ws.readyState !== WSWebSocket.OPEN) {
+        return res.status(503).json({ success: false, error: "电脑端桥接未在线，无法即时切换" });
+      }
+      const sid = (sessionId || "").toString().trim();
+      if (!sid) {
+        return res.status(400).json({ success: false, error: "缺少 sessionId：请先选择或新建会话" });
+      }
+
+      let wantType: string;
+      let payload: Record<string, any>;
+      let wantResult: string;
+      if (kind === "permission") {
+        wantType = "apply_session_permission";
+        wantResult = "apply_session_permission_result";
+        payload = { permission: (permission || "").toString().trim() };
+      } else if (kind === "model") {
+        wantType = "apply_session_model";
+        wantResult = "apply_session_model_result";
+        payload = {
+          model: (model || "").toString().trim(),
+          reasoningEffort: (reasoningEffort || "").toString().trim(),
+        };
+      } else {
+        return res.status(400).json({ success: false, error: `不支持的 kind：${kind}（可选 permission / model）` });
+      }
+
+      const taskId = `apply_${kind}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      const resultPromise = new Promise<any>((resolve) => {
+        const timeout = setTimeout(() => {
+          agent.ws?.off("message", listener);
+          resolve({ success: false, message: "电脑端响应超时" });
+        }, 8000);
+        const listener = (raw: any) => {
+          try {
+            const msg = JSON.parse(raw.toString());
+            if (msg.type === wantResult && (msg.taskId === taskId || !msg.taskId)) {
+              clearTimeout(timeout);
+              agent.ws?.off("message", listener);
+              resolve(msg);
+            }
+          } catch {}
+        };
+        agent.ws?.on("message", listener);
+      });
+
+      agent.ws.send(JSON.stringify({
+        type: wantType,
+        taskId,
+        sessionId: sid,
+        harnessUrl: (req.body?.harnessUrl || "http://127.0.0.1:3080").toString(),
+        ...payload,
+      }));
+
+      const result = await resultPromise;
+      console.log(
+        `[Agent Hub] 即时切换 ${kind}（会话 ${sid}）→ ${result.success ? "成功" : "失败"}：${result.message ?? ""}`,
+      );
+      if (!result.success) {
+        return res.status(502).json({ success: false, error: result.message || "本地 DSH 未接受该设置" });
+      }
+      return res.json({ success: true, kind, sessionId: sid, message: result.message ?? "" });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || "切换失败" });
+    }
+  });
+
+  /**
+   * 读取电脑端真实可用的权限预设列表（由本地 DSH 的 permissionPresets 提供）。
+   * App 据此显示真实可选项，避免再出现"填了一个 DSH 不认识的值"。
+   */
+  app.get("/api/agent/permission-presets", async (req, res) => {
+    try {
+      const targetToken = ((req.query.token || "") as string).trim();
+      const userId = ((req.query.userId || "") as string).trim();
+      if (!isPlausibleAgentToken(targetToken)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
+      const ownerId = await resolveTokenOwnerUserId(targetToken);
+      if (!ownerId || (userId && userId !== ownerId)) {
+        return res.status(403).json({ error: "该 Token 不属于当前账号" });
+      }
+      const agent = connectedAgents.get(targetToken);
+      if (!agent || !agent.ws || agent.ws.readyState !== WSWebSocket.OPEN) {
+        return res.json({ success: false, online: false, presets: [] });
+      }
+      const taskId = `presets_${Date.now()}`;
+      const resultPromise = new Promise<any>((resolve) => {
+        const timeout = setTimeout(() => {
+          agent.ws?.off("message", listener);
+          resolve({ success: false, presets: [] });
+        }, 6000);
+        const listener = (raw: any) => {
+          try {
+            const msg = JSON.parse(raw.toString());
+            if (msg.type === "permission_presets_result" && (msg.taskId === taskId || !msg.taskId)) {
+              clearTimeout(timeout);
+              agent.ws?.off("message", listener);
+              resolve(msg);
+            }
+          } catch {}
+        };
+        agent.ws?.on("message", listener);
+      });
+      agent.ws.send(JSON.stringify({
+        type: "get_permission_presets",
+        taskId,
+        harnessUrl: "http://127.0.0.1:3080",
+      }));
+      const result = await resultPromise;
+      res.json({
+        success: result.success === true,
+        online: true,
+        presets: Array.isArray(result.presets) ? result.presets : [],
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || "读取权限预设失败" });
+    }
+  });
+
   // Create new session in local DeepSeek Harness via bridge
   app.post("/api/agent/create-session", async (req, res) => {
     try {

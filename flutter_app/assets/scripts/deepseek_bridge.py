@@ -1093,6 +1093,99 @@ async def rename_dsh_session(harness_url: str, session_id: str, title: str):
             continue
     return False, "重命名失败"
 
+async def apply_dsh_session_permission(harness_url: str, session_id: str, preset: str):
+    """
+    立即切换某个 DSH 会话的权限预设 (POST /v1/session/permission)。
+
+    为什么单独做一个接口：以前只有"下一轮对话开始时顺手塞一条 /permission"，
+    而且预设名不合法时 DSH 会返回 unknown preset 被静默吞掉 —— App 上改了
+    看起来像生效，实际什么都没变。这里把结果（含失败原因）原样带回。
+    """
+    if not session_id or not preset:
+        return False, "缺少会话ID或权限预设"
+    harness_base = harness_url.rstrip("/")
+    loop = asyncio.get_running_loop()
+    candidates = [f"{harness_base}/v1/session/permission"]
+    if "3080" in harness_base:
+        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/session/permission")
+
+    for url in candidates:
+        def do_post():
+            req = urllib.request.Request(
+                url,
+                data=json.dumps({"sessionId": session_id, "preset": preset}).encode("utf-8"),
+                headers=dsh_headers(url, {"Content-Type": "application/json; charset=utf-8"}),
+                method="POST"
+            )
+            with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=6) as resp:
+                return resp.read().decode("utf-8")
+        try:
+            raw = await loop.run_in_executor(None, do_post)
+            return True, raw
+        except Exception:
+            continue
+    return False, "权限切换失败：本地 DSH 未响应（可能插件版本过旧，缺少 /v1/session/permission）"
+
+async def apply_dsh_session_model(harness_url: str, session_id: str, model: str, reasoning_effort: str):
+    """
+    立即切换某个 DSH 会话的模型档位/思考深度 (POST /v1/session/model)。
+
+    对应 DSH 的 sessionController.selectModel —— 官方接口，不需要重启会话即可
+    生效；以前只在"下一轮对话开始时"调用一次，所以 App 上切换看着不实时。
+    """
+    if not session_id:
+        return False, "缺少会话ID"
+    harness_base = harness_url.rstrip("/")
+    loop = asyncio.get_running_loop()
+    candidates = [f"{harness_base}/v1/session/model"]
+    if "3080" in harness_base:
+        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/session/model")
+
+    body = {"sessionId": session_id}
+    if model:
+        body["model"] = model
+    if reasoning_effort and reasoning_effort != "default":
+        body["reasoningEffort"] = reasoning_effort
+
+    for url in candidates:
+        def do_post():
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers=dsh_headers(url, {"Content-Type": "application/json; charset=utf-8"}),
+                method="POST"
+            )
+            with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=6) as resp:
+                return resp.read().decode("utf-8")
+        try:
+            raw = await loop.run_in_executor(None, do_post)
+            return True, raw
+        except Exception:
+            continue
+    return False, "思考深度切换失败：本地 DSH 未响应（可能插件版本过旧，缺少 /v1/session/model）"
+
+async def query_dsh_permission_presets(harness_url: str):
+    """读取本地 DSH 真实可用的权限预设列表 (GET /v1/permission-presets)。"""
+    harness_base = harness_url.rstrip("/")
+    loop = asyncio.get_running_loop()
+    candidates = [f"{harness_base}/v1/permission-presets"]
+    if "3080" in harness_base:
+        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/permission-presets")
+    for url in candidates:
+        def do_get():
+            req = urllib.request.Request(url, headers=dsh_headers(url), method="GET")
+            with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=5) as resp:
+                return resp.read().decode("utf-8")
+        try:
+            raw = await loop.run_in_executor(None, do_get)
+            parsed = json.loads(raw)
+            presets = parsed.get("presets") if isinstance(parsed, dict) else None
+            if isinstance(presets, list):
+                return True, presets
+        except Exception:
+            continue
+    return False, []
+
 async def archive_dsh_session(harness_url: str, session_id: str):
     """归档本地 DSH 会话 (DELETE /v1/sessions/:id)"""
     if not session_id:
@@ -2326,6 +2419,49 @@ async def run_bridge_client(args):
                                 "session": session_obj,
                                 "workspaces": cur_workspaces,
                                 "sessions": cur_sessions
+                            }))
+                            continue
+
+                        if mtype == "apply_session_permission":
+                            perm_task_id = msg.get("taskId")
+                            perm_session = msg.get("sessionId") or msg.get("agentSessionId") or ""
+                            perm_preset = msg.get("permission") or msg.get("preset") or ""
+                            perm_h_url = msg.get("harnessUrl", args.harness_url)
+                            p_ok, p_res = await apply_dsh_session_permission(perm_h_url, perm_session, perm_preset)
+                            await ws.send(json.dumps({
+                                "type": "apply_session_permission_result",
+                                "taskId": perm_task_id,
+                                "success": p_ok,
+                                "preset": perm_preset,
+                                "message": p_res if isinstance(p_res, str) else json.dumps(p_res, ensure_ascii=False)
+                            }))
+                            continue
+
+                        if mtype == "apply_session_model":
+                            mdl_task_id = msg.get("taskId")
+                            mdl_session = msg.get("sessionId") or msg.get("agentSessionId") or ""
+                            mdl_model = msg.get("model") or ""
+                            mdl_effort = msg.get("reasoningEffort") or msg.get("reasoning_effort") or ""
+                            mdl_h_url = msg.get("harnessUrl", args.harness_url)
+                            m_ok, m_res = await apply_dsh_session_model(mdl_h_url, mdl_session, mdl_model, mdl_effort)
+                            await ws.send(json.dumps({
+                                "type": "apply_session_model_result",
+                                "taskId": mdl_task_id,
+                                "success": m_ok,
+                                "reasoningEffort": mdl_effort,
+                                "message": m_res if isinstance(m_res, str) else json.dumps(m_res, ensure_ascii=False)
+                            }))
+                            continue
+
+                        if mtype == "get_permission_presets":
+                            gp_task_id = msg.get("taskId")
+                            gp_h_url = msg.get("harnessUrl", args.harness_url)
+                            gp_ok, gp_presets = await query_dsh_permission_presets(gp_h_url)
+                            await ws.send(json.dumps({
+                                "type": "permission_presets_result",
+                                "taskId": gp_task_id,
+                                "success": gp_ok,
+                                "presets": gp_presets
                             }))
                             continue
 

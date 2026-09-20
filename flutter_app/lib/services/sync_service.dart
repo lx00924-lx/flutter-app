@@ -792,6 +792,75 @@ class SyncService {
     }
   }
 
+  /// 立即把「权限预设 / 思考深度」下发到电脑端当前会话（不必等下一轮对话）。
+  ///
+  /// [kind] 为 'permission' 或 'model'。返回 (是否成功, 失败原因)。
+  /// 电脑端插件版本过旧、桥接离线、预设名不合法等都会以失败原因返回，
+  /// 不再"看着像生效其实没变"。
+  Future<({bool ok, String message})> applyAgentSessionOption({
+    required String token,
+    required String userId,
+    required String kind,
+    required String sessionId,
+    String permission = '',
+    String reasoningEffort = '',
+    String model = '',
+    String harnessUrl = '',
+  }) async {
+    final cleanToken = token.trim();
+    if (cleanToken.isEmpty) return (ok: false, message: '缺少配对 Token');
+    try {
+      final resp = await _dio.post(
+        '$serverBaseUrl/api/agent/session-option',
+        data: {
+          'token': cleanToken,
+          'userId': userId.trim(),
+          'kind': kind,
+          'sessionId': sessionId.trim(),
+          if (permission.isNotEmpty) 'permission': permission,
+          if (reasoningEffort.isNotEmpty) 'reasoningEffort': reasoningEffort,
+          if (model.isNotEmpty) 'model': model,
+          if (harnessUrl.isNotEmpty) 'harnessUrl': harnessUrl,
+        },
+      );
+      if (resp.statusCode == 200 && resp.data is Map && resp.data['success'] == true) {
+        return (ok: true, message: resp.data['message']?.toString() ?? '');
+      }
+      return (ok: false, message: resp.data is Map ? (resp.data['error']?.toString() ?? '切换失败') : '切换失败');
+    } on DioException catch (e) {
+      final data = e.response?.data;
+      final msg = (data is Map ? data['error']?.toString() : null) ?? e.message ?? '网络异常';
+      debugPrint('[SyncService] applyAgentSessionOption($kind) 失败: $msg');
+      return (ok: false, message: msg);
+    } catch (e) {
+      debugPrint('[SyncService] applyAgentSessionOption($kind) 异常: $e');
+      return (ok: false, message: '$e');
+    }
+  }
+
+  /// 获取电脑端真实可用的权限预设列表（插件提供，取不到则返回空）。
+  Future<List<Map<String, dynamic>>> fetchPermissionPresets({
+    required String token,
+    String userId = '',
+  }) async {
+    final cleanToken = token.trim();
+    if (cleanToken.isEmpty) return const [];
+    try {
+      final resp = await _dio.get(
+        '$serverBaseUrl/api/agent/permission-presets'
+        '?token=${Uri.encodeComponent(cleanToken)}'
+        '&userId=${Uri.encodeComponent(userId.trim())}',
+      );
+      final presets = (resp.data is Map) ? resp.data['presets'] : null;
+      if (presets is List) {
+        return presets.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+      }
+    } catch (e) {
+      debugPrint('[SyncService] fetchPermissionPresets error: $e');
+    }
+    return const [];
+  }
+
   /// 换发 Agent 配对 Token（服务端为唯一真源）。
   ///
   /// "重新生成"必须调用它而不是本地随机：服务端会生成新 token、踢掉旧连接，

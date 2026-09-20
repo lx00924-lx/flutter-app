@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/settings_provider.dart';
+import '../services/sync_service.dart';
 
 /// 聊天输入框上方的「Agent 快捷栏」。
 ///
@@ -22,8 +25,6 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
   bool _isCreatingSession = false;
   bool _requestedCatalog = false;
 
-  static const String _newSessionOption = '__lx_new_session__';
-
   static const Map<String, String> _reasoningLabels = {
     'high': '高',
     'medium': '中',
@@ -31,9 +32,10 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
   };
 
   static const Map<String, String> _permissionLabels = {
-    'read-only': '只读',
+    // DSH 真实存在的权限预设 id（默认部署只有这两个），
+    // 以前填 read-only / full-access 这类不存在的值，DSH 会直接回 unknown preset
     'workspace-write': '工作区可写',
-    'full-access': '完全访问',
+    'danger-full-access': '完全访问',
   };
 
   @override
@@ -65,26 +67,28 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
 
   Future<void> _pickSession(String value) async {
     final sp = context.read<SettingsProvider>();
-    if (value != _newSessionOption) {
-      final s = sp.settings;
-      s.targetSessionId = value;
-      sp.updateSettings(s);
-      setState(() {});
-      return;
-    }
-    await _createSession();
+    if (value.isEmpty) return;
+    final s = sp.settings;
+    s.targetSessionId = value;
+    sp.updateSettings(s);
+    setState(() {});
   }
 
-  /// 「新建会话」：立刻在电脑端建一个并选中，之后消息都发进它。
+  /// 「新建会话」：先问名字，再在电脑端建一个并选中，之后消息都发进它。
   Future<void> _createSession() async {
     final sp = context.read<SettingsProvider>();
     if (sp.settings.isHarnessOnline != true) {
       _toast('电脑端桥接未在线，无法新建会话', isError: true);
       return;
     }
+    final title = await _promptSessionName();
+    if (title == null || !mounted) return; // 用户取消
     setState(() => _isCreatingSession = true);
     try {
-      final newId = await sp.createAgentSessionOnPc(workspace: sp.settings.targetWorkspace);
+      final newId = await sp.createAgentSessionOnPc(
+        workspace: sp.settings.targetWorkspace,
+        title: title,
+      );
       if (!mounted) return;
       if (newId == null) {
         _toast('新建会话失败：请确认电脑端 LxAI 在运行', isError: true);
@@ -99,8 +103,68 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
     }
   }
 
-  void _toast(String text, {required bool isError}) {
+  /// 询问会话名称（留空则由电脑端自动命名）。
+  Future<String?> _promptSessionName() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('新建会话', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLength: 40,
+          decoration: const InputDecoration(
+            labelText: '会话名称',
+            hintText: '留空则自动命名',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          onSubmitted: (_) => Navigator.pop(ctx, true),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('创建')),
+        ],
+      ),
+    );
+    final name = ctrl.text.trim();
+    ctrl.dispose();
+    if (ok != true) return null;
+    return name;
+  }
+
+  /// 立即把当前会话的「思考深度 / 权限预设」下发到电脑端。
+  ///
+  /// 拿不到会话 id 时不报错：下一轮对话会把这两个设置一并带过去。
+  Future<void> _applyOption(String kind) async {
+    final sp = context.read<SettingsProvider>();
+    final s = sp.settings;
+    final sessionId = s.targetSessionId.trim();
+    if (sessionId.isEmpty) {
+      _toast(kind == 'permission' ? '权限已保存，下一条消息生效' : '思考深度已保存，下一条消息生效',
+          isError: false);
+      return;
+    }
+    final res = await SyncService.instance.applyAgentSessionOption(
+      token: s.harnessToken,
+      userId: sp.syncUserId,
+      kind: kind,
+      sessionId: sessionId,
+      permission: s.agentPermission,
+      reasoningEffort: s.agentReasoningEffort,
+      model: s.agentModel,
+      harnessUrl: s.harnessServiceUrl,
+    );
     if (!mounted) return;
+    if (res.ok) {
+      _toast(kind == 'permission' ? '🔐 已切换电脑端会话权限' : '🧠 已切换电脑端思考深度', isError: false);
+    } else {
+      _toast('切换失败：${res.message}', isError: true);
+    }
+  }
+
+  void _toast(String text, {required bool isError}) {    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(text),
@@ -166,15 +230,29 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                   _chip(
                     icon: Icons.forum_outlined,
                     label: sessionLabel,
-                    tooltip: '选择会话；选「新建会话」会立刻建一个并选中',
+                    tooltip: '选择会话（只列电脑端真实存在的会话）',
                     isDark: isDark,
                     onSelected: (v) => _pickSession(v),
                     items: {
-                      _newSessionOption: '新建会话',
                       for (final sess in sessions)
                         if ((sess['id']?.toString() ?? '').isNotEmpty)
                           sess['id'].toString(): SettingsProvider.agentSessionLabel(sess),
-                    },
+                    }.isEmpty
+                        ? const {'': '暂无会话（点 + 新建）'}
+                        : {
+                            for (final sess in sessions)
+                              if ((sess['id']?.toString() ?? '').isNotEmpty)
+                                sess['id'].toString(): SettingsProvider.agentSessionLabel(sess),
+                          },
+                  ),
+                  // 「新建会话」独立成按钮：可以顺手起名字，也不再混进下拉选项里
+                  const SizedBox(width: 4),
+                  _iconButton(
+                    icon: Icons.add,
+                    tooltip: '新建会话（可命名）',
+                    isDark: isDark,
+                    busy: _isCreatingSession,
+                    onTap: _createSession,
                   ),
                   const SizedBox(width: 6),
                   _chip(
@@ -185,6 +263,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                     onSelected: (v) {
                       s.agentReasoningEffort = v;
                       sp.updateSettings(s);
+                      unawaited(_applyOption('model'));
                     },
                     items: _reasoningLabels,
                   ),
@@ -192,11 +271,12 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                   _chip(
                     icon: Icons.shield_outlined,
                     label: _permissionLabels[s.agentPermission] ?? s.agentPermission,
-                    tooltip: '本地执行权限',
+                    tooltip: '本地执行权限（DSH 权限预设）',
                     isDark: isDark,
                     onSelected: (v) {
                       s.agentPermission = v;
                       sp.updateSettings(s);
+                      unawaited(_applyOption('permission'));
                     },
                     items: _permissionLabels,
                   ),
@@ -246,8 +326,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
     required bool isDark,
     required Map<String, String> items,
     required void Function(String) onSelected,
-  }) {
-    return PopupMenuButton<String>(
+  }) {    return PopupMenuButton<String>(
       tooltip: tooltip,
       position: PopupMenuPosition.over,
       onSelected: onSelected,
@@ -285,6 +364,40 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
             ),
             const Icon(Icons.arrow_drop_down, size: 16),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// 快捷栏里的独立小按钮（新建会话用）。
+  Widget _iconButton({
+    required IconData icon,
+    required String tooltip,
+    required bool isDark,
+    required bool busy,
+    required VoidCallback onTap,
+  }) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: busy ? null : onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF1E293B) : Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
+            ),
+          ),
+          child: busy
+              ? const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(icon, size: 15, color: const Color(0xFF0284C7)),
         ),
       ),
     );
