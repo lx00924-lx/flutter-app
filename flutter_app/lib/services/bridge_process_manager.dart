@@ -42,11 +42,17 @@ class BridgeProcessManager extends ChangeNotifier {
   int? get pid => _pid;
 
   /// 启动（已在运行则忽略）。[token] 为空时脚本会进入扫码配对流程。
+  ///
+  /// [resetRetryCount]：用户/远端主动启动时重置自动重连次数，让每次手动或
+  /// 手机下发的启动都重新拥有完整的重试预算。自动重连路径必须传 false，
+  /// 否则计数被清零会导致"无限重启"。
   Future<bool> start({
     required String token,
     required String harnessUrl,
+    bool resetRetryCount = true,
   }) async {
     if (_process != null) return true;
+    if (resetRetryCount) _autoRestartCount = 0;
 
     _lastToken = token.trim();
     _lastHarnessUrl = harnessUrl.trim().isEmpty ? '127.0.0.1:3080' : harnessUrl.trim();
@@ -112,7 +118,6 @@ class BridgeProcessManager extends ChangeNotifier {
     await stop(byUser: true);
     // 给进程一点退出时间，避免连接/端口残留
     await Future.delayed(const Duration(milliseconds: 600));
-    _autoRestartCount = 0;
     return start(token: token, harnessUrl: harnessUrl);
   }
 
@@ -179,7 +184,7 @@ class BridgeProcessManager extends ChangeNotifier {
             if (h.isNotEmpty) harness = h;
           }
         } catch (_) {}
-        await start(token: token, harnessUrl: harness);
+        await start(token: token, harnessUrl: harness, resetRetryCount: false);
       } else {
         _setMessage('桥接反复退出（退出码 $code），已停止自动重试，请手动启动', isError: true);
         notifyListeners();
