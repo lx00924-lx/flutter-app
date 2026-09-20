@@ -572,8 +572,9 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         ),
                       ],
                     ),
-                    // 仅在电脑桌面端 (Windows / macOS / Linux) 显示：一键静默无头运行 / 停止后台桥接
-                    if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) ...[
+                    // 桥接控制卡片：电脑端本地启停；手机端下发指令给电脑端 App 执行
+                    // （此前这里用 Platform 判断只让电脑端显示，现按需求在手机端也显示）
+                    ...[
                       const SizedBox(height: 12),
                       Container(
                         padding: const EdgeInsets.all(12),
@@ -595,7 +596,11 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    _bridgeRunning ? '桥接运行中 (无头模式)' : '一键无头后台启动',
+                                    _bridgeRunning
+                                        ? '桥接运行中'
+                                        : (Platform.isWindows || Platform.isMacOS || Platform.isLinux
+                                            ? '一键无头后台启动'
+                                            : '启动电脑端桥接'),
                                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
                                   ),
                                   const SizedBox(height: 2),
@@ -604,7 +609,9 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                         ? (BridgeProcessManager.instance.isRunning
                                             ? 'PID: ${BridgeProcessManager.instance.pid}，长连接已建立，无黑色控制台窗口'
                                             : '长连接已建立（由电脑端 LxAI 应用托管运行）')
-                                        : '点击即可在后台静默运行 py 桥接，无需手动打开 CMD 或保留黑窗口',
+                                        : (Platform.isWindows || Platform.isMacOS || Platform.isLinux
+                                            ? '点击即可在后台静默运行 py 桥接，无需手动打开 CMD 或保留黑窗口'
+                                            : '点击后下发指令，由电脑端 LxAI 应用启动本机桥接（需保持该应用运行）'),
                                     style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
                                   ),
                                 ],
