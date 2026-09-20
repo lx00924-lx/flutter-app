@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
@@ -193,7 +194,16 @@ class SettingsProvider extends ChangeNotifier {
   ///
   /// 手机点「重置 Token」时服务端会换发新 Token 并踢掉旧连接，脚本按设计退出；
   /// 随后手机排队一条 restart 指令，电脑端这里用【刚同步到的新 Token】把它拉起来。
+  ///
+  /// 注意：仅电脑端执行。手机端收到同样的指令必须忽略 —— 它没有本机脚本可启停。
   Future<void> _handleBridgeCommand(String command) async {
+    // 仅电脑端（Android/iOS 没有本机 python 脚本可启停）
+    final isDesktop =
+        Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+    if (!isDesktop) {
+      debugPrint('[Bridge] 本端非电脑端，忽略远端指令: $command');
+      return;
+    }
     final manager = BridgeProcessManager.instance;
     final token = _settings.harnessToken.trim();
     final harness = _harnessUrlForBridge();

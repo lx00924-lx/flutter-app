@@ -242,6 +242,14 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   Future<void> _rotateToken(SettingsProvider sp) async {
     final s = sp.settings;
     final oldToken = s.harnessToken.trim();
+
+    // 【必须在重置之前读取】重置会立刻踢掉旧连接，服务端随即把 agentOnline 置为 false。
+    // 若在这之后再读，4 秒一次的状态轮询可能刚好把它刷成 false，
+    // 于是两个分支都不成立、重启指令根本不会下发（表现为"手机点重置后仍需手动恢复"）。
+    final isDesktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+    final manager = BridgeProcessManager.instance;
+    final bridgeWasRunning = isDesktop ? manager.isRunning : s.isHarnessOnline;
+
     setState(() => _isRotatingToken = true);
     try {
       final newToken = await SyncService.instance.rotateAgentToken(
@@ -259,11 +267,6 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         );
         return;
       }
-
-      final isDesktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
-      final manager = BridgeProcessManager.instance;
-      // 电脑端看本地进程；手机端看服务端上报的 Agent 在线状态
-      final bridgeWasRunning = isDesktop ? manager.isRunning : s.isHarnessOnline;
 
       setState(() {
         _tokenCtrl.text = newToken;
