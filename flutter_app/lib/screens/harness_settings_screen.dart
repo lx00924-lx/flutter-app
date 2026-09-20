@@ -362,6 +362,48 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     }
   }
 
+  /// 模型下拉选项：只列电脑端真实可用的模型。
+  ///
+  /// 此前写死的是 deepseek-chat / deepseek-reasoner / local-harness-default，
+  /// 本地 DSH 根本没有这些模型（真实是 deepseek-flash / deepseek-v4-flash /
+  /// deepseek-v4-pro），选中后 selectModel 必然报错。
+  List<DropdownMenuItem<String>> _modelItems(SettingsProvider sp, String current) {
+    final models = sp.agentModels;
+    final items = <DropdownMenuItem<String>>[];
+    for (final m in models) {
+      final id = m['id']?.toString().trim() ?? '';
+      if (id.isEmpty) continue;
+      items.add(DropdownMenuItem(
+        value: id,
+        child: Text(SettingsProvider.agentModelLabel(m), style: const TextStyle(fontSize: 13)),
+      ));
+    }
+    // 当前值不在列表里（还没刷新过，或电脑端换了模型）：仍然显示出来，
+    // 不然下拉会空白，用户以为设置丢了
+    if (current.trim().isNotEmpty && !items.any((e) => e.value == current.trim())) {
+      items.insert(0, DropdownMenuItem(value: current.trim(), child: Text('${current.trim()}（未在电脑端目录中）')));
+    }
+    return items;
+  }
+
+  /// 思考档位下拉：取值来自所选模型声明的 reasoningEfforts。
+  ///
+  /// DSH 当前部署的模型是 off / low / high / max —— 没有 medium，
+  /// 旧版 App 里的「Medium - 标准平衡 (推荐)」其实是无效值。
+  List<DropdownMenuItem<String>> _effortItems(SettingsProvider sp) {
+    const labels = {
+      'off': 'Off - 关闭思考',
+      'low': 'Low - 快速分析 (少量思考)',
+      'medium': 'Medium - 标准平衡',
+      'high': 'High - 深度推演 (默认)',
+      'max': 'Max - 最高强度',
+    };
+    final efforts = sp.reasoningEffortsFor(sp.settings.agentModel);
+    return efforts
+        .map((e) => DropdownMenuItem(value: e, child: Text(labels[e] ?? e)))
+        .toList();
+  }
+
   void _snack(String text, {required bool isError}) {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -1134,24 +1176,18 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         isDense: true,
                         helperText: '驱动 Agent 推演拆解与调度的语言模型',
                       ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'deepseek-reasoner',
-                          child: Text('DeepSeek-R1 (深度思考推演模式)'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'deepseek-chat',
-                          child: Text('DeepSeek-V3 (高速通用模型)'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'local-harness-default',
-                          child: Text('本地工作区默认模型 (Harness Default)'),
-                        ),
-                      ],
+                      items: _modelItems(sp, s.agentModel),
                       onChanged: (val) {
                         if (val != null) {
                           s.agentModel = val;
                           sp.updateSettings(s);
+                          // 换模型后档位集合可能不同，顺手对齐一次
+                          final efforts = sp.reasoningEffortsFor(val);
+                          if (!efforts.contains(s.agentReasoningEffort) && efforts.isNotEmpty) {
+                            s.agentReasoningEffort = efforts.contains('high') ? 'high' : efforts.first;
+                            sp.updateSettings(s);
+                          }
+                          unawaited(_applySessionOption(kind: 'model'));
                         }
                       },
                     ),
@@ -1165,11 +1201,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         isDense: true,
                         helperText: '控制 Agent 在执行工具前的拆解深度',
                       ),
-                      items: const [
-                        DropdownMenuItem(value: 'low', child: Text('Low - 快速分析 (少量思考)')),
-                        DropdownMenuItem(value: 'medium', child: Text('Medium - 标准平衡 (推荐)')),
-                        DropdownMenuItem(value: 'high', child: Text('High - 深度推演 (全量多步分析)')),
-                      ],
+                      items: _effortItems(sp),
                       onChanged: (val) {
                         if (val != null) {
                           s.agentReasoningEffort = val;

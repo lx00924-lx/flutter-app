@@ -2507,6 +2507,10 @@ if %errorlevel% neq 0 (
         online: !!isOnline,
         workspaces: agent?.workspaces || [],
         sessions: agent?.sessions || [],
+        // 模型也一并下发：App 的「智能体调度模型」下拉此前列的是 deepseek-chat /
+        // deepseek-reasoner 这类本地 DSH 根本不存在的模型，选中后 selectModel
+        // 必然失败。以电脑端目录为准，App 才有真选项可选。
+        models: agent?.models || [],
         clientName: agent?.clientName || "DeepSeek-Harness-Local"
       });
     } catch (err: any) {
@@ -2515,6 +2519,7 @@ if %errorlevel% neq 0 (
         // 取不到就返回空数组：客户端据此显示空白框，而不是显示一个假的工作区
         workspaces: [],
         sessions: [],
+        models: [],
         clientName: "DeepSeek-Harness-Local",
         error: err.message
       });

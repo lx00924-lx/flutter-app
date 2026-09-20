@@ -907,6 +907,7 @@ class SyncService {
           // 不再用假值兜底：服务端返回空即代表未取到真实工作区
           'workspaces': List<String>.from(resp.data['workspaces'] ?? const []),
           'sessions': resp.data['sessions'] as List? ?? [],
+          'models': resp.data['models'] as List? ?? [],
           'clientName': resp.data['clientName']?.toString() ?? 'DeepSeek-Harness-Local',
         };
       }
@@ -918,6 +919,7 @@ class SyncService {
       // 取不到就返回空：界面显示空白框，绝不编一个 'deepseek-agent' 出来
       'workspaces': <String>[],
       'sessions': <dynamic>[],
+      'models': <dynamic>[],
       'clientName': 'DeepSeek-Harness-Local',
     };
   }

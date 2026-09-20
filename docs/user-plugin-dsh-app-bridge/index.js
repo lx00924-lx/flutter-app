@@ -710,17 +710,43 @@ export function apply(ctx) {
       if (sessions() === undefined) return json(503, { status: 'error', error: { code: 'unavailable', message: 'sessions() 缺失' } })
       const effort = input.reasoningEffort ?? input.reasoning_effort
       const model = typeof input.model === 'string' && input.model.length > 0 ? input.model : undefined
+      // DSH 的 selectModel 必须知道具体模型：只给档位会报
+      // "invalid exact model metadata for provider ... model undefined"。
+      if (model === undefined) {
+        return json(400, {
+          status: 'error',
+          error: { code: 'model-required', message: '必须同时指定 model（DSH 的 selectModel 不接受只给档位）' },
+        })
+      }
+      // 档位必须是该模型声明的档位之一，否则 DSH 侧会抛错并被静默忽略
+      if (typeof effort === 'string' && effort.length > 0 && effort !== 'default') {
+        const catalogValue = await catalog().catch(() => undefined)
+        const declared = []
+        for (const group of catalogValue?.groups ?? []) {
+          for (const item of group.models ?? []) {
+            if (item.id === model) {
+              for (const e of item.reasoning?.efforts ?? []) declared.push(e.id)
+            }
+          }
+        }
+        if (declared.length > 0 && !declared.includes(effort)) {
+          return json(400, {
+            status: 'error',
+            error: {
+              code: 'unknown-effort',
+              message: `模型 ${model} 不支持档位 "${effort}"（可用：${declared.join(', ')}）`,
+            },
+          })
+        }
+      }
       const provider = typeof input.provider === 'string' && input.provider.length > 0
         ? input.provider
-        : await providerOf(model ?? '')
-      if (provider === undefined && model === undefined) {
-        return json(400, { status: 'error', error: { code: 'bad-model', message: '需要 provider 或 model' } })
-      }
+        : await providerOf(model)
       try {
         const selected = await sessions().selectModel({
           sessionId,
           ...(provider === undefined ? {} : { provider }),
-          ...(model === undefined ? {} : { model }),
+          model,
           ...(typeof effort === 'string' && effort.length > 0 && effort !== 'default' ? { reasoningEffort: effort } : {}),
         })
         return json(200, { status: 'success', sessionId, selected })

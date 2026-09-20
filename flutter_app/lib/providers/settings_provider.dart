@@ -491,6 +491,7 @@ class SettingsProvider extends ChangeNotifier {
 
   List<String> _agentWorkspaces = [];
   List<Map<String, dynamic>> _agentSessions = [];
+  List<Map<String, dynamic>> _agentModels = [];
   bool _agentCatalogLoaded = false;
   bool _agentCatalogLoading = false;
 
@@ -499,6 +500,32 @@ class SettingsProvider extends ChangeNotifier {
 
   /// 电脑端真实存在的会话列表（每条含 id / title / workspace）。
   List<Map<String, dynamic>> get agentSessions => List.unmodifiable(_agentSessions);
+
+  /// 电脑端真实可用的模型（每条含 id / name / provider / reasoningEfforts）。
+  List<Map<String, dynamic>> get agentModels => List.unmodifiable(_agentModels);
+
+  /// 某个模型支持的思考档位（取不到时给出 DSH 通用的四档）。
+  List<String> reasoningEffortsFor(String modelId) {
+    final id = modelId.trim();
+    for (final m in _agentModels) {
+      if (m['id']?.toString() == id) {
+        final efforts = m['reasoningEfforts'];
+        if (efforts is List && efforts.isNotEmpty) {
+          return efforts.map((e) => e.toString()).toList();
+        }
+      }
+    }
+    // DSH 当前部署的模型都是这四档（见 /v1/models 的 reasoningEfforts）
+    return const ['off', 'low', 'high', 'max'];
+  }
+
+  /// 模型显示名。
+  static String agentModelLabel(Map<String, dynamic> model) {
+    final name = model['name']?.toString().trim() ?? '';
+    final id = model['id']?.toString().trim() ?? '';
+    if (name.isEmpty) return id;
+    return name == id ? id : '$name ($id)';
+  }
 
   /// 是否成功取到过一次目录（用于区分"还没取"与"取到空"）。
   bool get agentCatalogLoaded => _agentCatalogLoaded;
@@ -538,13 +565,19 @@ class SettingsProvider extends ChangeNotifier {
               .map((e) => Map<String, dynamic>.from(e))
               .toList() ??
           <Map<String, dynamic>>[];
+      final modelList = (res['models'] as List<dynamic>?)
+              ?.whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList() ??
+          <Map<String, dynamic>>[];
 
       _agentWorkspaces = wsList;
       _agentSessions = sessList;
+      if (modelList.isNotEmpty) _agentModels = modelList;
       // 只有真的取到内容才算"已加载"，避免把一次失败当成"电脑上确实没有"
       _agentCatalogLoaded = _agentCatalogLoaded || wsList.isNotEmpty || sessList.isNotEmpty;
-      debugPrint('[Settings] 目录刷新: ${wsList.length} 个工作区 / ${sessList.length} 个会话'
-          '${_agentCatalogLoaded ? "" : "（未取到，界面保持空白）"}');
+      debugPrint('[Settings] 目录刷新: ${wsList.length} 个工作区 / ${sessList.length} 个会话 / '
+          '${modelList.length} 个模型${_agentCatalogLoaded ? "" : "（未取到，界面保持空白）"}');
       notifyListeners();
       return wsList.isNotEmpty || sessList.isNotEmpty;
     } catch (e) {

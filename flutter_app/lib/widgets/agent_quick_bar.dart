@@ -26,14 +26,16 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
   bool _requestedCatalog = false;
 
   static const Map<String, String> _reasoningLabels = {
-    'high': '高',
-    'medium': '中',
-    'low': '低',
+    'off': '关闭思考',
+    'low': '思考·低',
+    'medium': '思考·中',
+    'high': '思考·高',
+    'max': '思考·最高',
   };
 
   static const Map<String, String> _permissionLabels = {
-    // DSH 真实存在的权限预设 id（默认部署只有这两个），
-    // 以前填 read-only / full-access 这类不存在的值，DSH 会直接回 unknown preset
+    // 本机 DSH 真实存在的三个权限预设（由插件 /v1/permission-presets 确认）
+    'read-only': '只读',
     'workspace-write': '工作区可写',
     'danger-full-access': '完全访问',
   };
@@ -257,15 +259,18 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                   const SizedBox(width: 6),
                   _chip(
                     icon: Icons.psychology_outlined,
-                    label: '思考 ${_reasoningLabels[s.agentReasoningEffort] ?? s.agentReasoningEffort}',
-                    tooltip: '思考链预算 / Reasoning Effort',
+                    label: _reasoningLabels[s.agentReasoningEffort] ?? s.agentReasoningEffort,
+                    tooltip: '思考链预算 / Reasoning Effort（档位随模型而定）',
                     isDark: isDark,
                     onSelected: (v) {
                       s.agentReasoningEffort = v;
                       sp.updateSettings(s);
                       unawaited(_applyOption('model'));
                     },
-                    items: _reasoningLabels,
+                    items: {
+                      for (final e in sp.reasoningEffortsFor(s.agentModel))
+                        e: _reasoningLabels[e] ?? e,
+                    },
                   ),
                   const SizedBox(width: 6),
                   _chip(
