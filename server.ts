@@ -13,6 +13,54 @@ import multer from "multer";
 import { createServer as createViteServer } from "vite";
 import cors from "cors";
 
+// ==================== 控制台日志时间戳 ====================
+// 需求：排查「手机点了重置 Token 之后到底发生了什么」这类顺序问题时，
+// 日志必须能看出先后（谁先踢谁、指令何时排队、电脑端何时取走）。
+//
+// 做法：入口处把 console 的四个输出方法包一层，统一加本地时间前缀。
+// 相比逐个改写 90 多处调用点：不会漏、不会改错参数、以后新增日志自动生效。
+// 多行内容（如异常堆栈）后续行按同样宽度缩进对齐，避免"第二行没有时间戳"。
+const LOG_TZ_OFFSET_MIN = -new Date().getTimezoneOffset();
+const LOG_TZ_LABEL = (() => {
+  const sign = LOG_TZ_OFFSET_MIN >= 0 ? "+" : "-";
+  const abs = Math.abs(LOG_TZ_OFFSET_MIN);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `UTC${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+})();
+
+/** 生成本地时间前缀，形如 `2026-02-14 18:27:03.123 +08:00`。 */
+function logTimestamp(date: Date = new Date()): string {
+  const pad = (n: number, width = 2) => String(n).padStart(width, "0");
+  return (
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ` +
+    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.` +
+    `${pad(date.getMilliseconds(), 3)} ${LOG_TZ_LABEL}`
+  );
+}
+
+(() => {
+  const prefix = () => `[${logTimestamp()}]`;
+  const wrap =
+    (write: (...args: any[]) => void) =>
+    (...args: any[]) => {
+      const head = prefix();
+      const indent = " ".repeat(head.length + 1);
+      const formatted = args.map((arg) =>
+        typeof arg === "string" && arg.includes("\n")
+          ? arg
+              .split("\n")
+              .map((line, i) => (i === 0 ? line : indent + line))
+              .join("\n")
+          : arg,
+      );
+      write(head, ...formatted);
+    };
+  console.log = wrap(console.log.bind(console));
+  console.info = wrap(console.info.bind(console));
+  console.warn = wrap(console.warn.bind(console));
+  console.error = wrap(console.error.bind(console));
+})();
+
 const generationEvents = new EventEmitter();
 generationEvents.setMaxListeners(500);
 
@@ -101,13 +149,22 @@ interface DeviceSession {
 }
 
 /**
- * 待下发的「桥接控制指令」队列：userId -> command。
+ * 待下发的「桥接控制指令」队列：userId -> { command, createdAt }。
  *
  * 用途：手机端点「启动 / 停止 / 重启」时无法直接操作电脑上的脚本，
  * 因此把指令排队，由该用户的电脑端 App 在每 4 秒一次的会话轮询中取走并本地执行。
  * 复用既有轮询通道，无需新建长连接。
+ *
+ * 【只发给电脑端】手机与电脑轮询的是同一个 userId，若手机自己的轮询也去取这条
+ * 队列，它会抢在电脑前面把指令取走并删除 —— 电脑端永远收不到，表现就是
+ * "手机点重置 Token 后，还得在电脑上手动停止-重置-启动才恢复"。因此取件方
+ * 必须是 deviceType === "desktop"，且取到才删。
+ *
+ * 【超时丢弃】电脑端可能压根没开（指令无人执行）。指令保留 2 分钟，
+ * 过期即作废，避免用户几天后打开电脑 App 时被一条陈旧指令意外启停桥接。
  */
-const pendingBridgeCommands = new Map<string, string>();
+const BRIDGE_COMMAND_TTL_MS = 2 * 60 * 1000;
+const pendingBridgeCommands = new Map<string, { command: string; createdAt: number }>();
 
 // File lock mechanism to prevent race conditions during concurrent JSON writes
 const fileLocks: Map<string, Promise<any>> = new Map();
@@ -1146,9 +1203,23 @@ async function startServer() {
 
     // 下发并消费"桥接控制指令"：手机点启停/重置时排队，电脑端 App 在下一次轮询
     // （≤4 秒）取到并本地执行 —— 复用已有的会话轮询通道，无需新建长连接。
-    const pendingCommand = pendingBridgeCommands.get(userId);
-    if (pendingCommand) {
-      pendingBridgeCommands.delete(userId);
+    //
+    // 关键：只有电脑端才允许取件。手机端与电脑端轮询的是同一个 userId，
+    // 早先的实现两端都取，手机常常抢先把指令取走删掉，导致电脑端收不到指令、
+    // 用户只能跑到电脑前手动"停止-重置-启动"。指令必须先到电脑端手里。
+    let pendingCommand: string | undefined;
+    if (deviceType === "desktop") {
+      const queued = pendingBridgeCommands.get(userId);
+      if (queued) {
+        if (Date.now() - queued.createdAt > BRIDGE_COMMAND_TTL_MS) {
+          pendingBridgeCommands.delete(userId);
+          console.log(`[Bridge Cmd] 指令 ${queued.command} 已过期作废（电脑端未在 2 分钟内取走）`);
+        } else {
+          pendingBridgeCommands.delete(userId);
+          pendingCommand = queued.command;
+          console.log(`[Bridge Cmd] 指令 ${queued.command} 已下发给电脑端 App 执行`);
+        }
+      }
     }
 
     try {
@@ -1198,8 +1269,8 @@ async function startServer() {
       if (!allowed.includes(command)) {
         return res.status(400).json({ error: `不支持的指令：${command}，可选 ${allowed.join(" / ")}` });
       }
-      pendingBridgeCommands.set(userId, command);
-      console.log(`[Bridge Cmd] 已为用户 ${userId} 排队指令: ${command}`);
+      pendingBridgeCommands.set(userId, { command, createdAt: Date.now() });
+      console.log(`[Bridge Cmd] 已为用户 ${userId} 排队指令: ${command}（等待电脑端 App 轮询取走）`);
       res.json({ success: true, command, note: "电脑端将在数秒内执行" });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to queue bridge command" });
@@ -2654,12 +2725,14 @@ if %errorlevel% neq 0 (
       const ownerUserId = (user.username || user.id).toString();
 
       // 先断开旧 token 上的 Agent 连接
+      let kickedAgent = false;
       if (oldToken && connectedAgents.has(oldToken)) {
         const agent = connectedAgents.get(oldToken);
         try {
           if (agent?.ws && agent.ws.readyState === 1) {
             agent.ws.send(JSON.stringify({ type: "token_revoked", reason: "Token rotated by user" }));
             agent.ws.close(1000, "Token Rotated");
+            kickedAgent = true;
           }
         } catch {}
         connectedAgents.delete(oldToken);
@@ -2675,7 +2748,12 @@ if %errorlevel% neq 0 (
 
       // 广播给该用户所有设备，使手机与电脑立刻收敛到同一枚 token
       io.to(`user_${ownerUserId}`).emit("settings_updated", { harnessToken: newToken });
-      console.log(`[Agent Hub] 已为用户 ${ownerUserId} 换发新的配对 Token`);
+      console.log(
+        `[Agent Hub] 用户 ${ownerUserId} 重置了配对 Token` +
+          (kickedAgent
+            ? "：已向旧 Token 上的电脑端桥接下发 token_revoked 并断开（脚本会自行退出，等待电脑端 App 用新 Token 拉起）"
+            : "：旧 Token 上没有在线桥接连接，无需踢线"),
+      );
 
       res.json({ success: true, token: newToken });
     } catch (err: any) {
