@@ -1133,6 +1133,17 @@ async function startServer() {
       }
     })();
 
+    // 顺带下发 Agent 在线状态：手机上点击启动/停止后，界面需要自动反映真实状态，
+    // 而手机端无法本地探测电脑进程。挂在这次轮询里，两端都能在 ≤4 秒内自动更新，
+    // 不必再手动点"刷新"。
+    const agentOnline = (() => {
+      if (!currentAgentToken) return false;
+      const agent = connectedAgents.get(currentAgentToken);
+      if (!agent) return false;
+      return (agent.ws && agent.ws.readyState === WSWebSocket.OPEN) ||
+        (Date.now() - agent.lastPing < 45000);
+    })();
+
     // 下发并消费"桥接控制指令"：手机点启停/重置时排队，电脑端 App 在下一次轮询
     // （≤4 秒）取到并本地执行 —— 复用已有的会话轮询通道，无需新建长连接。
     const pendingCommand = pendingBridgeCommands.get(userId);
@@ -1158,12 +1169,14 @@ async function startServer() {
       }
       res.json({
         valid: true,
+        agentOnline,
         ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}),
         ...(pendingCommand ? { bridgeCommand: pendingCommand } : {}),
       });
     } catch (e) {
       res.json({
         valid: true,
+        agentOnline,
         ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}),
         ...(pendingCommand ? { bridgeCommand: pendingCommand } : {}),
       });

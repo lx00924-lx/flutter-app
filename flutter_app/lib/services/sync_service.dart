@@ -31,6 +31,8 @@ class SyncService {
   void Function(String token)? onAgentTokenSynced;
   /// 收到手机端下发的桥接控制指令时回调（电脑端据此启停本机脚本）
   void Function(String command)? onBridgeCommand;
+  /// Agent 在线状态变化回调（服务端每次轮询下发，用于自动刷新界面）
+  void Function(bool online)? onAgentOnlineChanged;
 
   /// 获取服务器基地址（Web 端自适应 origin，App 原生端使用 AppConfig 中可配置的地址）
   String get serverBaseUrl {
@@ -78,6 +80,7 @@ class SyncService {
     required void Function(String reason) onKicked,
     void Function(String token)? onTokenSynced,
     void Function(String command)? onCommand,
+    void Function(bool online)? onOnlineChanged,
   }) {
     stopSessionWatcher();
     final cleanUserId = userId.trim();
@@ -88,6 +91,7 @@ class SyncService {
     onForceLogout = onKicked;
     onAgentTokenSynced = onTokenSynced;
     onBridgeCommand = onCommand;
+    onAgentOnlineChanged = onOnlineChanged;
 
     // 立即执行一次健康核验
     _checkSessionOnce(cleanUserId, clientSessionId, deviceType);
@@ -133,6 +137,11 @@ class SyncService {
           final command = data['bridgeCommand']?.toString().trim();
           if (command != null && command.isNotEmpty) {
             onBridgeCommand?.call(command);
+          }
+          // Agent 在线状态：由服务端在每次轮询时下发，两端据此自动更新界面，
+          // 无需用户手动点"刷新"（手机端尤其需要，它无法本地探测电脑进程）。
+          if (data['agentOnline'] is bool) {
+            onAgentOnlineChanged?.call(data['agentOnline'] as bool);
           }
         }
       }

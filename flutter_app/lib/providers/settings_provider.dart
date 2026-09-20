@@ -154,6 +154,7 @@ class SettingsProvider extends ChangeNotifier {
       },
       onTokenSynced: _applyServerAgentToken,
       onCommand: _handleBridgeCommand,
+      onOnlineChanged: _applyAgentOnline,
     );
 
     // 让 BridgeProcessManager 在自动重启时能拿到「当前有效 Token / Harness 地址」
@@ -163,6 +164,17 @@ class SettingsProvider extends ChangeNotifier {
     // 已登录：开启 Android 常驻保活前台服务，确保划掉任务栏后
     // Dart isolate 仍存活，上面的会话轮询与中继长连接得以继续运行
     KeepAliveService.enableAfterLogin();
+  }
+
+  /// 服务端在每次轮询（4 秒）下发 Agent 在线状态，据此自动更新界面。
+  ///
+  /// 修复：手机端点「停止」后桥接确实停了，但界面仍显示"在线/停止按钮"——
+  /// 因为手机无法本地探测电脑进程，此前只能手动点刷新才会更新。
+  void _applyAgentOnline(bool online) {
+    if (_settings.isHarnessOnline == online) return;
+    _settings.isHarnessOnline = online;
+    _save(pushToCloud: false);
+    debugPrint('[Settings] Agent 在线状态更新: $online');
   }
 
   /// 把设置里的 Harness 地址整理成 bridge 需要的 `host:port` 形式。
