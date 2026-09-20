@@ -79,6 +79,11 @@ class SyncService {
   void Function(bool online)? onAgentOnlineChanged;
   /// 账号级「桥接状态切换中」标记变化回调（null 表示已切换完成）
   void Function(BridgeTransition? transition)? onBridgeTransition;
+  /// 另一端改过设置时回调（本端应重新拉一次云端设置）
+  void Function()? onSettingsChanged;
+
+  /// 已应用过的设置版本号，避免重复拉取
+  int _appliedSettingsRevision = 0;
 
   String get serverBaseUrl {
     if (kIsWeb) {
@@ -127,6 +132,7 @@ class SyncService {
     void Function(String command)? onCommand,
     void Function(bool online)? onOnlineChanged,
     void Function(BridgeTransition? transition)? onTransition,
+    void Function()? onSettingsUpdated,
   }) {
     stopSessionWatcher();
     final cleanUserId = userId.trim();
@@ -139,6 +145,8 @@ class SyncService {
     onBridgeCommand = onCommand;
     onAgentOnlineChanged = onOnlineChanged;
     onBridgeTransition = onTransition;
+    onSettingsChanged = onSettingsUpdated;
+    _appliedSettingsRevision = 0;
 
     // 立即执行一次健康核验
     _checkSessionOnce(cleanUserId, clientSessionId, deviceType);
@@ -193,6 +201,19 @@ class SyncService {
           // 账号级「切换中」标记：任一端发起启停/重置后出现，两端据此统一置灰按钮，
           // 直到状态真的切换到位（服务端确认后不再下发该字段）。
           onBridgeTransition?.call(BridgeTransition.fromJson(data['bridgeTransition']));
+
+          // 设置版本号：另一端改过设置（开屏启动页等）就重新拉一次。
+          // 之前只在冷启动/登录时拉，App 开着的时候双端设置永远不同步。
+          final rev = int.tryParse(data['settingsUpdatedAt']?.toString() ?? '');
+          if (rev != null && rev > 0 && rev != _appliedSettingsRevision) {
+            final bySession = data['settingsBySessionId']?.toString() ?? '';
+            _appliedSettingsRevision = rev;
+            // 自己写的不必再拉回来（避免无谓往返）
+            if (bySession.isEmpty || bySession != clientSessionId) {
+              debugPrint('[SyncService] 检测到另一端更新了设置，正在重新拉取云端配置');
+              onSettingsChanged?.call();
+            }
+          }
         }
       }
     } catch (e) {

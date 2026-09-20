@@ -157,6 +157,7 @@ class SettingsProvider extends ChangeNotifier {
       onCommand: _handleBridgeCommand,
       onOnlineChanged: _applyAgentOnline,
       onTransition: _applyBridgeTransition,
+      onSettingsUpdated: () => pullCloudSettings(),
     );
 
     // 让 BridgeProcessManager 在自动重启时能拿到「当前有效 Token / Harness 地址」

@@ -244,6 +244,24 @@ const isAgentOnlineByToken = (token: string): boolean => {
   );
 };
 
+/**
+ * 用户设置的最后写入时间与来源设备：userId -> { at, bySessionId }。
+ *
+ * 场景：手机改了「开屏启动页」等个性化设置，电脑上**已经打开**的 App 完全不知道 ——
+ * 客户端既没有 socket.io 连接，`pullCloudSettings()` 又只在冷启动/登录时调用一次，
+ * 所以设置变更实际上只在"重启 App"时才同步。服务端广播的 settings_updated
+ * 没有任何客户端在听。
+ *
+ * 现在把版本号挂在 4 秒一次的会话轮询里下发：客户端发现版本变了、且不是自己写的，
+ * 就主动拉一次云端设置。放在内存里即可 —— 服务重启后客户端最多多拉一次。
+ */
+const settingsRevision = new Map<string, { at: number; bySessionId: string }>();
+
+const bumpSettingsRevision = (userId: string, bySessionId: string): void => {
+  if (!userId || userId === "guest") return;
+  settingsRevision.set(userId, { at: Date.now(), bySessionId: bySessionId || "" });
+};
+
 // File lock mechanism to prevent race conditions during concurrent JSON writes
 const fileLocks: Map<string, Promise<any>> = new Map();
 
@@ -1279,6 +1297,10 @@ async function startServer() {
     // 直到状态真的切换到位才解除。这里是结算点（能拿到最新 agentOnline）。
     const bridgeTransition = resolveBridgeTransition(userId, agentOnline);
 
+    // 设置版本号：任一端写过设置后这里会变，客户端据此决定要不要重新拉云端设置。
+    // bySessionId 用于让写入方自己跳过（避免自己拉自己刚推的内容）。
+    const revision = settingsRevision.get(userId);
+
     // 下发并消费"桥接控制指令"：手机点启停/重置时排队，电脑端 App 在下一次轮询
     // （≤4 秒）取到并本地执行 —— 复用已有的会话轮询通道，无需新建长连接。
     //
@@ -1322,6 +1344,9 @@ async function startServer() {
         ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}),
         ...(pendingCommand ? { bridgeCommand: pendingCommand } : {}),
         ...(bridgeTransition ? { bridgeTransition } : {}),
+        ...(revision
+          ? { settingsUpdatedAt: revision.at, settingsBySessionId: revision.bySessionId }
+          : {}),
       });
     } catch (e) {
       res.json({
@@ -1330,6 +1355,9 @@ async function startServer() {
         ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}),
         ...(pendingCommand ? { bridgeCommand: pendingCommand } : {}),
         ...(bridgeTransition ? { bridgeTransition } : {}),
+        ...(revision
+          ? { settingsUpdatedAt: revision.at, settingsBySessionId: revision.bySessionId }
+          : {}),
       });
     }
   });
@@ -1808,6 +1836,8 @@ async function startServer() {
         await safeWriteJSON(SETTINGS_FILE, allSettings);
       });
       io.to(`user_${userId}`).emit("settings_updated", newSettings);
+      // 记下版本：其他设备的会话轮询拿到后会主动拉一次，实现运行中的双端同步
+      bumpSettingsRevision(userId, (req.headers["x-client-session-id"] as string) || "");
       res.json({ success: true, data: newSettings });
     } catch (error) {
       console.error("Failed to save user settings:", error);
@@ -1837,6 +1867,7 @@ async function startServer() {
       );
 
       io.to(`user_${cleanUserId}`).emit("settings_updated", cleanSettings);
+      bumpSettingsRevision(cleanUserId, (req.headers["x-client-session-id"] as string) || "");
       res.json({ success: true, ...(issuedToken ? { harnessToken: issuedToken } : {}) });
     } catch (error) {
       console.error("Failed to sync settings:", error);

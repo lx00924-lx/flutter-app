@@ -1423,7 +1423,8 @@ async def execute_dsh_via_ws(
     active_session_id: str,
     content_list: list,
     prompt: str,
-    on_step_callback
+    on_step_callback,
+    permission: str = ""
 ):
     harness_base = harness_url.rstrip("/")
     ws_urls = [
@@ -1479,6 +1480,31 @@ async def execute_dsh_via_ws(
                 
                 if not cur_session_id:
                     cur_session_id = str(uuid.uuid4())
+
+                # 执行权限：与 App 侧插件同样的做法 —— 往该会话里排一条 /permission 命令。
+                # 备用通道此前完全不带这个字段，用户改了权限其实没生效。
+                if permission and permission != "workspace-write":
+                    try:
+                        perm_text = f"/permission {permission}"
+                        await dsh_ws.send(json.dumps({
+                            "type": "client-request",
+                            "rpcId": f"rpc_perm_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}",
+                            "mode": "steer",
+                            "method": "session.prompt",
+                            "payload": {
+                                "sessionId": cur_session_id,
+                                "sessionID": cur_session_id,
+                                "mode": "queue",
+                                "prompt": [{"type": "text", "text": perm_text}],
+                                "parts": [{"type": "text", "text": perm_text}],
+                                "content": [{"type": "text", "text": perm_text}],
+                                "text": perm_text,
+                            }
+                        }))
+                        await on_step_callback(f"🔐 已向本地会话下发执行权限：{permission}")
+                        await asyncio.sleep(0.3)
+                    except Exception as perm_err:
+                        await on_step_callback(f"⚠️ 执行权限下发失败（已忽略）：{perm_err}")
 
                 # 发送提示词任务
                 prompt_rpc_id = f"rpc_prompt_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
@@ -1653,6 +1679,14 @@ async def execute_local_harness(
     if not content_list:
         content_list = [{"type": "text", "text": str(prompt or "")}]
 
+    # 备用通道（适配器 / WS RPC）拿不到 DSH 的 selectModel，思考深度改不了。
+    # 这里如实告知，避免用户以为"选了没生效"是 App 的问题。
+    if reasoning_effort and reasoning_effort != "default":
+        await on_step_callback(
+            f"⚠️ 主通道不可用，已回退备用通道：本轮「思考深度={reasoning_effort}」不会应用"
+            "（备用通道不支持切换模型档位），「执行权限」仍会照常下发"
+        )
+
     # 1. 尝试本地 3081/3080 HTTP 适配器
     adapter_base = harness_base
     if "3080" in harness_base:
@@ -1696,7 +1730,8 @@ async def execute_local_harness(
     # 2. 原生 WebSocket 通道
     if HAS_WEBSOCKETS and not harness_base.startswith("https://"):
         ws_ok, ws_output = await execute_dsh_via_ws(
-            harness_url, target_workspace, model_name, active_session_id, content_list, prompt, on_step_callback
+            harness_url, target_workspace, model_name, active_session_id, content_list, prompt, on_step_callback,
+            permission=permission
         )
         if ws_ok and ws_output and not is_html_content(ws_output):
             await on_step_callback("✅ [3/3] 本地 DeepSeek 智能体通过 WebSocket RPC 执行完毕，正在向 App 调度中心回传结果...")
