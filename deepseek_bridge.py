@@ -1166,15 +1166,21 @@ async def poll_dsh_questions_loop(sender, harness_url: str):
     QUESTION_ARM_MS），否则原样走电脑端网页弹窗，行为与装这个功能之前一致。
     """
     known: dict = {}
+    not_ready_warned = False
+    print("\033[96m[选择框] 轮询已启动：DSH 里 ask_user_question 的提问会经中继转发到 App\033[0m")
     while True:
         try:
             items = await fetch_pending_questions(harness_url)
         except Exception:
             items = None
         if items is None:
-            # 插件不支持/DSH 没起来：慢一点重试，别刷屏
+            # 插件不支持/DSH 没起来：慢一点重试，别刷屏（只提示一次）
+            if not not_ready_warned:
+                print("\033[93m[选择框] 本地 DSH 还没有 /v1/user-questions 接口（重启 DSH 让插件生效后即可转发）\033[0m")
+                not_ready_warned = True
             await asyncio.sleep(3)
             continue
+        not_ready_warned = False
         current = set()
         for item in items:
             if not isinstance(item, dict):
