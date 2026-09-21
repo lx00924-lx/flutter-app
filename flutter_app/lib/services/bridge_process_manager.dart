@@ -61,6 +61,16 @@ class BridgeProcessManager extends ChangeNotifier {
       final scriptPath = 'deepseek_bridge.py';
       await ensureScriptUpToDate(scriptPath);
 
+      // 启动前先清掉游离的旧桥接进程。
+      //
+      // 桥接是用 detached 方式拉起来的，App 被强杀、或被覆盖安装/更新时它不会跟着
+      // 退出；用户下次再点「启动」就会变成两个进程抢同一枚 Token —— 服务端按 Token
+      // 只认最后一个连接，表现就是"时好时坏、偶尔收不到任务"。这里统一清理，
+      // 保证任何时刻只有一个桥接在跑。
+      if (Platform.isWindows) {
+        await _killStaleBridges(scriptPath);
+      }
+
       final executable = Platform.isWindows ? 'python' : 'python3';
       final args = <String>[
         scriptPath,
@@ -121,9 +131,26 @@ class BridgeProcessManager extends ChangeNotifier {
     return start(token: token, harnessUrl: harnessUrl);
   }
 
-  /// 保证磁盘上的脚本与 App 内置版本一致（旧版本会导致功能缺失）。
-  Future<void> ensureScriptUpToDate(String scriptPath) async {
+  /// 清掉本机游离的旧桥接进程（只认命令行里带 deepseek_bridge.py 的 python）。
+  ///
+  /// 只清理同名脚本的进程，不动其它 python：用户可能有别的脚本在跑。
+  Future<void> _killStaleBridges(String scriptPath) async {
     try {
+      final cmd = "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+          "Where-Object { \$_.CommandLine -like '*$scriptPath*' } | "
+          "ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }";
+      final result = await Process.run(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-Command', cmd],
+      ).timeout(const Duration(seconds: 10));
+      debugPrint('[Bridge] 已清理游离的旧桥接进程（exit=${result.exitCode}）');
+    } catch (e) {
+      debugPrint('[Bridge] 清理旧桥接进程失败（忽略，继续启动）: $e');
+    }
+  }
+
+  /// 保证磁盘上的脚本与 App 内置版本一致（旧版本会导致功能缺失）。
+  Future<void> ensureScriptUpToDate(String scriptPath) async {    try {
       final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
       final file = File(scriptPath);
       if (await file.exists()) {
