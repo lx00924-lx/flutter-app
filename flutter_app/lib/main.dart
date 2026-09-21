@@ -4,11 +4,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'dart:async';
 import 'providers/chat_provider.dart';
 import 'providers/settings_provider.dart';
 import 'screens/chat_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/splash_screen.dart';
+import 'services/notification_service.dart';
 
 /// 全局导航 Key，供服务层在收到顶号通知时安全弹窗与跳转
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
@@ -49,6 +51,10 @@ void main() async {
       statusBarIconBrightness: Brightness.dark,
     ),
   );
+
+  // 初始化本地通知：电脑端请求授权时要能在后台提醒到人
+  // （初始化本身很轻，权限在真正要用时再申请，避免冷启动打断用户）
+  unawaited(NotificationService.instance.init());
 
   runApp(
     MultiProvider(

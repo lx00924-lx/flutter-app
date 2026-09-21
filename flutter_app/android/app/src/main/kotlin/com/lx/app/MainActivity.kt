@@ -129,6 +129,32 @@ class MainActivity: FlutterActivity() {
                     // 该操作会跳转系统弹窗，返回值不代表用户已同意，仅表示已发起请求
                     result.success(true)
                 }
+                "openAppSettings" -> {
+                    // 打开本应用的系统详情页：用户可以在这里手动允许「后台数据」、
+                    // 开启自启动等 —— 这些开关没有公开 API，只能引导用户去点。
+                    try {
+                        val intent = Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.parse("package:$packageName")
+                        )
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(intent)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("OPEN_FAILED", e.localizedMessage, null)
+                    }
+                }
+                "openBatteryOptimizationSettings" -> {
+                    // 部分机型（如国产 ROM）没有上方的直接授权弹窗，退回电池优化列表页
+                    try {
+                        val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        startActivity(intent)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("OPEN_FAILED", e.localizedMessage, null)
+                    }
+                }
                 else -> result.notImplemented()
             }
         }

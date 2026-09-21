@@ -8,9 +8,11 @@ import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../services/api_service.dart';
 import '../services/asr_service.dart';
+import '../services/notification_service.dart';
 import '../services/storage_service.dart';
 import '../services/sync_service.dart';
 import '../services/tts_service.dart';
+import '../main.dart' show rootNavigatorKey;
 import 'settings_provider.dart';
 
 /// 一轮对话当前处在哪个阶段。
@@ -74,6 +76,72 @@ class ChatProvider extends ChangeNotifier {
   Map<String, dynamic>? _pendingApproval;
   Map<String, dynamic>? get pendingApproval => _pendingApproval;
 
+  /// 应用内授权弹窗是否已经打开（避免重复堆叠）
+  bool _approvalDialogOpen = false;
+
+  /// 记录一条待处理的授权：更新状态 + 弹窗 + 系统通知
+  void _setPendingApproval(Map<String, dynamic> approval) {
+    final sameId = _pendingApproval?['approvalId']?.toString() == approval['approvalId']?.toString();
+    _pendingApproval = approval;
+    notifyListeners();
+    if (sameId) return;
+
+    final approvalId = approval['approvalId']?.toString() ?? '';
+    final tool = approval['tool']?.toString() ?? '敏感操作';
+
+    // 系统通知：App 不在前台时这是唯一能提醒到的渠道
+    NotificationService.instance.showApprovalRequest(approvalId: approvalId, tool: tool);
+    // 应用内弹窗：无论在哪个页面都能跳出来
+    _presentApprovalDialog(tool);
+  }
+
+  /// 用根导航器弹授权对话框（与"被顶下线"弹窗同一套机制，跨页面可见）
+  void _presentApprovalDialog(String tool) {
+    if (_approvalDialogOpen) return;
+    final ctx = rootNavigatorKey.currentContext;
+    if (ctx == null) {
+      debugPrint('[ChatProvider] 暂无可用的根上下文，授权改为内联卡片展示');
+      return;
+    }
+    _approvalDialogOpen = true;
+    showDialog<void>(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (dialogCtx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Row(
+          children: [
+            Icon(Icons.gpp_maybe_outlined, color: Color(0xFFF59E0B), size: 24),
+            SizedBox(width: 8),
+            Text('电脑端等待授权', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Text(
+          '本地 Agent 想执行：$tool\n\n'
+          '允许只对**这一次**操作生效，不会改变你选择的权限预设。',
+          style: const TextStyle(fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              Navigator.of(dialogCtx).pop();
+              await resolveApproval('deny');
+            },
+            child: const Text('拒绝'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: const Color(0xFFF59E0B)),
+            onPressed: () async {
+              Navigator.of(dialogCtx).pop();
+              await resolveApproval('allow');
+            },
+            child: const Text('允许本次'),
+          ),
+        ],
+      ),
+    ).whenComplete(() => _approvalDialogOpen = false);
+  }
+
   /// 排队中等待自动发送的消息
   final List<QueuedMessage> _queue = [];
 
@@ -102,12 +170,11 @@ class ChatProvider extends ChangeNotifier {
       case 'agent_waiting_approval':
         final approval = data['approval'];
         if (approval is Map) {
-          _pendingApproval = {
+          _setPendingApproval({
             ...Map<String, dynamic>.from(approval),
             if (data['taskId'] != null) 'taskId': data['taskId'],
             if (data['messageId'] != null) 'messageId': data['messageId'],
-          };
-          notifyListeners();
+          });
         }
         return;
       case 'agent_approval_resolved':
@@ -288,6 +355,7 @@ class ChatProvider extends ChangeNotifier {
     final approvalId = pending['approvalId']?.toString() ?? '';
     if (approvalId.isEmpty) {
       _pendingApproval = null;
+      NotificationService.instance.cancelApprovalRequest();
       notifyListeners();
       return false;
     }
@@ -300,6 +368,7 @@ class ChatProvider extends ChangeNotifier {
     );
     if (ok) {
       _pendingApproval = null;
+      NotificationService.instance.cancelApprovalRequest();
       notifyListeners();
     }
     return ok;
@@ -309,6 +378,7 @@ class ChatProvider extends ChangeNotifier {
   void dismissApproval() {
     if (_pendingApproval == null) return;
     _pendingApproval = null;
+    NotificationService.instance.cancelApprovalRequest();
     notifyListeners();
   }
 
@@ -682,14 +752,14 @@ class ChatProvider extends ChangeNotifier {
               return;
             }
 
-            // DSH 请求用户拍板：在输入框上方弹出审批卡片
+            // DSH 请求用户拍板：输入框上方出卡片，同时弹窗 + 发系统通知
+            // （App 不在前台时只能靠通知提醒）
             if (chunk['approval'] is Map) {
-              _pendingApproval = {
+              _setPendingApproval({
                 ...Map<String, dynamic>.from(chunk['approval'] as Map),
                 if (chunk['taskId'] != null) 'taskId': chunk['taskId'],
                 'messageId': assistantMsg.id,
-              };
-              notifyListeners();
+              });
               return;
             }
 
@@ -1158,14 +1228,14 @@ class ChatProvider extends ChangeNotifier {
               return;
             }
 
-            // DSH 请求用户拍板：在输入框上方弹出审批卡片
+            // DSH 请求用户拍板：输入框上方出卡片，同时弹窗 + 发系统通知
+            // （App 不在前台时只能靠通知提醒）
             if (chunk['approval'] is Map) {
-              _pendingApproval = {
+              _setPendingApproval({
                 ...Map<String, dynamic>.from(chunk['approval'] as Map),
                 if (chunk['taskId'] != null) 'taskId': chunk['taskId'],
                 'messageId': assistantMsg.id,
-              };
-              notifyListeners();
+              });
               return;
             }
 

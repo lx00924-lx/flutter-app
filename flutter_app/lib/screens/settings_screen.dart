@@ -6,6 +6,8 @@ import 'package:provider/provider.dart';
 import '../models/app_settings.dart';
 import '../providers/settings_provider.dart';
 import '../services/update_service.dart';
+import '../services/keep_alive_service.dart';
+import '../services/notification_service.dart';
 import '../utils/url_launcher_helper.dart';
 import 'account_settings_screen.dart';
 import 'personalization_settings_screen.dart';
@@ -126,6 +128,10 @@ class SettingsScreen extends StatelessWidget {
               MaterialPageRoute(builder: (_) => const StorageSettingsScreen()),
             ),
           ),
+          const SizedBox(height: 16),
+
+          // --- 后台运行与通知（手机端专属：电脑端不需要这些系统授权）---
+          const _BackgroundPermissionCard(),
           const SizedBox(height: 16),
 
           // --- 剩余直接展示的系统功能 ---
@@ -285,6 +291,181 @@ class SettingsScreen extends StatelessWidget {
           ],
         ),
         onTap: onTap,
+      ),
+    );
+  }
+}
+
+/// 后台运行与通知权限卡片（仅 Android 有意义）。
+///
+/// 这三项决定了"手机能不能在后台持续收消息 / 收到授权提醒"：
+/// · 通知权限：Android 13+ 必须授权，否则收不到授权提醒（保活通知也不可见）；
+/// · 电池优化白名单：不加白名单，系统随时可能把后台进程回收；
+/// · 后台数据：部分机型默认限制后台流量，需要在系统设置里手动放开
+///   （没有公开 API，只能把用户送到应用详情页）。
+class _BackgroundPermissionCard extends StatefulWidget {
+  const _BackgroundPermissionCard();
+
+  @override
+  State<_BackgroundPermissionCard> createState() => _BackgroundPermissionCardState();
+}
+
+class _BackgroundPermissionCardState extends State<_BackgroundPermissionCard>
+    with WidgetsBindingObserver {
+  bool _loading = true;
+  bool _notifyGranted = false;
+  bool _ignoringBattery = false;
+
+  bool get _isAndroid => !kIsWeb && Platform.isAndroid;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refresh();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 用户从系统设置页回来时刷新状态
+    if (state == AppLifecycleState.resumed) _refresh();
+  }
+
+  Future<void> _refresh() async {
+    if (!_isAndroid) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
+    final notify = await NotificationService.instance.hasPermission();
+    final battery = await KeepAliveService.isIgnoringBatteryOptimizations();
+    if (!mounted) return;
+    setState(() {
+      _notifyGranted = notify;
+      _ignoringBattery = battery;
+      _loading = false;
+    });
+  }
+
+  Widget _row({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required bool granted,
+    required VoidCallback onTap,
+    required String actionLabel,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 18, color: granted ? Colors.green : Colors.orange),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 2),
+                Text(subtitle, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          granted
+              ? const Padding(
+                  padding: EdgeInsets.only(top: 4),
+                  child: Text('已允许', style: TextStyle(fontSize: 12, color: Colors.green)),
+                )
+              : OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    minimumSize: const Size(0, 30),
+                  ),
+                  onPressed: onTap,
+                  child: Text(actionLabel, style: const TextStyle(fontSize: 12)),
+                ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_isAndroid) return const SizedBox.shrink();
+
+    return Card(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.cloud_sync_outlined, size: 20, color: Color(0xFF0284C7)),
+                SizedBox(width: 8),
+                Text('后台运行与通知', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '这几项决定手机在后台还能不能持续收消息、以及电脑端请求授权时能不能提醒到你。',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 10),
+            if (_loading)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Center(child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))),
+              )
+            else ...[
+              _row(
+                icon: _notifyGranted ? Icons.notifications_active : Icons.notifications_off_outlined,
+                title: '通知权限',
+                subtitle: _notifyGranted
+                    ? '已允许：电脑端请求授权时会弹通知提醒'
+                    : '未允许：App 在后台时收不到授权提醒',
+                granted: _notifyGranted,
+                actionLabel: '去授权',
+                onTap: () async {
+                  await NotificationService.instance.ensurePermission();
+                  await _refresh();
+                },
+              ),
+              const Divider(height: 1),
+              _row(
+                icon: _ignoringBattery ? Icons.battery_charging_full : Icons.battery_alert_outlined,
+                title: '电池优化白名单',
+                subtitle: _ignoringBattery
+                    ? '已加入：系统不会随意回收后台进程'
+                    : '未加入：系统可能随时冻结后台，导致掉线',
+                granted: _ignoringBattery,
+                actionLabel: '去设置',
+                onTap: () async {
+                  await KeepAliveService.requestIgnoreBatteryOptimizations();
+                  await Future.delayed(const Duration(seconds: 2));
+                  await _refresh();
+                },
+              ),
+              const Divider(height: 1),
+              _row(
+                icon: Icons.signal_cellular_alt,
+                title: '后台数据',
+                subtitle: '部分机型默认限制后台流量；此开关没有公开接口，需在系统设置里手动放开',
+                granted: false,
+                actionLabel: '打开设置',
+                onTap: () => KeepAliveService.openAppSettings(),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

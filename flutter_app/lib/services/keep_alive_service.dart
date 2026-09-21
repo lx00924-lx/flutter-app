@@ -79,6 +79,29 @@ class KeepAliveService {
     }
   }
 
+  /// 打开本应用的系统详情页。
+  ///
+  /// 用来让用户手动允许「后台数据」、开启自启动等 —— 这些开关没有公开 API，
+  /// 只能把用户送到正确的位置（部分机型还有"后台流量限制"这类额外开关）。
+  static Future<void> openAppSettings() async {
+    if (!_isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('openAppSettings');
+    } catch (e) {
+      debugPrint('[KeepAlive] 打开应用设置页失败: $e');
+    }
+  }
+
+  /// 打开系统的电池优化列表页（部分 ROM 没有直接授权弹窗时的兜底入口）
+  static Future<void> openBatteryOptimizationSettings() async {
+    if (!_isAndroid) return;
+    try {
+      await _channel.invokeMethod<bool>('openBatteryOptimizationSettings');
+    } catch (e) {
+      debugPrint('[KeepAlive] 打开电池优化列表失败: $e');
+    }
+  }
+
   /// 登录成功后的统一入口：开启常驻 + 引导加入电池优化白名单。
   static Future<void> enableAfterLogin() async {
     if (!_isAndroid) return;
