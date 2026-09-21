@@ -212,6 +212,26 @@ def dsh_headers(url: str, extra=None):
     return headers
 
 
+def dsh_ws_connect(ws_url: str, **kwargs):
+    """
+    连接本地 DSH 的 WebSocket，并带上信任栅栏所需的 Cookie。
+
+    DSH 的 /v1 通道同时在 HTTP 与 WS 握手两道口子上校验浏览器信任 Cookie，
+    少了它 WS 会直接被拒（表现为"握手受阻、退化到长轮询"）。
+
+    不同 websockets 版本参数名不同（>=14 用 additional_headers，
+    更早的用 extra_headers），这里两种都试。
+    """
+    http_url = ws_url.replace("wss://", "https://").replace("ws://", "http://")
+    headers = dsh_headers(http_url, {})
+    if headers:
+        try:
+            return websockets.connect(ws_url, additional_headers=headers, **kwargs)
+        except TypeError:
+            return websockets.connect(ws_url, extra_headers=headers, **kwargs)
+    return websockets.connect(ws_url, **kwargs)
+
+
 def dsh_auth_status():
     """返回 (是否可用, 说明)，供启动自检打印。"""
     secret = _read_dsh_browser_session_secret()
@@ -899,7 +919,7 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
         ]
         for ws_probe_url in ws_probe_urls:
             try:
-                async with websockets.connect(ws_probe_url, open_timeout=1.5, close_timeout=1.5) as local_ws:
+                async with dsh_ws_connect(ws_probe_url, open_timeout=1.5, close_timeout=1.5) as local_ws:
                     for p in [rpc_list_ws_payload, rpc_list_payload, rpc_workspace_payload]:
                         try:
                             await local_ws.send(json.dumps(p))
@@ -1260,11 +1280,14 @@ async def execute_dsh_sse_stream(
 
     for target_url in endpoints:
         def stream_request_worker(q: asyncio.Queue):
-            headers = {
+            # 必须带 DSH 的自签 Cookie：DSH 的 /v1 通道在「浏览器信任栅栏」之下，
+            # 少了它一律 401 —— 主通道会静默失败、然后退化到备用通道也 401，
+            # 用户看到的就是"发消息必失败"。这里以前是自己拼 headers，漏了 Cookie。
+            headers = dsh_headers(target_url, {
                 "Content-Type": "application/json; charset=utf-8",
                 "Accept": "text/event-stream, application/json",
-                "User-Agent": "AetherX-Bridge/3.7"
-            }
+                "User-Agent": "AetherX-Bridge/3.7",
+            })
             auth_key = (extra_chat_config or {}).get("apiKey")
             if auth_key:
                 headers["Authorization"] = f"Bearer {auth_key}"
@@ -1454,7 +1477,7 @@ async def create_dsh_session_explicit(harness_url: str, workspace: str = "", tit
         ]
         for ws_url in ws_probe_urls:
             try:
-                async with websockets.connect(ws_url, open_timeout=2.0, close_timeout=2.0) as local_ws:
+                async with dsh_ws_connect(ws_url, open_timeout=2.0, close_timeout=2.0) as local_ws:
                     for pld in create_payloads:
                         try:
                             await local_ws.send(json.dumps(pld))
@@ -1528,7 +1551,7 @@ async def execute_dsh_via_ws(
 
     for ws_url in ws_urls:
         try:
-            async with websockets.connect(
+            async with dsh_ws_connect(
                 ws_url,
                 open_timeout=3.0,
                 close_timeout=3.0,
@@ -1856,10 +1879,11 @@ async def execute_local_harness(
             continue
 
         def do_request(url=target_url, data=req_data):
-            headers = {
+            # 同样要带 DSH 信任栅栏的 Cookie，否则本机回环请求也会被 401 拒绝
+            headers = dsh_headers(url, {
                 "Content-Type": "application/json; charset=utf-8",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            })
             auth_key = extra_chat_config.get("apiKey")
             if auth_key:
                 headers["Authorization"] = f"Bearer {auth_key}"
