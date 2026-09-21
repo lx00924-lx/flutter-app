@@ -58,6 +58,8 @@ class ChatProvider extends ChangeNotifier {
     _generating = value;
     if (was && !value) {
       _turnPhase = TurnPhase.idle;
+      // 一轮结束 = Agent 回话了：托盘图标该提示"有新的 Agent 回复"
+      _markAgentUnread();
       scheduleMicrotask(_dispatchNextQueued);
     } else if (!was && value) {
       _turnPhase = TurnPhase.polishing;
@@ -71,6 +73,27 @@ class ChatProvider extends ChangeNotifier {
 
   /// 轮次编号：每开一轮 +1；SSE 事件按编号认领，过期事件一律丢弃
   int _turnSeq = 0;
+
+  /// 有「Agent 刚回了话但用户还没看」的未读（Windows 托盘图标用它变绿）
+  ///
+  /// 只在窗口不在前台时才真的显示（判定在 TrayService 里）；
+  /// 回到前台由 main.dart 的 TrayStatusBinder 清掉。
+  bool _hasUnreadAgent = false;
+  bool get hasUnreadAgent => _hasUnreadAgent;
+
+  /// 标记有新的 Agent 回复（本轮结束 / 收到另一端同步过来的消息时调用）
+  void _markAgentUnread() {
+    if (_hasUnreadAgent) return;
+    _hasUnreadAgent = true;
+    notifyListeners();
+  }
+
+  /// 清掉未读（窗口回到前台时调用）
+  void clearAgentUnread() {
+    if (!_hasUnreadAgent) return;
+    _hasUnreadAgent = false;
+    notifyListeners();
+  }
 
   /// 正在等待用户拍板的审批请求（DSH 执行敏感操作前）
   Map<String, dynamic>? _pendingApproval;
@@ -163,10 +186,17 @@ class ChatProvider extends ChangeNotifier {
       case 'chat_completed':
       case 'messages_updated':
       case 'receive_message':
+      case 'agent_task_finished':
+        // 有变化就立刻对一次账（拉取本身是幂等的"只导入本地没有的"）；
+        // 这几类都意味着"另一端有新的 Agent 内容进来了" → 托盘标未读
+        if (!_isGenerating) {
+          _markAgentUnread();
+          _silentSyncFromServer();
+        }
+        return;
       case 'message_deleted':
       case 'session_deleted':
-      case 'agent_task_finished':
-        // 有变化就立刻对一次账（拉取本身是幂等的"只导入本地没有的"）
+        // 删除是用户主动行为，不该点亮"有新回复"
         if (!_isGenerating) _silentSyncFromServer();
         return;
       case 'agent_waiting_approval':

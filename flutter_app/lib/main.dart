@@ -5,12 +5,14 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:provider/provider.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'providers/chat_provider.dart';
 import 'providers/settings_provider.dart';
 import 'screens/chat_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/splash_screen.dart';
 import 'services/notification_service.dart';
+import 'services/tray_service.dart';
 
 /// 全局导航 Key，供服务层在收到顶号通知时安全弹窗与跳转
 final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
@@ -56,6 +58,16 @@ void main() async {
   // （初始化本身很轻，权限在真正要用时再申请，避免冷启动打断用户）
   unawaited(NotificationService.instance.init());
 
+  // Windows：托盘常驻（关闭窗口 = 收进托盘；托盘图标体现 Agent 状态）
+  // 失败不影响启动 —— 托盘只是锦上添花，不能因为一个原生插件挂掉就打不开 App
+  if (!kIsWeb && Platform.isWindows) {
+    try {
+      await TrayService.instance.init();
+    } catch (e) {
+      debugPrint('Tray init failed: $e');
+    }
+  }
+
   runApp(
     MultiProvider(
       providers: [
@@ -66,9 +78,69 @@ void main() async {
               previous ?? ChatProvider(settings),
         ),
       ],
-      child: const DeepSeekNativeApp(),
+      child: const TrayStatusBinder(
+        child: DeepSeekNativeApp(),
+      ),
     ),
   );
+}
+
+/// 把「Agent 在线 / 等待用户处理 / 有未读回复」这三点变化喂给托盘图标。
+///
+/// 单独做成一个组件：托盘状态是**跨页面**的（用户可能停在设置页或已经收进托盘），
+/// 挂在 Provider 树最外层才能一直跟着状态走。
+class TrayStatusBinder extends StatefulWidget {
+  const TrayStatusBinder({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<TrayStatusBinder> createState() => _TrayStatusBinderState();
+}
+
+class _TrayStatusBinderState extends State<TrayStatusBinder>
+    with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// 窗口回到前台：未读清掉，托盘图标跟着回到「空闲」
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      context.read<ChatProvider>().clearAgentUnread();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sp = context.watch<SettingsProvider>();
+    final chat = context.watch<ChatProvider>();
+    final waitingForUser =
+        chat.pendingQuestion != null || chat.pendingApproval != null;
+    final agentOnline = sp.settings.isHarnessOnline == true;
+    final unread = chat.hasUnreadAgent;
+
+    // build 期间不能直接做异步副作用，挪到帧后执行
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(TrayService.instance.sync(
+        agentOnline: agentOnline,
+        waitingForUser: waitingForUser,
+        unreadMessage: unread,
+      ));
+    });
+
+    return widget.child;
+  }
 }
 
 class DeepSeekNativeApp extends StatelessWidget {

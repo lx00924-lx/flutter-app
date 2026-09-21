@@ -40,6 +40,36 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
     'danger-full-access': '完全访问',
   };
 
+  /// 工作区下拉里的哨兵项：点了打开「手输路径」对话框（不可能是真实目录名）
+  static const String _customWorkspaceKey = '__custom_workspace__';
+
+  /// 模型下拉项：id → 展示名（只列电脑端 DSH 真实目录里的模型）。
+  Map<String, String> _modelChoices(SettingsProvider sp, String current) {
+    final items = <String, String>{};
+    for (final m in sp.agentModels) {
+      final id = m['id']?.toString().trim() ?? '';
+      if (id.isEmpty) continue;
+      items[id] = SettingsProvider.agentModelLabel(m);
+    }
+    final cur = current.trim();
+    // 当前值不在目录里（还没刷新过 / 电脑端换了模型）也要显示，否则下拉空白像丢了设置
+    if (cur.isNotEmpty && !items.containsKey(cur)) {
+      items[cur] = '$cur（不在电脑端目录中）';
+    }
+    if (items.isEmpty) items[''] = '暂无模型（点右侧刷新）';
+    return items;
+  }
+
+  /// 快捷栏上显示的模型名（尽量短，取不到就原样显示 id）。
+  String _modelLabel(SettingsProvider sp, String current) {
+    final cur = current.trim();
+    if (cur.isEmpty) return '默认模型';
+    for (final m in sp.agentModels) {
+      if (m['id']?.toString().trim() == cur) return SettingsProvider.agentModelLabel(m);
+    }
+    return cur;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -58,6 +88,18 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
 
   Future<void> _pickWorkspace(String value) async {
     final sp = context.read<SettingsProvider>();
+    // 「自定义路径…」：设置页那张卡删掉后，手输路径的入口挪到这里
+    if (value == _customWorkspaceKey) {
+      final typed = await _promptWorkspacePath();
+      if (typed == null || !mounted) return;
+      final s = sp.settings;
+      setState(() {
+        s.targetWorkspace = typed.trim();
+        s.targetSessionId = '';
+      });
+      sp.updateSettings(s);
+      return;
+    }
     final s = sp.settings;
     setState(() {
       s.targetWorkspace = value;
@@ -65,6 +107,38 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
       s.targetSessionId = '';
     });
     sp.updateSettings(s);
+  }
+
+  /// 手输工作区路径（例如电脑上任意目录）。
+  Future<String?> _promptWorkspacePath() async {
+    final ctrl = TextEditingController(
+      text: context.read<SettingsProvider>().settings.targetWorkspace,
+    );
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('自定义工作区路径', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: '工作区路径 / 名称',
+            hintText: r'例如 C:\workspace（留空则用电脑端默认工作区）',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          onSubmitted: (_) => Navigator.pop(ctx, true),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('确定')),
+        ],
+      ),
+    );
+    final text = ctrl.text;
+    ctrl.dispose();
+    if (ok != true) return null;
+    return text;
   }
 
   Future<void> _pickSession(String value) async {
@@ -136,16 +210,16 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
     return name;
   }
 
-  /// 立即把当前会话的「思考深度 / 权限预设」下发到电脑端。
+  /// 立即把当前会话的「模型 / 思考深度 / 权限预设」下发到电脑端。
   ///
-  /// 拿不到会话 id 时不报错：下一轮对话会把这两个设置一并带过去。
-  Future<void> _applyOption(String kind) async {
+  /// 拿不到会话 id 时不报错：下一轮对话会把这几个设置一并带过去。
+  Future<void> _applyOption(String kind, {String? what}) async {
+    final label = what ?? (kind == 'permission' ? '权限' : '思考深度');
     final sp = context.read<SettingsProvider>();
     final s = sp.settings;
     final sessionId = s.targetSessionId.trim();
     if (sessionId.isEmpty) {
-      _toast(kind == 'permission' ? '权限已保存，下一条消息生效' : '思考深度已保存，下一条消息生效',
-          isError: false);
+      _toast('$label已保存，下一条消息生效', isError: false);
       return;
     }
     final res = await SyncService.instance.applyAgentSessionOption(
@@ -160,7 +234,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
     );
     if (!mounted) return;
     if (res.ok) {
-      _toast(kind == 'permission' ? '🔐 已切换电脑端会话权限' : '🧠 已切换电脑端思考深度', isError: false);
+      _toast('✅ 已切换电脑端$label', isError: false);
     } else {
       _toast('切换失败：${res.message}', isError: true);
     }
@@ -221,12 +295,14 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                   _chip(
                     icon: Icons.folder_outlined,
                     label: workspaceLabel,
-                    tooltip: '选择工作区（电脑端真实目录）',
+                    tooltip: '选择工作区（电脑端真实目录，末项可手输路径）',
                     isDark: isDark,
                     onSelected: (v) => _pickWorkspace(v),
-                    items: workspaces.isEmpty
-                        ? const {'': '暂无目录（下拉刷新）'}
-                        : {for (final w in workspaces) w: _shortName(w)},
+                    items: {
+                      if (workspaces.isEmpty) '': '暂无目录（点右侧刷新）',
+                      for (final w in workspaces) w: _shortName(w),
+                      _customWorkspaceKey: '✏️ 自定义路径…',
+                    },
                   ),
                   const SizedBox(width: 6),
                   _chip(
@@ -257,6 +333,27 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                     onTap: _createSession,
                   ),
                   const SizedBox(width: 6),
+                  // 智能体模型：设置页那张「DSH 智能体执行选项」卡已删除，
+                  // 模型选择收敛到这里（换模型后档位集合可能变化，顺手对齐一次）
+                  _chip(
+                    icon: Icons.memory_outlined,
+                    label: _modelLabel(sp, s.agentModel),
+                    tooltip: '智能体模型（电脑端 DSH 真实模型目录）',
+                    isDark: isDark,
+                    onSelected: (v) {
+                      if (v.isEmpty) return;
+                      s.agentModel = v;
+                      final efforts = sp.reasoningEffortsFor(v);
+                      if (efforts.isNotEmpty && !efforts.contains(s.agentReasoningEffort)) {
+                        s.agentReasoningEffort = efforts.contains('high') ? 'high' : efforts.first;
+                      }
+                      sp.updateSettings(s);
+                      setState(() {});
+                      unawaited(_applyOption('model', what: '模型'));
+                    },
+                    items: _modelChoices(sp, s.agentModel),
+                  ),
+                  const SizedBox(width: 6),
                   _chip(
                     icon: Icons.psychology_outlined,
                     label: _reasoningLabels[s.agentReasoningEffort] ?? s.agentReasoningEffort,
@@ -265,7 +362,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                     onSelected: (v) {
                       s.agentReasoningEffort = v;
                       sp.updateSettings(s);
-                      unawaited(_applyOption('model'));
+                      unawaited(_applyOption('model', what: '思考深度'));
                     },
                     items: {
                       for (final e in sp.reasoningEffortsFor(s.agentModel))
@@ -281,7 +378,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                     onSelected: (v) {
                       s.agentPermission = v;
                       sp.updateSettings(s);
-                      unawaited(_applyOption('permission'));
+                      unawaited(_applyOption('permission', what: '权限'));
                     },
                     items: _permissionLabels,
                   ),
