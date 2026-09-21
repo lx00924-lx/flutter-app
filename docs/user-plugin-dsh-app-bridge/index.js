@@ -534,16 +534,19 @@ export function apply(ctx) {
    * 选择框（实测：问一句"3+3=几"，手机和电脑 App 全程静默，只有网页弹窗）。
    * 这里补上那个 answerer：问题排队 → 桥接脚本轮询取走 → 经中继推给 App。
    *
-   * 与电脑端**并存**，不抢占：
-   *   · 只在桥接最近 QUESTION_ARM_MS 内来过轮询时接管（否则原样 next()）；
-   *   · 同时并行调用下游 answerer —— 电脑端网页弹窗照旧出现，谁先答谁生效；
-   *   · App 点"在电脑上回答"或等满 QUESTION_TIMEOUT_MS → 复用同一个下游调用，
-   *     行为和装这个功能之前完全一致（也不会让电脑端弹两次）。
+   * ⚠️ 必须 prepend 到最外层：内置网页端的 answerer 是浏览器连上来时才注册的，
+   * 而且它**不调用 next()** 就直接接管（用户不点弹窗就永远等着）。实测过一次：
+   * 问题被网页端吞掉，App 侧 3 分钟里一次都没被通知到。prepend 之后本插件先跑，
+   * 再把 next() 并行接上 —— 网页端弹窗照旧，App 侧也能同时拿到，谁先答谁生效。
+   *
+   * 只在桥接最近 QUESTION_ARM_MS 内来过轮询时接管（App 不在线就原样 next()，
+   * 行为和装这个功能之前完全一致）。
    */
   ctx.on('user-questions/request', async (request, next) => {
-    const sessionId = request?.agent?.session?.id
-    if (typeof sessionId !== 'string') return next()
-    if (Date.now() - lastQuestionPollAt > QUESTION_ARM_MS) return next()
+    const sessionId = readQuestionSessionId(request)
+    const armed = Date.now() - lastQuestionPollAt <= QUESTION_ARM_MS
+    ctx.logger?.info?.(`[app-bridge] 收到选择框请求（session=${sessionId ?? '未知'}，App 通路${armed ? '在线，交给 App' : '不在线，交回网页端'}）`)
+    if (!armed) return next()
 
     const questionId = randomUUID()
     const questions = Array.isArray(request?.questions) ? request.questions : []
@@ -583,7 +586,16 @@ export function apply(ctx) {
         clearTimeout(live.timer)
       }
     }
-  })
+  }, { prepend: true })
+
+  /** 取提问所属会话：DSH 不同版本给的字段位置不完全一样，都兜一下。 */
+  function readQuestionSessionId(request) {
+    const candidates = [request?.agent?.session?.id, request?.agent?.sessionId, request?.sessionId]
+    for (const value of candidates) {
+      if (typeof value === 'string' && value.length > 0) return value
+    }
+    return undefined
+  }
 
   /** 答复一个选择框：answers 形如 `[{id, selected:[...], custom?}]`。 */
   function answerQuestion(questionId, answers) {
