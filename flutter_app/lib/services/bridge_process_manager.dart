@@ -72,11 +72,18 @@ class BridgeProcessManager extends ChangeNotifier {
       }
 
       final executable = Platform.isWindows ? 'python' : 'python3';
+      // 让桥接把输出同时落盘：App 这边只能滚动显示最近几行，进程一崩（异常/硬崩溃）
+      // 现场就随管道散了 —— 之前"桥接凭空掉线"查不下去就是这个原因。
+      // 日志落在脚本同一目录（= App 工作目录），桥接侧会自动轮转并打码 token。
+      final bridgeDir = File(scriptPath).absolute.parent.path;
+      final bridgeLogPath = '$bridgeDir${Platform.pathSeparator}bridge-run.log';
       final args = <String>[
         scriptPath,
         if (_lastToken.isNotEmpty) ...['--token', _lastToken],
         '--harness-url', 'http://$_lastHarnessUrl',
         '--server', AppConfig.normalizedServerBaseUrl,
+        '--log-file', bridgeLogPath,
+        '--log-max-mb', '5',
       ];
 
       final process = await Process.start(

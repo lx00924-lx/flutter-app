@@ -34,6 +34,7 @@ import ssl
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -375,7 +376,124 @@ def parse_args():
     parser.add_argument("--transport", type=str, default="auto", choices=["auto", "polling", "ws"], help="传输通信协议 (auto / polling / ws)")
     parser.add_argument("--no-proxy", action="store_true", help="强制 Direct 直连，忽略系统所有代理与 Clash 残留")
     parser.add_argument("--proxy", type=str, default=os.getenv("ALL_PROXY", os.getenv("HTTPS_PROXY", "")), help="手动指定代理服务器地址 (如 http://127.0.0.1:7890)")
+    parser.add_argument("--log-file", type=str, default=os.getenv("BRIDGE_LOG_FILE", ""), help="把桥接输出同时落盘到这个文件（排查掉线/崩溃用；默认关闭）")
+    parser.add_argument("--log-max-mb", type=float, default=float(os.getenv("BRIDGE_LOG_MAX_MB", "5")), help="落盘日志单文件上限 MB，超出自动轮转为 .1（默认 5）")
     return parser.parse_args()
+
+class _TeeSink:
+    """
+    桥接输出的"双写"目标：控制台照旧 + 一份落盘。
+
+    为什么需要它：桥接是 App 用管道拉起来的，进程一崩（异常/硬崩溃）输出就随管道散了，
+    现场只剩"App 里那几行滚动日志"甚至什么都没有 —— 之前 06:09 那次桥接凭空掉线
+    就是这么查不下去的。
+
+    落盘那份额外做两件事：
+      1. 每行加 `[HH:MM:SS]` 前缀，便于和中继日志对时间线；
+      2. 把 token 打码（扫码链接里的 agentToken / 命令行里的 --token）——
+         日志会长期躺在磁盘上，不该留明文凭证。控制台那份保持原样，不影响扫码/点击。
+    """
+
+    def __init__(self, stream, path: str, max_bytes: int):
+        self._stream = stream
+        self._path = path
+        self._max_bytes = max_bytes
+        self._fh = open(path, "a", encoding="utf-8", errors="replace")
+        try:
+            self._size = os.path.getsize(path)
+        except Exception:
+            self._size = 0
+
+    @property
+    def file_handle(self):
+        return self._fh
+
+    def _mask(self, text: str) -> str:
+        try:
+            return re.sub(
+                r"(agentToken=|--token\s+)([A-Za-z0-9_\-]{6,})",
+                lambda m: m.group(1) + m.group(2)[:3] + "******",
+                text,
+            )
+        except Exception:
+            return text
+
+    def _decorate(self, line: str) -> str:
+        masked = self._mask(line)
+        if masked.strip() and not masked.lstrip().startswith("["):
+            masked = "[" + time.strftime("%H:%M:%S") + "] " + masked
+        return masked
+
+    def _rotate(self):
+        try:
+            self._fh.close()
+            try:
+                os.replace(self._path, self._path + ".1")
+            except Exception:
+                pass
+            self._fh = open(self._path, "a", encoding="utf-8", errors="replace")
+            self._size = 0
+            self._fh.write("[" + time.strftime("%H:%M:%S") + "] [日志] 超过上限，已轮转（旧内容见 .1）\n")
+            self._fh.flush()
+        except Exception:
+            pass
+
+    def write(self, text):
+        try:
+            self._stream.write(text)
+        except Exception:
+            pass
+        try:
+            for line in str(text).splitlines(True):
+                self._fh.write(self._decorate(line))
+            self._fh.flush()
+            self._size += len(str(text))
+            if self._max_bytes > 0 and self._size > self._max_bytes:
+                self._rotate()
+        except Exception:
+            pass
+        return len(str(text))
+
+    def flush(self):
+        for target in (self._stream, self._fh):
+            try:
+                target.flush()
+            except Exception:
+                pass
+
+    def isatty(self) -> bool:
+        # 落盘后不再是终端：关掉花哨的进度/颜色分支判断
+        return False
+
+def setup_bridge_log(args):
+    """
+    按 `--log-file` 把 stdout/stderr 接到文件上（未指定则完全不改变行为）。
+
+    另外挂两个兜底钩子：faulthandler 抓硬崩溃（段错误等），
+    asyncio 的未处理任务异常在 run_bridge_client 里挂。
+    """
+    path = (getattr(args, "log_file", "") or "").strip()
+    if not path:
+        return None
+    try:
+        path = os.path.abspath(path)
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        max_bytes = int(max(0.0, float(getattr(args, "log_max_mb", 5) or 0)) * 1024 * 1024)
+        sink = _TeeSink(sys.stdout, path, max_bytes)
+        sys.stdout = sink
+        sys.stderr = sink
+        try:
+            import faulthandler
+            faulthandler.enable(sink.file_handle)
+        except Exception:
+            pass
+        print(f"\033[96m[日志] 桥接输出同时落盘: {path}（上限 {getattr(args, 'log_max_mb', 5)} MB，超出轮转为 .1；token 已打码）\033[0m")
+        return sink
+    except Exception as e:
+        print(f"\033[93m[日志] 落盘失败，仅输出到控制台: {e}\033[0m")
+        return None
 
 def normalize_server_url(server_url: str) -> str:
     url = server_url.strip().rstrip("/")
@@ -2439,6 +2557,17 @@ async def run_bridge_client(args):
     concurrency_limit = max(1, args.concurrency)
     init_global_http_client(force_no_proxy=args.no_proxy, custom_proxy=args.proxy, primary_server=server_base)
 
+    # 未处理的异步任务异常默认只在任务被回收时打印，且可能被吞掉 —— 明确打出来，
+    # 这样"某个后台协程炸了导致桥上掉线"能立刻在日志里看到。
+    try:
+        asyncio.get_running_loop().set_exception_handler(
+            lambda loop, ctx: print(
+                f"\033[91m[未处理异步异常] {ctx.get('message')}: {ctx.get('exception')!r}\033[0m"
+            )
+        )
+    except Exception:
+        pass
+
     # Token 来源（按优先级）：
     #   ① 命令行 --token（App 托管无头桥接时会传入）
     #   ② 都没有 → 进入扫码配对流程（打印二维码，等手机扫描完成三方配对）
@@ -2819,10 +2948,17 @@ async def run_bridge_client(args):
 
 def main():
     args = parse_args()
+    # 先接日志再干别的：连"启动瞬间就崩"这种情况也要留下现场
+    setup_bridge_log(args)
     try:
         asyncio.run(run_bridge_client(args))
     except KeyboardInterrupt:
         print("\n\033[93m[已退出] DeepSeek Bridge 安全退出。\033[0m")
+    except BaseException:
+        # 未捕获异常：把完整堆栈写进日志（含 SystemExit/KeyboardInterrupt 之外的一切）
+        print("\033[91m[致命错误] 桥接异常退出，堆栈如下：\033[0m")
+        traceback.print_exc()
+        raise
 
 if __name__ == "__main__":
     main()
