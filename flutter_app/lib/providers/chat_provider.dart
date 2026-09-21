@@ -13,6 +13,28 @@ import '../services/sync_service.dart';
 import '../services/tts_service.dart';
 import 'settings_provider.dart';
 
+/// 一轮对话当前处在哪个阶段。
+///
+/// Agent 模式下这一轮分两段：先在电脑上执行（DSH），再把结果交给思考 API 润色。
+/// 两段的"插话代价"完全不同 —— 执行阶段插话会丢掉正在跑的任务，润色阶段插话
+/// 只是掐断一段便宜的文本生成，所以界面要按阶段决定"插话"能不能点。
+enum TurnPhase { idle, executing, polishing }
+
+/// 排队待发的消息。
+class QueuedMessage {
+  final String id;
+  final String text;
+  final List<String> attachments;
+  final DateTime createdAt;
+
+  const QueuedMessage({
+    required this.id,
+    required this.text,
+    this.attachments = const [],
+    required this.createdAt,
+  });
+}
+
 class ChatProvider extends ChangeNotifier {
   final SettingsProvider settingsProvider;
   final ApiService _apiService = ApiService();
@@ -22,9 +44,31 @@ class ChatProvider extends ChangeNotifier {
   ChatSession? _currentSession;
   List<ChatMessage> _messages = [];
   ChatMessage? _quotedMessage;
-  bool _isGenerating = false;
+  bool _generating = false;
+  /// 生成状态。
+  ///
+  /// 刻意用 setter 包一层：全文件有二十多处 `_isGenerating = false;`（各种
+  /// 成功/失败/取消分支），每一处都手动重置阶段并推进排队队列太容易漏。
+  /// 收口到这里，任何一条结束路径都会自动「阶段归 idle + 发下一条排队消息」。
+  bool get _isGenerating => _generating;
+  set _isGenerating(bool value) {
+    final was = _generating;
+    _generating = value;
+    if (was && !value) {
+      _turnPhase = TurnPhase.idle;
+      scheduleMicrotask(_dispatchNextQueued);
+    } else if (!was && value) {
+      _turnPhase = TurnPhase.polishing;
+    }
+  }
   StreamSubscription? _streamSub;
   CancelToken? _cancelToken;
+
+  /// 当前轮次所处阶段（用于插话判定与界面提示）
+  TurnPhase _turnPhase = TurnPhase.idle;
+
+  /// 排队中等待自动发送的消息
+  final List<QueuedMessage> _queue = [];
 
   Timer? _periodicSyncTimer;
 
@@ -79,6 +123,120 @@ class ChatProvider extends ChangeNotifier {
   List<ChatMessage> get messages => _messages;
   ChatMessage? get quotedMessage => _quotedMessage;
   bool get isGenerating => _isGenerating;
+
+  /// 当前轮次阶段
+  TurnPhase get turnPhase => _turnPhase;
+
+  /// 是否正在电脑上执行（DSH）。此时插话会打断正在跑的本地任务。
+  bool get isAgentExecuting => _turnPhase == TurnPhase.executing;
+
+  /// 现在插话是否安全：非执行阶段都可以（纯 API 对话、或已经在润色）。
+  bool get canInterject => !_isGenerating || _turnPhase != TurnPhase.executing;
+
+  /// 排队中的消息
+  List<QueuedMessage> get queuedMessages => List.unmodifiable(_queue);
+  int get queuedCount => _queue.length;
+
+  /// 加入排队：当前这轮结束后自动发出
+  void enqueueMessage(String text, {List<String>? attachments}) {
+    final t = text.trim();
+    final atts = attachments ?? const <String>[];
+    if (t.isEmpty && atts.isEmpty) return;
+    _queue.add(QueuedMessage(
+      id: const Uuid().v4(),
+      text: t,
+      attachments: atts,
+      createdAt: DateTime.now(),
+    ));
+    notifyListeners();
+  }
+
+  /// 撤回一条排队消息
+  void withdrawQueued(String id) {
+    _queue.removeWhere((q) => q.id == id);
+    notifyListeners();
+  }
+
+  /// 清空排队
+  void clearQueue() {
+    _queue.clear();
+    notifyListeners();
+  }
+
+  /// 一轮结束后自动发出下一条排队消息
+  void _dispatchNextQueued() {
+    if (_queue.isEmpty || _isGenerating) return;
+    final next = _queue.removeAt(0);
+    notifyListeners();
+    // 稍等一下，让上一轮的气泡状态先落定，避免两条消息挤在一起
+    Future.delayed(const Duration(milliseconds: 400), () {
+      if (_isGenerating) {
+        // 期间又开始了新一轮：放回队首，等下次
+        _queue.insert(0, next);
+        notifyListeners();
+        return;
+      }
+      sendMessage(next.text, attachments: next.attachments.isEmpty ? null : next.attachments);
+    });
+  }
+
+  /// 插话发送：打断当前轮次并立刻把这条发出去。
+  ///
+  /// 关键在于"真打断"：只断开本地 SSE 是不够的 —— 服务端那次生成、以及电脑上
+  /// 正在跑的 DSH 任务都还在继续，结果过一会儿又会同步回来。所以这里先调
+  /// `/api/chat/cancel`，再本地收尾，最后开新一轮。
+  Future<void> interjectMessage(String text, {List<String>? attachments}) async {
+    final cleanText = text.trim();
+    if (cleanText.isEmpty && (attachments == null || attachments.isEmpty)) return;
+
+    if (!_isGenerating) {
+      await sendMessage(text, attachments: attachments);
+      return;
+    }
+
+    final streaming = (_messages.isNotEmpty && _messages.last.isStreaming) ? _messages.last : null;
+
+    // 1) 通知服务端真正中止（含本地 DSH 任务）
+    await SyncService.instance.cancelServerGeneration(
+      userId: settingsProvider.syncUserId,
+      assistantMessageId: streaming?.id ?? '',
+      sessionId: _currentSession?.id ?? '',
+    );
+
+    // 2) 本地收尾：保留已生成的部分并标注被打断
+    _cancelToken?.cancel('interrupted by user');
+    _cancelToken = null;
+    await _streamSub?.cancel();
+    _streamSub = null;
+    _isGenerating = false;
+    _turnPhase = TurnPhase.idle;
+
+    if (streaming != null) {
+      final hasContent = streaming.content.trim().isNotEmpty ||
+          (streaming.reasoningContent?.trim().isNotEmpty ?? false);
+      if (!hasContent) {
+        // 一个字都没吐出来：直接移除空占位，不留噪音
+        _messages.remove(streaming);
+        _storage.deleteMessage(streaming.id);
+      } else {
+        streaming.isStreaming = false;
+        streaming.content = '${streaming.content.trimRight()}\n\n*（已被新消息打断）*';
+        _storage.saveMessage(streaming);
+        SyncService.instance.pushMessages(
+          userId: settingsProvider.syncUserId,
+          messages: [streaming],
+          clientSessionId: settingsProvider.clientSessionId,
+        );
+      }
+    }
+    notifyListeners();
+
+    // 3) 立刻发出插话内容
+    await sendMessage(text, attachments: attachments);
+  }
+
+  // 说明：一轮结束时「阶段归 idle + 推进排队队列」统一收口在 _isGenerating 的
+  // setter 里（见上方），全文件二十多处结束分支都不用各自处理。
 
   void setQuotedMessage(ChatMessage? msg) {
     _quotedMessage = msg;
@@ -381,6 +539,8 @@ class ChatProvider extends ChangeNotifier {
 
     _messages.add(assistantMsg);
     _isGenerating = true;
+    // Agent 模式先跑本地执行阶段；普通模式直接就是生成/润色阶段
+    _turnPhase = isAgentMode ? TurnPhase.executing : TurnPhase.polishing;
     notifyListeners();
 
     final activeEp = settingsProvider.activeEndpoint;
@@ -442,6 +602,7 @@ class ChatProvider extends ChangeNotifier {
             if (chunk['agent_started'] == true) {
               final step = chunk['initialStep']?.toString() ?? '任务已派发至本地 Harness';
               assistantMsg.reasoningContent = '> 🤖 $step\n';
+              _turnPhase = TurnPhase.executing;
               notifyListeners();
               return;
             }
@@ -449,12 +610,24 @@ class ChatProvider extends ChangeNotifier {
             if (chunk['step'] != null) {
               final stepText = chunk['step'].toString();
               assistantMsg.reasoningContent = (assistantMsg.reasoningContent ?? '') + '> ⚙️ $stepText\n';
+              if (_turnPhase != TurnPhase.executing) _turnPhase = TurnPhase.executing;
+              notifyListeners();
+              return;
+            }
+
+            // 服务端在本地执行结束、转入思考 API 润色时下发；此后插话只是掐断一段
+            // 便宜的文本生成，不会丢本地已经跑完的活
+            if (chunk['phase'] != null) {
+              _turnPhase = chunk['phase'].toString() == 'polishing'
+                  ? TurnPhase.polishing
+                  : TurnPhase.executing;
               notifyListeners();
               return;
             }
 
             if (chunk['agent_finished'] == true) {
               assistantMsg.reasoningContent = (assistantMsg.reasoningContent ?? '') + '\n> ✅ 本地智能体执行完毕，正在整理分析结果...\n\n';
+              _turnPhase = TurnPhase.polishing;
               notifyListeners();
               return;
             }
@@ -821,6 +994,8 @@ class ChatProvider extends ChangeNotifier {
 
     _messages.add(assistantMsg);
     _isGenerating = true;
+    // Agent 模式先跑本地执行阶段；普通模式直接就是生成/润色阶段
+    _turnPhase = isAgentMode ? TurnPhase.executing : TurnPhase.polishing;
     notifyListeners();
 
     final activeEp = settingsProvider.activeEndpoint;
@@ -880,6 +1055,7 @@ class ChatProvider extends ChangeNotifier {
             if (chunk['agent_started'] == true) {
               final step = chunk['initialStep']?.toString() ?? '任务已派发至本地 Harness';
               assistantMsg.reasoningContent = '> 🤖 $step\n';
+              _turnPhase = TurnPhase.executing;
               notifyListeners();
               return;
             }
@@ -887,12 +1063,24 @@ class ChatProvider extends ChangeNotifier {
             if (chunk['step'] != null) {
               final stepText = chunk['step'].toString();
               assistantMsg.reasoningContent = (assistantMsg.reasoningContent ?? '') + '> ⚙️ $stepText\n';
+              if (_turnPhase != TurnPhase.executing) _turnPhase = TurnPhase.executing;
+              notifyListeners();
+              return;
+            }
+
+            // 服务端在本地执行结束、转入思考 API 润色时下发；此后插话只是掐断一段
+            // 便宜的文本生成，不会丢本地已经跑完的活
+            if (chunk['phase'] != null) {
+              _turnPhase = chunk['phase'].toString() == 'polishing'
+                  ? TurnPhase.polishing
+                  : TurnPhase.executing;
               notifyListeners();
               return;
             }
 
             if (chunk['agent_finished'] == true) {
               assistantMsg.reasoningContent = (assistantMsg.reasoningContent ?? '') + '\n> ✅ 本地智能体执行完毕，正在整理分析结果...\n\n';
+              _turnPhase = TurnPhase.polishing;
               notifyListeners();
               return;
             }
@@ -1087,6 +1275,17 @@ class ChatProvider extends ChangeNotifier {
   }
 
   void stopGeneration() {
+    // 通知服务端真正中止这一轮（含正在电脑上跑的 DSH 任务）。
+    // 以前只断开本地 SSE：服务端那次生成照跑，本地 DSH 也继续执行，
+    // 结果过一会儿又同步回来 —— 表现为"点了停止，答案还诈尸"。
+    final streamingId = (_messages.isNotEmpty && _messages.last.isStreaming) ? _messages.last.id : '';
+    if (streamingId.isNotEmpty || (_currentSession?.id.isNotEmpty ?? false)) {
+      unawaited(SyncService.instance.cancelServerGeneration(
+        userId: settingsProvider.syncUserId,
+        assistantMessageId: streamingId,
+        sessionId: _currentSession?.id ?? '',
+      ));
+    }
     _cancelToken?.cancel('Generation stopped by user');
     _cancelToken = null;
     _streamSub?.cancel();

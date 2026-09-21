@@ -19,12 +19,18 @@ class ChatInputBar extends StatefulWidget {
   final Function(String text, {List<String>? attachments}) onSend;
   final VoidCallback onStop;
   final bool isGenerating;
+  /// 生成中发送时，用户选择「插话发送」后的回调
+  final Function(String text, {List<String>? attachments})? onInterject;
+  /// 生成中发送时，用户选择「排队发送」后的回调
+  final Function(String text, {List<String>? attachments})? onEnqueue;
 
   const ChatInputBar({
     super.key,
     required this.onSend,
     required this.onStop,
     required this.isGenerating,
+    this.onInterject,
+    this.onEnqueue,
   });
 
   @override
@@ -138,19 +144,128 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
         attachments.add(_recordedPendingAudioUri!);
       }
 
-      widget.onSend(
-        finalText,
-        attachments: attachments.isNotEmpty ? attachments : null,
-      );
+      // 生成中发送 → 先弹「插话 / 排队」让用户选，和官方 DSH 一致
+      if (widget.isGenerating) {
+        _showSendModeSheet(finalText, attachments.isNotEmpty ? attachments : null);
+        return;
+      }
 
-      _controller.clear();
-      setState(() {
-        _pendingAttachments.clear();
-        _pendingFileDisplayNames.clear();
-        _recordedPendingAudioUri = null;
-        _recordedPendingAudioSec = 0;
-        _isMenuOpen = false;
-      });
+      _submitSend(finalText, attachments.isNotEmpty ? attachments : null, widget.onSend);
+    }
+  }
+
+  /// 真正把消息交出去并清空输入区
+  void _submitSend(
+    String text,
+    List<String>? attachments,
+    Function(String text, {List<String>? attachments}) action,
+  ) {
+    action(text, attachments: attachments);
+    _controller.clear();
+    if (!mounted) return;
+    setState(() {
+      _pendingAttachments.clear();
+      _pendingFileDisplayNames.clear();
+      _recordedPendingAudioUri = null;
+      _recordedPendingAudioSec = 0;
+      _isMenuOpen = false;
+    });
+  }
+
+  /// 生成中发送：让用户选「插话发送」还是「排队发送」。
+  ///
+  /// 两者差别很大 ——
+  /// · 插话：打断当前这轮，立刻处理你这条（Agent 执行阶段会连本地任务一起中止）；
+  /// · 排队：不打断，等这轮结束后自动发出。
+  Future<void> _showSendModeSheet(String text, List<String>? attachments) async {
+    final chat = context.read<ChatProvider>();
+    final executing = chat.isAgentExecuting;
+
+    final mode = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) {
+        final isDark = Theme.of(ctx).brightness == Brightness.dark;
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 6),
+                child: Row(
+                  children: [
+                    const Icon(Icons.bolt_outlined, size: 18, color: Color(0xFF0284C7)),
+                    const SizedBox(width: 8),
+                    Text(
+                      executing ? '本地 Agent 正在执行' : '正在生成回复',
+                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                    ),
+                  ],
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+                child: Text(
+                  executing
+                      ? '这条消息要怎么发？执行阶段的插话会中止电脑上正在跑的本地任务。'
+                      : '这条消息要怎么发？',
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.bolt_rounded, color: Color(0xFFF59E0B)),
+                title: const Text('插话发送', style: TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Text(
+                  executing
+                      ? '打断当前这轮（含电脑上正在执行的本地任务），立刻处理这条'
+                      : '打断当前生成，立刻处理这条',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                onTap: () => Navigator.pop(ctx, 'interject'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.playlist_add_rounded, color: Color(0xFF0284C7)),
+                title: const Text('排队发送', style: TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: const Text('不打断，等这一轮结束后自动发出', style: TextStyle(fontSize: 12)),
+                onTap: () => Navigator.pop(ctx, 'queue'),
+              ),
+              const SizedBox(height: 8),
+              Divider(height: 1, color: isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0)),
+              ListTile(
+                leading: const Icon(Icons.close, size: 20),
+                title: const Text('取消', style: TextStyle(fontSize: 14)),
+                onTap: () => Navigator.pop(ctx, null),
+              ),
+              const SizedBox(height: 6),
+            ],
+          ),
+        );
+      },
+    );
+
+    if (!mounted || mode == null) return;
+
+    if (mode == 'interject') {
+      final action = widget.onInterject ?? widget.onSend;
+      _submitSend(text, attachments, action);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('⚡ 已插话：当前这轮已打断'),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } else {
+      final action = widget.onEnqueue;
+      if (action == null) return;
+      _submitSend(text, attachments, action);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('⏳ 已加入排队（当前排队 ${chat.queuedCount} 条）'),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
     }
   }
 
@@ -359,6 +474,74 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
               // 0. Agent 模式快捷栏：工作区 / 会话 / 思考深度 / 执行权限。
               //    只在 Agent 模式打开时出现，关掉（左下角切回普通模式）即隐藏。
               if (isAgentMode) const AgentQuickBar(),
+              // 0.5 排队中的消息（生成中点「排队发送」后出现在这里，可逐条撤回）
+              Consumer<ChatProvider>(
+                builder: (context, chat, _) {
+                  if (chat.queuedCount == 0) return const SizedBox.shrink();
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
+                      ),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.playlist_add_rounded, size: 15, color: Color(0xFF0284C7)),
+                            const SizedBox(width: 6),
+                            Text(
+                              '排队中 ${chat.queuedCount} 条 · 本轮结束后自动发送',
+                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                            ),
+                            const Spacer(),
+                            InkWell(
+                              onTap: chat.clearQueue,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                child: Text(
+                                  '全部清空',
+                                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        ...chat.queuedMessages.map(
+                          (q) => Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  q.text.isEmpty ? '（附件）' : q.text.replaceAll('\n', ' '),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+                                  ),
+                                ),
+                              ),
+                              InkWell(
+                                onTap: () => chat.withdrawQueued(q.id),
+                                child: const Padding(
+                                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                  child: Icon(Icons.close, size: 14, color: Colors.grey),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
               // 1. 引用消息卡片预览
               Consumer<ChatProvider>(
                 builder: (context, chat, _) {
@@ -865,8 +1048,20 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   ),
                   const SizedBox(width: 8),
 
-                  // 3. 右侧按钮：生成中为停止，有内容或有附件为发送，否则展开工具栏
-                  if (widget.isGenerating)
+                  // 3. 右侧按钮：生成中同时给「发送」和「停止」——
+                  //    点发送会弹出「插话 / 排队」选择（和官方 DSH 的交互一致）
+                  if (widget.isGenerating && canSend)
+                    IconButton.filled(
+                      onPressed: _handleSend,
+                      icon: const Icon(Icons.arrow_upward_rounded, size: 20),
+                      style: IconButton.styleFrom(
+                        backgroundColor: const Color(0xFF0284C7),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.all(10),
+                      ),
+                      tooltip: '发送（可选插话或排队）',
+                    )
+                  else if (widget.isGenerating)
                     IconButton.filled(
                       onPressed: widget.onStop,
                       icon: const Icon(Icons.stop_rounded, size: 20),

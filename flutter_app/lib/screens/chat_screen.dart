@@ -520,6 +520,11 @@ class _ChatScreenState extends State<ChatScreen> {
                   onSend: (text, {attachments}) => chat.sendMessage(text, attachments: attachments),
                   onStop: () => chat.stopGeneration(),
                   isGenerating: chat.isGenerating,
+                  // 生成中发送：输入栏弹出「插话 / 排队」选择后回调到这里
+                  onInterject: (text, {attachments}) =>
+                      chat.interjectMessage(text, attachments: attachments),
+                  onEnqueue: (text, {attachments}) =>
+                      chat.enqueueMessage(text, attachments: attachments),
                 ),
               ],
             ),

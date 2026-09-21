@@ -488,14 +488,32 @@ async function getEffectiveModelContextLimit(modelName?: string): Promise<number
 interface ActiveGeneration {
   userId: string;
   assistantMessageId: string;
+  /** 这一轮属于哪个会话：插话/排队要按会话定位当前在跑的轮次 */
+  sessionId?: string;
   content: string;
-  status: 'generating' | 'completed' | 'error';
+  status: 'generating' | 'completed' | 'error' | 'cancelled';
   error?: string;
   startedAt: number;
   abortController: AbortController;
+  /** 用户主动插话/停止：收尾时保留已生成的部分并标记"已打断"，不当成错误 */
+  cancelledByUser?: boolean;
+  /** 当前处于哪个阶段：DSH 执行中 / 思考 API 润色中 */
+  phase?: 'executing' | 'polishing';
 }
 
 const activeGenerations = new Map<string, ActiveGeneration>();
+
+/** 按「用户+会话」找到当前在跑的那一轮（插话时需要）。 */
+const findActiveGenerationBySession = (userId: string, sessionId: string): ActiveGeneration | undefined => {
+  if (!userId || !sessionId) return undefined;
+  let latest: ActiveGeneration | undefined;
+  for (const gen of activeGenerations.values()) {
+    if (gen.userId !== userId || gen.sessionId !== sessionId) continue;
+    if (gen.status !== 'generating') continue;
+    if (!latest || gen.startedAt > latest.startedAt) latest = gen;
+  }
+  return latest;
+};
 
 interface DshSessionInfo {
   id: string;
@@ -578,10 +596,12 @@ async function runServerSideGeneration({
   const genState: ActiveGeneration = {
     userId,
     assistantMessageId,
+    sessionId: resolvedSessionId,
     content: "",
     status: 'generating',
     startedAt: Date.now(),
     abortController,
+    phase: settings?.agentMode === true ? 'executing' : 'polishing',
   };
   activeGenerations.set(genKey, genState);
 
@@ -597,14 +617,17 @@ async function runServerSideGeneration({
   };
   await upsertMessage(userId, initialAssistantMessage);
 
+  // 这三个变量提到 try 外面：catch 里的"被用户打断"分支也要用它们
+  // （保留已生成的内容与执行结果），放在 try 内会取不到作用域。
+  const isAgentMode = settings?.agentMode === true;
+  let agentExecutionResult: { status: 'completed' | 'failed'; steps: string[]; rawOutput?: string; timestamp?: string } | null = null;
+  let accumulatedContent = "";
+  let accumulatedReasoning = "";
+
   try {
-    const isAgentMode = settings?.agentMode === true;
     // 修复：客户端字段是 harnessToken，此前误读 agentToken 导致永远取空 → 全落默认 token
     const agentToken = readUserAgentToken(settings);
-    let agentExecutionResult: { status: 'completed' | 'failed'; steps: string[]; rawOutput?: string; timestamp?: string } | null = null;
 
-    let accumulatedContent = "";
-    let accumulatedReasoning = "";
     const onChunk = (chunk: string, reasoningChunk?: string) => {
       if (chunk) accumulatedContent += chunk;
       if (reasoningChunk) accumulatedReasoning += reasoningChunk;
@@ -788,6 +811,14 @@ async function runServerSideGeneration({
           result: agentExecutionResult
         });
       }
+    }
+
+    // 本地执行结束（成功或失败）→ 进入"润色"阶段。
+    // 客户端据此判断此刻插话是否安全：执行阶段插话会丢掉正在跑的任务，
+    // 润色阶段插话只是掐断一段便宜的文本生成。
+    if (isAgentMode) {
+      genState.phase = 'polishing';
+      generationEvents.emit(`phase_${assistantMessageId}`, { phase: 'polishing' });
     }
 
     const apiEndpoint = settings?.apiEndpoint?.trim();
@@ -1036,6 +1067,42 @@ async function runServerSideGeneration({
     console.log(`[Server Background Gen] Completed for msg ${assistantMessageId} (${accumulatedContent.length} chars)`);
 
   } catch (err: any) {
+    // 用户主动插话/停止：保留已经生成的部分，标成"已打断"，不当成错误
+    if (genState.cancelledByUser) {
+      genState.status = 'cancelled';
+      const partial = (genState.content || '').trim();
+      const interruptedMessage = {
+        id: assistantMessageId,
+        sessionId: resolvedSessionId,
+        role: 'assistant',
+        content: partial,
+        reasoningContent: accumulatedReasoning,
+        timestamp: new Date().toISOString(),
+        type: 'text',
+        status: 'cancelled',
+        isAgentMode: isAgentMode || false,
+        ...(agentExecutionResult ? { agentExecution: agentExecutionResult } : {})
+      };
+      await upsertMessage(userId, interruptedMessage);
+      io.to(`user_${userId}`).emit("chat_completed", {
+        messageId: assistantMessageId,
+        content: partial,
+        reasoningContent: accumulatedReasoning,
+        interrupted: true,
+        isAgentMode: isAgentMode || false,
+        agentExecution: agentExecutionResult
+      });
+      generationEvents.emit(`completed_${assistantMessageId}`, {
+        messageId: assistantMessageId,
+        content: partial,
+        reasoningContent: accumulatedReasoning,
+        interrupted: true,
+        isAgentMode: isAgentMode || false,
+        agentExecution: agentExecutionResult
+      });
+      console.log(`[Server Background Gen] 已被用户打断，保留部分内容 ${partial.length} 字 (${assistantMessageId})`);
+      return;
+    }
     console.error(`[Server Background Gen] Error for msg ${assistantMessageId}:`, err);
     genState.status = 'error';
     genState.error = err.message || "生成失败";
@@ -1596,6 +1663,66 @@ async function startServer() {
     res.json({ success: true, messageId: assistantMessageId, status: "generating" });
   });
 
+  /**
+   * 打断 / 停止当前这一轮生成。
+   *
+   * 插话发送与"停止生成"都走这里。要点：
+   * · 掐断思考 API 的流（abortController）；
+   * · 若这一轮还在等本地 Agent 执行，同时把 DSH 那一轮也中止 ——
+   *   此前 App 的"停止"只断开了自己的 SSE，电脑上的 DSH 还在继续跑，
+   *   跑完的结果过一会儿又同步回来（"诈尸"）；
+   * · 标记 cancelledByUser，让收尾逻辑保留已生成的部分并标成"已打断"。
+   */
+  app.post("/api/chat/cancel", async (req, res) => {
+    try {
+      const userId = ((req.body?.userId as string) || "").trim();
+      const assistantMessageId = ((req.body?.assistantMessageId as string) || "").trim();
+      const sessionId = ((req.body?.sessionId as string) || "").trim();
+      if (!userId || userId === "guest") {
+        return res.status(401).json({ success: false, error: "缺少 userId" });
+      }
+
+      let gen: ActiveGeneration | undefined;
+      if (assistantMessageId) gen = activeGenerations.get(`${userId}_${assistantMessageId}`);
+      if (!gen && sessionId) gen = findActiveGenerationBySession(userId, sessionId);
+      if (!gen) {
+        return res.json({ success: true, cancelled: false, note: "当前没有进行中的生成" });
+      }
+
+      gen.cancelledByUser = true;
+      gen.status = 'cancelled';
+      try {
+        gen.abortController.abort();
+      } catch {}
+
+      // 同时中止本地 Agent 那一轮（如果还在执行阶段）
+      let agentCancelled = false;
+      for (const [taskId, pending] of pendingAgentTasks.entries()) {
+        if (pending.assistantMessageId !== gen.assistantMessageId) continue;
+        const targetToken = pending.token;
+        const agent = targetToken ? connectedAgents.get(targetToken) : undefined;
+        if (agent?.ws && agent.ws.readyState === 1) {
+          try {
+            agent.ws.send(JSON.stringify({ type: "cancel_task", taskId }));
+            agentCancelled = true;
+          } catch {}
+        }
+        clearTimeout(pending.timeoutId);
+        pendingAgentTasks.delete(taskId);
+        pending.resolve({ success: false, output: "任务已被用户打断。", steps: ["⏹ 已打断本地执行"] });
+      }
+
+      console.log(
+        `[Chat] 用户打断生成 ${gen.assistantMessageId}（阶段 ${gen.phase ?? "unknown"}）` +
+          (agentCancelled ? "，并已通知本地 DSH 中止执行" : ""),
+      );
+      io.to(`user_${userId}`).emit("chat_cancelled", { messageId: gen.assistantMessageId });
+      res.json({ success: true, cancelled: true, agentCancelled, phase: gen.phase ?? null });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err?.message || "打断失败" });
+    }
+  });
+
   // Server-side SSE Chat Stream (Streams Agent Execution & Final LLM Tokens in Realtime)
   app.post("/api/chat/stream", async (req, res) => {
     const { userId = "guest", assistantMessageId, messages, settings } = req.body;
@@ -1651,6 +1778,10 @@ async function startServer() {
       }
     };
 
+    const phaseHandler = (data: any) => {
+      sendEvent("phase", { phase: data.phase });
+    };
+
     const taskFinishedHandler = (data: any) => {
       if (data.messageId === assistantMessageId) {
         sendEvent("agent_finished", { result: data.result, taskId: data.taskId });
@@ -1663,6 +1794,8 @@ async function startServer() {
           fullContent: data.content,
           fullReasoning: data.reasoningContent,
           agentExecution: data.agentExecution,
+          // 被用户插话/停止打断时告知客户端：保留已生成的部分，不要当成失败
+          interrupted: data.interrupted === true,
         });
         cleanup();
         if (!isClosed) {
@@ -1689,6 +1822,7 @@ async function startServer() {
       generationEvents.off(`step_${assistantMessageId}`, stepHandler);
       generationEvents.off(`task_started_${assistantMessageId}`, taskStartedHandler);
       generationEvents.off(`task_finished_${assistantMessageId}`, taskFinishedHandler);
+      generationEvents.off(`phase_${assistantMessageId}`, phaseHandler);
       generationEvents.off(`completed_${assistantMessageId}`, completedHandler);
       generationEvents.off(`error_${assistantMessageId}`, errorHandler);
     };
@@ -1707,6 +1841,7 @@ async function startServer() {
     generationEvents.on(`step_${assistantMessageId}`, stepHandler);
     generationEvents.on(`task_started_${assistantMessageId}`, taskStartedHandler);
     generationEvents.on(`task_finished_${assistantMessageId}`, taskFinishedHandler);
+    generationEvents.on(`phase_${assistantMessageId}`, phaseHandler);
     generationEvents.on(`completed_${assistantMessageId}`, completedHandler);
     generationEvents.on(`error_${assistantMessageId}`, errorHandler);
 

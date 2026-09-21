@@ -861,6 +861,34 @@ class SyncService {
     return const [];
   }
 
+  /// 打断/停止服务端正在进行的这一轮生成。
+  ///
+  /// 插话发送与「停止生成」都调用它。以前 App 只断开自己的 SSE，服务端那一轮
+  /// 照跑不误（本地 DSH 也继续执行），跑完的结果过一会儿又同步回来 ——
+  /// 这就是"点了停止，答案还诈尸"的原因。
+  Future<bool> cancelServerGeneration({
+    required String userId,
+    String assistantMessageId = '',
+    String sessionId = '',
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty || cleanUserId == 'guest') return false;
+    try {
+      final resp = await _dio.post(
+        '$serverBaseUrl/api/chat/cancel',
+        data: {
+          'userId': cleanUserId,
+          if (assistantMessageId.isNotEmpty) 'assistantMessageId': assistantMessageId,
+          if (sessionId.isNotEmpty) 'sessionId': sessionId,
+        },
+      );
+      return resp.statusCode == 200;
+    } catch (e) {
+      debugPrint('[SyncService] cancelServerGeneration error: $e');
+      return false;
+    }
+  }
+
   /// 换发 Agent 配对 Token（服务端为唯一真源）。
   ///
   /// "重新生成"必须调用它而不是本地随机：服务端会生成新 token、踢掉旧连接，
