@@ -20,13 +20,11 @@ class HarnessSettingsScreen extends StatefulWidget {
 class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   late TextEditingController _tokenCtrl;
   late TextEditingController _harnessUrlCtrl;
-  late TextEditingController _workspaceCtrl;
   late TextEditingController _localWsUrlCtrl;
   late TextEditingController _localAgentTokenCtrl;
 
   final FocusNode _tokenFocus = FocusNode();
   final FocusNode _harnessUrlFocus = FocusNode();
-  final FocusNode _workspaceFocus = FocusNode();
   final FocusNode _localWsUrlFocus = FocusNode();
   final FocusNode _localAgentTokenFocus = FocusNode();
 
@@ -73,7 +71,6 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   SettingsProvider? _settingsProvider;
 
   /// 当前选中的会话 id（'' 表示尚未选择/未取到列表）。
-  String _selectedSessionId = '';
 
   /// 桥接是否在运行。
   ///
@@ -197,19 +194,14 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       urlText = '127.0.0.1:3080';
     }
     _harnessUrlCtrl = TextEditingController(text: urlText);
-    _workspaceCtrl = TextEditingController(text: s.targetWorkspace);
     _localWsUrlCtrl = TextEditingController(
       text: s.localBridgeWsUrl.isNotEmpty ? s.localBridgeWsUrl : 'http://127.0.0.1:3080',
     );
     _localAgentTokenCtrl = TextEditingController(text: s.localAgentToken);
-    _selectedSessionId = s.targetSessionId.trim();
 
     // 绑定失焦自动保存监听，解决每次击键卡顿问题
     _tokenFocus.addListener(_handleFocusChange);
     _harnessUrlFocus.addListener(_handleFocusChange);
-    _workspaceFocus.addListener(() {
-      _handleFocusChange();
-    });
     _localWsUrlFocus.addListener(_handleFocusChange);
     _localAgentTokenFocus.addListener(_handleFocusChange);
 
@@ -232,7 +224,6 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   void _handleFocusChange() {
     if (!_tokenFocus.hasFocus &&
         !_harnessUrlFocus.hasFocus &&
-        !_workspaceFocus.hasFocus &&
         !_localWsUrlFocus.hasFocus &&
         !_localAgentTokenFocus.hasFocus) {
       _saveSilently();
@@ -261,8 +252,8 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     } else {
       s.harnessServiceUrl = rawUrl;
     }
-    s.targetWorkspace = _workspaceCtrl.text.trim();
-    s.targetSessionId = _selectedSessionId.trim();
+    // 说明：工作区/会话/模型/权限这几项现在由聊天页上方的「Agent 快捷栏」负责，
+    // 本页不再写回它们 —— 否则这里保存的旧值会把快捷栏刚改的选择覆盖掉。
     s.localBridgeWsUrl = _localWsUrlCtrl.text.trim().isNotEmpty
         ? _localWsUrlCtrl.text.trim()
         : 'http://127.0.0.1:3080';
@@ -277,12 +268,10 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     _saveSilently();
     _tokenFocus.dispose();
     _harnessUrlFocus.dispose();
-    _workspaceFocus.dispose();
     _localWsUrlFocus.dispose();
     _localAgentTokenFocus.dispose();
     _tokenCtrl.dispose();
     _harnessUrlCtrl.dispose();
-    _workspaceCtrl.dispose();
     _localWsUrlCtrl.dispose();
     _localAgentTokenCtrl.dispose();
     super.dispose();
@@ -302,14 +291,10 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       final gotReal = await sp.refreshAgentCatalog(silent: false);
       if (!mounted) return;
 
+      // 这里不再"顺手清掉已失效的工作区"：快捷栏支持手输自定义路径，
+      // 手输的路径本来就不在 DSH 的目录列表里，清掉会误伤用户刚填的值。
+      // 真填错了，发消息时电脑端会明确报错，比这里静默清空好。
       final wsList = sp.agentWorkspaces;
-      if (wsList.isNotEmpty && !wsList.contains(_workspaceCtrl.text.trim())) {
-        // 之前选的工作区在电脑上已经不存在了：清掉它，不要拿假值顶替，
-        // 也不要随便替用户选一个 —— 界面显示空白，让用户自己挑。
-        _workspaceCtrl.text = '';
-        sp.settings.targetWorkspace = '';
-        sp.updateSettings(sp.settings);
-      }
 
       if (gotReal) {
         _snack('✅ 已同步电脑端目录（${wsList.length} 个工作区 / ${sp.agentSessions.length} 个会话）',
