@@ -1142,6 +1142,14 @@ async def apply_dsh_session_permission(harness_url: str, session_id: str, preset
         try:
             raw = await loop.run_in_executor(None, do_post)
             return True, raw
+        except urllib.error.HTTPError as he:
+            # 4xx 是"预设名不合法"这类业务错误：把 DSH 的原话带回去，
+            # 别笼统说成"接口不可用"，否则用户不知道错在哪
+            try:
+                detail = he.read().decode("utf-8", "replace")
+            except Exception:
+                detail = f"HTTP {he.code}"
+            return False, detail
         except Exception:
             continue
     return False, "权限切换失败：本地 DSH 未响应（可能插件版本过旧，缺少 /v1/session/permission）"
@@ -1205,6 +1213,50 @@ async def query_dsh_permission_presets(harness_url: str):
         except Exception:
             continue
     return False, []
+
+
+async def try_handle_dsh_command(prompt: str, session_id: str, harness_url: str):
+    """
+    把 App 里敲的 DSH 斜杠命令**当命令执行**，而不是丢给 Agent 当提示词。
+
+    背景：在 App 聊天框里发 `/permission danger-full-access`，走的是提示词通道，
+    DSH 只会把它当成一句话交给模型 —— 权限一点没变，用户却以为命令生效了。
+    这里在派发任务前拦一道：整条消息就是一条已知命令时，直接调对应接口执行，
+    并把结果作为本轮回复返回。
+
+    目前接管 /permission（本地插件已有即时接口）。返回 (success, output) 表示
+    已接管；返回 None 表示不是已知命令，按普通任务继续走。
+    """
+    text = (prompt or "").strip()
+    if not text.startswith("/"):
+        return None
+    # 只处理"整条消息就是一条命令"，避免误伤正文里带斜杠的正常提问
+    if len(text.splitlines()) > 1:
+        return None
+
+    parts = text.split()
+    name = parts[0][1:].lower()
+    if name != "permission":
+        return None
+
+    if not session_id:
+        return False, "❌ 需要先在 App 里选择一个会话，才能切换权限预设"
+
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    # 不带参数：列出当前可用预设
+    if not arg:
+        ok, presets = await query_dsh_permission_presets(harness_url)
+        if not ok or not presets:
+            return False, "❌ 读取权限预设失败：请确认本地 DSH 与 app-bridge 插件正常"
+        names = "、".join(str(p.get("id")) for p in presets if p.get("id"))
+        return True, f"可用权限预设：{names}\n用法：/permission <预设名>"
+
+    ok, raw = await apply_dsh_session_permission(harness_url, session_id, arg)
+    detail = raw if isinstance(raw, str) else str(raw)
+    if ok and '"success"' in detail:
+        return True, f"✅ 已把当前会话的权限预设切换为「{arg}」"
+    return False, f"❌ 切换权限预设失败：{detail}"
 
 async def archive_dsh_session(harness_url: str, session_id: str):
     """归档本地 DSH 会话 (DELETE /v1/sessions/:id)"""
@@ -2083,9 +2135,15 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
 
         try:
             async with semaphore:
-                success, output = await execute_local_harness(
-                    task_id, prompt, messages, harness_url, model_name, session_id, on_step, extra_config, target_workspace=target_ws, on_approval_callback=on_approval
-                )
+                # 先看是不是 DSH 斜杠命令：是就直接执行，不丢给模型
+                handled = await try_handle_dsh_command(prompt, session_id, harness_url)
+                if handled is not None:
+                    success, output = handled
+                    await on_step(output)
+                else:
+                    success, output = await execute_local_harness(
+                        task_id, prompt, messages, harness_url, model_name, session_id, on_step, extra_config, target_workspace=target_ws, on_approval_callback=on_approval
+                    )
         except Exception as task_err:
             success = False
             output = f"本地执行异常: {task_err}"
@@ -2534,9 +2592,15 @@ async def run_bridge_client(args):
                             }
 
                             try:
-                                success, output = await execute_local_harness(
-                                    task_id, prompt, messages, harness_url, model_name, session_id, ws_step_cb, extra_config, target_workspace=target_ws, on_approval_callback=ws_approval_cb
-                                )
+                                # 先看是不是 DSH 斜杠命令：是就直接执行，不丢给模型
+                                handled = await try_handle_dsh_command(prompt, session_id, harness_url)
+                                if handled is not None:
+                                    success, output = handled
+                                    await ws_step_cb(output)
+                                else:
+                                    success, output = await execute_local_harness(
+                                        task_id, prompt, messages, harness_url, model_name, session_id, ws_step_cb, extra_config, target_workspace=target_ws, on_approval_callback=ws_approval_cb
+                                    )
                             except Exception as task_err:
                                 success = False
                                 output = f"本地执行异常: {task_err}"
