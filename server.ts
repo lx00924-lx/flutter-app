@@ -3655,6 +3655,9 @@ if %errorlevel% neq 0 (
   const wss = new WebSocketServer({ noServer: true });
   // WebSocket Server for Local DeepSeek Agent Hub
   const agentWss = new WebSocketServer({ noServer: true });
+  // App 端推送通道（手机/电脑客户端）：把服务端已经在广播的事件真正送到端上，
+  // 而不是让客户端靠 4 秒 / 12 秒轮询去"猜"有没有变化。
+  const appWss = new WebSocketServer({ noServer: true });
 
   httpServer.on("upgrade", (request, socket, head) => {
     try {
@@ -3667,15 +3670,154 @@ if %errorlevel% neq 0 (
         agentWss.handleUpgrade(request, socket, head, (ws) => {
           agentWss.emit("connection", ws, request);
         });
+      } else if (requestUrl.pathname === "/ws/app") {
+        appWss.handleUpgrade(request, socket, head, (ws) => {
+          appWss.emit("connection", ws, request);
+        });
       }
     } catch (err) {
       console.error("[WS Upgrade Error]", err);
     }
   });
 
-  // Handle Local Agent WebSocket Connections
-  agentWss.on("connection", (clientWs, request) => {
+  /**
+   * App 端推送通道：把服务端原本只走 socket.io 的事件，真正推给手机/电脑客户端。
+   *
+   * 背景：服务端一直在广播 17 种事件（设置变更、上下线、审批、任务进度、消息等），
+   * 但 Flutter 端从来没有 socket.io 客户端 —— 没人听。于是只能靠：
+   *   · 4 秒一次的会话轮询（在线状态/令牌/桥接指令/切换锁/设置版本号）
+   *   · 12 秒一次的消息漫游拉取
+   * 这些轮询每天每台设备要发近 3 万次请求，而且审批这类"只在某一轮次里才有通道"
+   * 的事件一旦错过就彻底收不到。这里补一条双向通道，轮询降级为兜底。
+   */
+  interface AppSocket {
+    ws: WSWebSocket;
+    userId: string;
+    clientSessionId: string;
+    deviceType: string;
+    lastPing: number;
+  }
+  const appSockets = new Map<string, AppSocket>();
+
+  const pushToUser = (userId: string, event: string, payload: any) => {
+    if (!userId) return;
+    for (const conn of appSockets.values()) {
+      if (conn.userId !== userId) continue;
+      if (conn.ws.readyState !== WSWebSocket.OPEN) continue;
+      try {
+        conn.ws.send(JSON.stringify({ event, data: payload ?? null, at: Date.now() }));
+      } catch {}
+    }
+  };
+
+  const pushToAll = (event: string, payload: any) => {
+    for (const conn of appSockets.values()) {
+      if (conn.ws.readyState !== WSWebSocket.OPEN) continue;
+      try {
+        conn.ws.send(JSON.stringify({ event, data: payload ?? null, at: Date.now() }));
+      } catch {}
+    }
+  };
+
+  // 把既有的 socket.io 广播"顺带"复制一份到 App 推送通道：
+  // 全项目 17 处 io.emit / io.to(room).emit 不用逐个改写，新加的事件也自动覆盖。
+  const originalIoEmit = io.emit.bind(io);
+  (io as any).emit = (event: string, ...args: any[]) => {
     try {
+      pushToAll(event, args[0]);
+    } catch {}
+    return (originalIoEmit as any)(event, ...args);
+  };
+  const originalIoTo = io.to.bind(io);
+  (io as any).to = (room: string) => {
+    const target: any = (originalIoTo as any)(room);
+    const originalTargetEmit = target.emit.bind(target);
+    target.emit = (event: string, ...args: any[]) => {
+      try {
+        // room 形如 user_<userId>：只推给该用户自己的设备
+        const userId = typeof room === "string" && room.startsWith("user_") ? room.slice(5) : "";
+        if (userId) pushToUser(userId, event, args[0]);
+        else pushToAll(event, args[0]);
+      } catch {}
+      return originalTargetEmit(event, ...args);
+    };
+    return target;
+  };
+
+  appWss.on("connection", async (clientWs, request) => {
+    let conn: AppSocket | null = null;
+    try {
+      const requestUrl = new URL(request.url || "", `http://${request.headers.host || "localhost"}`);
+      const userId = (requestUrl.searchParams.get("userId") || "").trim();
+      const clientSessionId = (requestUrl.searchParams.get("clientSessionId") || "").trim();
+      const deviceType = (requestUrl.searchParams.get("deviceType") || "mobile").trim();
+
+      if (!userId || userId === "guest" || !clientSessionId) {
+        clientWs.send(JSON.stringify({ event: "auth_error", data: { message: "缺少 userId 或 clientSessionId" } }));
+        clientWs.close(4001, "bad params");
+        return;
+      }
+
+      // 与 check-session 同一套单点互斥校验：被顶下线的设备不允许再挂长连接
+      const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
+      const active = sessions[userId]?.[deviceType === "mobile" ? "mobile" : "desktop"];
+      if (active && active.clientSessionId && active.clientSessionId !== clientSessionId) {
+        clientWs.send(JSON.stringify({
+          event: "force_logout",
+          data: { reason: `您的账号已在另一台${deviceType === "mobile" ? "手机" : "电脑"}上登录，当前设备已被下线。` },
+        }));
+        clientWs.close(4002, "kicked");
+        return;
+      }
+
+      conn = { ws: clientWs, userId, clientSessionId, deviceType, lastPing: Date.now() };
+      appSockets.set(clientSessionId, conn);
+      console.log(`[App WS] ${deviceType} 端已连接推送通道（user=${userId}）`);
+
+      clientWs.send(JSON.stringify({ event: "ready", data: { userId, deviceType, at: Date.now() } }));
+
+      clientWs.on("message", (raw) => {
+        try {
+          const msg = JSON.parse(raw.toString());
+          if (!conn) return;
+          conn.lastPing = Date.now();
+          if (msg.type === "ping") {
+            clientWs.send(JSON.stringify({ event: "pong", data: { at: Date.now() } }));
+          }
+        } catch {}
+      });
+
+      clientWs.on("close", () => {
+        if (conn && appSockets.get(conn.clientSessionId)?.ws === clientWs) {
+          appSockets.delete(conn.clientSessionId);
+        }
+        console.log(`[App WS] ${deviceType} 端推送通道已断开（user=${userId}）`);
+      });
+
+      const pingTimer = setInterval(() => {
+        if (clientWs.readyState !== WSWebSocket.OPEN) {
+          clearInterval(pingTimer);
+          return;
+        }
+        // 45 秒没收到任何消息就认为这条连接已死（手机切网/休眠时很常见）
+        if (conn && Date.now() - conn.lastPing > 45000) {
+          try { clientWs.close(4003, "idle timeout"); } catch {}
+          clearInterval(pingTimer);
+          return;
+        }
+        try {
+          clientWs.send(JSON.stringify({ event: "ping", data: { at: Date.now() } }));
+        } catch {}
+      }, 20000);
+      clientWs.on("close", () => clearInterval(pingTimer));
+    } catch (err) {
+      console.error("[App WS] 连接处理异常:", err);
+      try { clientWs.close(1011, "server error"); } catch {}
+    }
+  });
+
+  // Handle Local Agent WebSocket Connections
+  agentWss.on("connection", (clientWs, request) => {    try {
       const requestUrl = new URL(request.url || "", `http://${request.headers.host || "localhost"}`);
       let token = requestUrl.searchParams.get("token")?.trim() || "";
       let clientName = requestUrl.searchParams.get("clientName")?.trim() || "DeepSeek-Harness-Local";

@@ -164,9 +164,53 @@ class SettingsProvider extends ChangeNotifier {
     BridgeProcessManager.instance.tokenProvider = () async => _settings.harnessToken;
     BridgeProcessManager.instance.harnessUrlProvider = () async => _harnessUrlForBridge();
 
+    // 推送长连接：把服务端广播的事件（设置/上下线/审批/消息）真正送到端上，
+    // 轮询退化为兜底（连通时 4 秒 → 30 秒）
+    SyncService.instance.onPushEvent = _handlePushEvent;
+    SyncService.instance.startPushChannel(
+      userId: _settings.loginAccount,
+      clientSessionId: _settings.clientSessionId,
+      deviceType: AppSettings.currentDeviceType,
+    );
+
     // 已登录：开启 Android 常驻保活前台服务，确保划掉任务栏后
     // Dart isolate 仍存活，上面的会话轮询与中继长连接得以继续运行
     KeepAliveService.enableAfterLogin();
+  }
+
+  /// 供 ChatProvider 订阅的"消息 / 审批"类推送事件
+  void Function(String event, Map<String, dynamic> data)? chatPushHandler;
+
+  /// 分发推送通道收到的事件：设置 / 在线状态 / 强制下线在这里处理，
+  /// 消息与审批转给 ChatProvider（它管着消息列表和审批卡片）。
+  void _handlePushEvent(String event, Map<String, dynamic> data) {
+    switch (event) {
+      case 'push_connected':
+      case 'push_disconnected':
+        SyncService.instance.refreshPollingInterval();
+        return;
+      case 'settings_updated':
+        // 另一端改过设置：立刻拉一次，不必再等 4 秒轮询发现版本号变化
+        unawaited(pullCloudSettings());
+        return;
+      case 'agent_status_change':
+        final online = data['online'];
+        if (online is bool) _applyAgentOnline(online);
+        return;
+      case 'force_logout':
+        final targetDevice = data['deviceType']?.toString() ?? '';
+        final kickedSession = data['kickedSessionId']?.toString() ?? '';
+        final isMine = kickedSession.isNotEmpty
+            ? kickedSession == _settings.clientSessionId
+            : targetDevice == AppSettings.currentDeviceType;
+        if (isMine) {
+          final reason = data['reason']?.toString() ?? '您的账号已在另一台设备上登录，当前设备已被下线。';
+          handleForceLogout(reason);
+        }
+        return;
+      default:
+        chatPushHandler?.call(event, data);
+    }
   }
 
   /// 服务端在每次轮询（4 秒）下发 Agent 在线状态，据此自动更新界面。
@@ -274,6 +318,8 @@ class SettingsProvider extends ChangeNotifier {
 
     // 被顶下线后不应再保留"切换中"的置灰状态，否则重新登录后按钮是灰的
     _bridgeTransition = null;
+    // 同时断开推送长连接，避免被踢的设备还挂在那里收事件
+    SyncService.instance.stopPushChannel();
     _settings.isLoggedIn = false;
     _save();
 

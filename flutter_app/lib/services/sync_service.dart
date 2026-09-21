@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:dio/dio.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:web_socket_channel/io.dart';
 import '../models/app_settings.dart';
 import '../config/app_config.dart';
 import '../models/chat_message.dart';
@@ -85,6 +87,156 @@ class SyncService {
   /// 已应用过的设置版本号，避免重复拉取
   int _appliedSettingsRevision = 0;
 
+  // ==================== App 推送通道（原生 WebSocket） ====================
+  //
+  // 服务端一直在广播 17 种事件（设置变更、上下线、审批、任务进度、消息……），
+  // 但客户端从来没有 socket.io 客户端，等于没人听：只能靠 4 秒会话轮询 + 12 秒
+  // 消息拉取去"猜"。这条通道把这些事件真正送到端上，轮询降级为兜底。
+  WebSocketChannel? _pushChannel;
+  StreamSubscription? _pushSub;
+  Timer? _pushReconnectTimer;
+  Timer? _pushPingTimer;
+  bool _pushConnected = false;
+  int _pushRetries = 0;
+  String _pushUserId = '';
+  String _pushClientSessionId = '';
+  String _pushDeviceType = 'mobile';
+  bool _pushClosedByUs = false;
+
+  /// 推送通道是否已连通（界面与轮询频率据此自适应）
+  bool get pushConnected => _pushConnected;
+
+  /// 收到推送事件时的回调（event 名 + data），由 SettingsProvider 注册后再分发
+  void Function(String event, Map<String, dynamic> data)? onPushEvent;
+
+  /// 建立推送长连接（登录后调用；断开会自动重连）
+  void startPushChannel({
+    required String userId,
+    required String clientSessionId,
+    required String deviceType,
+  }) {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty || cleanUserId == 'guest' || clientSessionId.trim().isEmpty) return;
+    stopPushChannel();
+    _pushUserId = cleanUserId;
+    _pushClientSessionId = clientSessionId.trim();
+    _pushDeviceType = deviceType;
+    _pushClosedByUs = false;
+    _pushRetries = 0;
+    _connectPushChannel();
+  }
+
+  void stopPushChannel() {
+    _pushClosedByUs = true;
+    _pushReconnectTimer?.cancel();
+    _pushPingTimer?.cancel();
+    _pushSub?.cancel();
+    _pushSub = null;
+    _pushChannel?.sink.close();
+    _pushChannel = null;
+    _pushConnected = false;
+  }
+
+  Uri? _pushUri() {
+    try {
+      final base = Uri.parse(serverBaseUrl);
+      final scheme = base.scheme == 'https' ? 'wss' : 'ws';
+      return base.replace(
+        scheme: scheme,
+        path: '/ws/app',
+        queryParameters: {
+          'userId': _pushUserId,
+          'clientSessionId': _pushClientSessionId,
+          'deviceType': _pushDeviceType,
+        },
+      );
+    } catch (e) {
+      debugPrint('[SyncService] 构造推送地址失败: $e');
+      return null;
+    }
+  }
+
+  void _connectPushChannel() {
+    final uri = _pushUri();
+    if (uri == null) return;
+    try {
+      _pushChannel = kIsWeb
+          ? WebSocketChannel.connect(uri)
+          : IOWebSocketChannel.connect(uri, pingInterval: const Duration(seconds: 30));
+    } catch (e) {
+      debugPrint('[SyncService] 推送通道连接失败: $e');
+      _schedulePushReconnect();
+      return;
+    }
+
+    _pushSub = _pushChannel!.stream.listen(
+      (raw) {
+        _pushRetries = 0;
+        if (!_pushConnected) {
+          _pushConnected = true;
+          debugPrint('[SyncService] 推送通道已连通');
+          onPushEvent?.call('push_connected', const {});
+        }
+        try {
+          final decoded = jsonDecode(raw.toString());
+          if (decoded is! Map) return;
+          final event = decoded['event']?.toString() ?? '';
+          if (event.isEmpty) return;
+          final data = decoded['data'] is Map
+              ? Map<String, dynamic>.from(decoded['data'] as Map)
+              : <String, dynamic>{};
+          if (event == 'ping') {
+            _pushChannel?.sink.add(jsonEncode({'type': 'ping'}));
+            return;
+          }
+          if (event == 'pong' || event == 'ready') return;
+          onPushEvent?.call(event, data);
+        } catch (e) {
+          debugPrint('[SyncService] 推送消息解析失败: $e');
+        }
+      },
+      onError: (e) {
+        debugPrint('[SyncService] 推送通道错误: $e');
+        _handlePushDown();
+      },
+      onDone: () {
+        debugPrint('[SyncService] 推送通道已关闭');
+        _handlePushDown();
+      },
+      cancelOnError: true,
+    );
+
+    // 客户端心跳：服务端 20 秒发一次 ping，这里 25 秒回一次，双向都能发现死链
+    _pushPingTimer?.cancel();
+    _pushPingTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+      if (_pushConnected) {
+        try {
+          _pushChannel?.sink.add(jsonEncode({'type': 'ping'}));
+        } catch (_) {}
+      }
+    });
+  }
+
+  void _handlePushDown() {
+    final wasConnected = _pushConnected;
+    _pushConnected = false;
+    _pushPingTimer?.cancel();
+    if (wasConnected) onPushEvent?.call('push_disconnected', const {});
+    if (!_pushClosedByUs) _schedulePushReconnect();
+  }
+
+  void _schedulePushReconnect() {
+    _pushReconnectTimer?.cancel();
+    // 退避重连：2s → 5s → 10s → 之后固定 20s
+    final delays = [2, 5, 10, 20];
+    final delay = delays[_pushRetries < delays.length ? _pushRetries : delays.length - 1];
+    _pushRetries++;
+    _pushReconnectTimer = Timer(Duration(seconds: delay), () {
+      if (_pushClosedByUs || _pushUserId.isEmpty) return;
+      _connectPushChannel();
+    });
+  }
+
   String get serverBaseUrl {
     if (kIsWeb) {
       final uri = Uri.base;
@@ -151,16 +303,41 @@ class SyncService {
     // 立即执行一次健康核验
     _checkSessionOnce(cleanUserId, clientSessionId, deviceType);
 
-    // 每 4 秒轮询一次当前设备会话状态
-    _sessionWatcherTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      _checkSessionOnce(cleanUserId, clientSessionId, deviceType);
-    });
+    // 轮询周期自适应：推送通道连通时降到 30 秒（只当兜底），断了回到 4 秒。
+    // 4 秒轮询每天每台设备要发 21600 次请求，长连接顶上之后没必要这么密。
+    _restartSessionTimer(cleanUserId, clientSessionId, deviceType);
   }
+
+  void _restartSessionTimer(String userId, String clientSessionId, String deviceType) {
+    _sessionWatcherTimer?.cancel();
+    final seconds = _pushConnected ? 30 : 4;
+    _sessionWatcherTimer = Timer.periodic(Duration(seconds: seconds), (_) {
+      _checkSessionOnce(userId, clientSessionId, deviceType);
+    });
+    // 推送通道状态变化时，这里会由 onPushEvent('push_connected'/'push_disconnected') 重新调用
+    _watcherArgs = (userId: userId, clientSessionId: clientSessionId, deviceType: deviceType);
+  }
+
+  ({String userId, String clientSessionId, String deviceType})? _watcherArgs;
+
+  /// 推送通道上下线时调整轮询频率
+  void refreshPollingInterval() {
+    final args = _watcherArgs;
+    if (args == null) return;
+    final target = _pushConnected ? 30 : 4;
+    if (_currentPollSeconds == target) return;
+    _currentPollSeconds = target;
+    _restartSessionTimer(args.userId, args.clientSessionId, args.deviceType);
+    debugPrint('[SyncService] 会话轮询周期调整为 ${target}s（推送通道${_pushConnected ? "已连通" : "断开"}）');
+  }
+
+  int _currentPollSeconds = 4;
 
   /// 停止多端登录监控
   void stopSessionWatcher() {
     _sessionWatcherTimer?.cancel();
     _sessionWatcherTimer = null;
+    _watcherArgs = null;
   }
 
   Future<void> _checkSessionOnce(String userId, String clientSessionId, String deviceType) async {

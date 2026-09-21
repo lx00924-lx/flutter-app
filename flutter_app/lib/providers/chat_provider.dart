@@ -82,16 +82,54 @@ class ChatProvider extends ChangeNotifier {
   ChatProvider(this.settingsProvider) {
     _storage.cleanOrphanData().then((_) => loadSessions());
     _startPeriodicSync();
+    // 消息/审批类事件走推送通道：审批不再依赖"正好有 SSE 在流"，
+    // 另一端的新消息也能立刻拉取，而不是等下一轮 12 秒轮询。
+    settingsProvider.chatPushHandler = _handlePushEvent;
+  }
+
+  /// 来自推送长连接的事件（消息 / 审批）
+  void _handlePushEvent(String event, Map<String, dynamic> data) {
+    switch (event) {
+      case 'chat_completed':
+      case 'messages_updated':
+      case 'receive_message':
+      case 'message_deleted':
+      case 'session_deleted':
+      case 'agent_task_finished':
+        // 有变化就立刻对一次账（拉取本身是幂等的"只导入本地没有的"）
+        if (!_isGenerating) _silentSyncFromServer();
+        return;
+      case 'agent_waiting_approval':
+        final approval = data['approval'];
+        if (approval is Map) {
+          _pendingApproval = {
+            ...Map<String, dynamic>.from(approval),
+            if (data['taskId'] != null) 'taskId': data['taskId'],
+            if (data['messageId'] != null) 'messageId': data['messageId'],
+          };
+          notifyListeners();
+        }
+        return;
+      case 'agent_approval_resolved':
+        dismissApproval();
+        return;
+      default:
+    }
   }
 
   void _startPeriodicSync() {
     _periodicSyncTimer?.cancel();
+    _periodicSyncTicks = 0;
     _periodicSyncTimer = Timer.periodic(const Duration(seconds: 12), (_) {
-      if (!_isGenerating) {
-        _silentSyncFromServer();
-      }
+      _periodicSyncTicks++;
+      // 推送通道连通时降到 60 秒一次（只当兜底）：12 秒拉取每天每台设备 7200 次，
+      // 有长连接顶着就不必这么密。
+      if (SyncService.instance.pushConnected && _periodicSyncTicks % 5 != 0) return;
+      if (!_isGenerating) _silentSyncFromServer();
     });
   }
+
+  int _periodicSyncTicks = 0;
 
   @override
   void dispose() {
