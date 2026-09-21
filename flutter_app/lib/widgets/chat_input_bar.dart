@@ -132,6 +132,8 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   bool _slashMenuVisible = false;
   /// `/` 之后已输入的内容（用于过滤命令）
   String _slashQuery = '';
+  /// 命令名之后已输入的参数（用于过滤参数候选，如 `/permission work` → `work`）
+  String _slashArgQuery = '';
   /// 已展开参数的命令（例如 /permission 展开三种预设）
   SlashCommand? _slashExpanded;
 
@@ -152,18 +154,20 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
       return;
     }
 
-    // `/permission ` 后面已带空格 → 直接展开该命令的参数候选
+    // `/permission ` 后面已带空格 → 展开该命令的参数候选，并按已输入参数过滤
     final body = text.substring(1);
     final spaceIdx = body.indexOf(' ');
     if (spaceIdx >= 0) {
       final name = body.substring(0, spaceIdx);
+      final argText = body.substring(spaceIdx + 1).trim();
       final cmd = kSlashCommands.where((c) => c.name == name).firstOrNull;
       if (cmd != null && cmd.options.isNotEmpty) {
-        if (!_slashMenuVisible || _slashExpanded?.name != cmd.name) {
+        if (!_slashMenuVisible || _slashExpanded?.name != cmd.name || _slashArgQuery != argText) {
           setState(() {
             _slashMenuVisible = true;
             _slashExpanded = cmd;
             _slashQuery = '';
+            _slashArgQuery = argText;
           });
         }
         return;
@@ -176,6 +180,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
         _slashMenuVisible = true;
         _slashExpanded = null;
         _slashQuery = query;
+        _slashArgQuery = '';
       });
     }
   }
@@ -1044,6 +1049,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
               if (_slashMenuVisible)
                 SlashCommandMenu(
                   query: _slashQuery,
+                  argQuery: _slashArgQuery,
                   expanded: _slashExpanded,
                   onPickCommand: _onPickSlashCommand,
                   onPickOption: _onPickSlashOption,
