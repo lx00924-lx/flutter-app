@@ -153,6 +153,8 @@ class ChatProvider extends ChangeNotifier {
     // 消息/审批类事件走推送通道：审批不再依赖"正好有 SSE 在流"，
     // 另一端的新消息也能立刻拉取，而不是等下一轮 12 秒轮询。
     settingsProvider.chatPushHandler = _handlePushEvent;
+    // 启动时补一次挂起的选择框（可能是在 App 没开/断线时提出来的）
+    unawaited(refreshPendingQuestions());
   }
 
   /// 来自推送长连接的事件（消息 / 审批）
@@ -179,6 +181,24 @@ class ChatProvider extends ChangeNotifier {
         return;
       case 'agent_approval_resolved':
         dismissApproval();
+        return;
+      case 'agent_question':
+        final rawQuestions = data['questions'];
+        final questionId = data['questionId']?.toString() ?? '';
+        if (questionId.isNotEmpty && rawQuestions is List) {
+          _setPendingQuestion({
+            'questionId': questionId,
+            'sessionId': data['sessionId'],
+            'questions': rawQuestions,
+          });
+        }
+        return;
+      case 'agent_question_resolved':
+        dismissQuestion();
+        return;
+      case 'push_connected':
+        // 推送通道刚连上（含断线重连）：断线期间挂起的选择框要补出来
+        unawaited(refreshPendingQuestions());
         return;
       default:
     }
@@ -381,6 +401,298 @@ class ChatProvider extends ChangeNotifier {
     NotificationService.instance.cancelApprovalRequest();
     notifyListeners();
   }
+
+  //#region 选择框（DSH 的 ask_user_question）
+
+  /// 正在等待用户选择的「选择框」（DSH 里 Agent 提问后卡住等答案）
+  Map<String, dynamic>? _pendingQuestion;
+  Map<String, dynamic>? get pendingQuestion => _pendingQuestion;
+
+  /// 弹窗是否已打开（避免重复堆叠）
+  bool _questionDialogOpen = false;
+
+  /// 每个问题已勾选的选项：questionId(问题自身 id) → 选中的 label
+  final Map<String, Set<String>> _questionPicks = {};
+
+  /// 每个问题的自定义输入（也可以直接打字回答）
+  final Map<String, TextEditingController> _questionCustoms = {};
+
+  /// 当前挂起的问题列表（服务端原样透传 DSH 的 questions 数组）
+  List<Map<String, dynamic>> get _pendingQuestionItems {
+    final raw = _pendingQuestion?['questions'];
+    if (raw is List) {
+      return raw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+    }
+    return const [];
+  }
+
+  /// 记录一个待答选择框：更新状态 + 系统通知 + 弹窗
+  void _setPendingQuestion(Map<String, dynamic> question) {
+    final questionId = question['questionId']?.toString() ?? '';
+    if (questionId.isEmpty) return;
+    final sameId = _pendingQuestion?['questionId']?.toString() == questionId;
+    _pendingQuestion = question;
+    notifyListeners();
+    if (sameId) return;
+
+    _questionPicks.clear();
+    _questionCustoms.clear();
+
+    final items = _pendingQuestionItems;
+    final head = items.isEmpty
+        ? '电脑端 Agent 提了一个问题'
+        : (items.first['header'] ?? items.first['question'] ?? '电脑端 Agent 提了一个问题').toString();
+
+    // 系统通知：App 不在前台时这是唯一能提醒到的渠道
+    NotificationService.instance.showQuestionRequest(
+      questionId: questionId,
+      title: '电脑端 Agent 在等你选择',
+      body: head.length > 90 ? '${head.substring(0, 90)}…' : head,
+    );
+    _presentQuestionDialog();
+  }
+
+  /// 用根导航器弹选择框（跨页面可见，和审批同一套机制）
+  void _presentQuestionDialog() {
+    if (_questionDialogOpen) return;
+    final ctx = rootNavigatorKey.currentContext;
+    if (ctx == null) {
+      debugPrint('[ChatProvider] 暂无可用的根上下文，选择框改为内联卡片展示');
+      return;
+    }
+    _questionDialogOpen = true;
+    showDialog<void>(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: const Row(
+              children: [
+                Icon(Icons.help_outline, color: Color(0xFF3B82F6), size: 24),
+                SizedBox(width: 8),
+                Text('电脑端 Agent 提问', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final item in _pendingQuestionItems) ..._buildQuestionBlock(item, setDialogState),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () async {
+                  Navigator.of(dialogCtx).pop();
+                  await declineQuestion();
+                },
+                child: const Text('在电脑上回答'),
+              ),
+              FilledButton(
+                onPressed: () async {
+                  Navigator.of(dialogCtx).pop();
+                  await answerQuestion(_collectQuestionAnswers());
+                },
+                child: const Text('提交'),
+              ),
+            ],
+          );
+        },
+      ),
+    ).whenComplete(() => _questionDialogOpen = false);
+  }
+
+  /// 渲染一个问题的正文 + 选项 chip + 自定义输入
+  List<Widget> _buildQuestionBlock(
+    Map<String, dynamic> item,
+    void Function(void Function()) setDialogState,
+  ) {
+    final id = item['id']?.toString() ?? '';
+    final header = item['header']?.toString() ?? '';
+    final text = item['question']?.toString() ?? '';
+    final multi = item['multi_select'] == true || item['multiSelect'] == true;
+    final rawOptions = item['options'];
+    final options = rawOptions is List ? rawOptions.whereType<Map>().toList() : const <Map>[];
+    final picked = _questionPicks.putIfAbsent(id, () => <String>{});
+    final controller = _questionCustoms.putIfAbsent(id, () => TextEditingController());
+
+    return [
+      if (header.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Text(header, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+        ),
+      if (text.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Text(text, style: const TextStyle(fontSize: 13.5, height: 1.4)),
+        ),
+      if (options.isNotEmpty)
+        Wrap(
+          spacing: 8,
+          runSpacing: 6,
+          children: [
+            for (final opt in options)
+              Builder(builder: (_) {
+                final label = opt['label']?.toString() ?? '';
+                if (label.isEmpty) return const SizedBox.shrink();
+                final selected = picked.contains(label);
+                final desc = opt['description']?.toString() ?? '';
+                if (multi) {
+                  return FilterChip(
+                    label: Text(label),
+                    selected: selected,
+                    tooltip: desc.isEmpty ? null : desc,
+                    onSelected: (value) => setDialogState(() {
+                      if (value) {
+                        picked.add(label);
+                      } else {
+                        picked.remove(label);
+                      }
+                    }),
+                  );
+                }
+                return ChoiceChip(
+                  label: Text(label),
+                  selected: selected,
+                  tooltip: desc.isEmpty ? null : desc,
+                  onSelected: (_) => setDialogState(() {
+                    picked
+                      ..clear()
+                      ..add(label);
+                  }),
+                );
+              }),
+          ],
+        ),
+      if (options.any((opt) => (opt['description']?.toString() ?? '').isNotEmpty))
+        Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final opt in options)
+                if ((opt['description']?.toString() ?? '').isNotEmpty)
+                  Text(
+                    '· ${opt['label']}：${opt['description']}',
+                    style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600),
+                  ),
+            ],
+          ),
+        ),
+      const SizedBox(height: 8),
+      TextField(
+        controller: controller,
+        style: const TextStyle(fontSize: 13),
+        decoration: const InputDecoration(
+          isDense: true,
+          hintText: '也可以直接输入回答（可选）',
+          border: OutlineInputBorder(),
+        ),
+        onChanged: (_) => setDialogState(() {}),
+      ),
+      const SizedBox(height: 14),
+    ];
+  }
+
+  /// 把当前选择收成 DSH 要的答案格式：`[{id, selected:[...], custom?}]`
+  List<Map<String, dynamic>> _collectQuestionAnswers() {
+    final result = <Map<String, dynamic>>[];
+    for (final item in _pendingQuestionItems) {
+      final id = item['id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+      final picked = _questionPicks[id] ?? <String>{};
+      final custom = _questionCustoms[id]?.text.trim() ?? '';
+      result.add({
+        'id': id,
+        'selected': picked.toList(),
+        if (custom.isNotEmpty) 'custom': custom,
+      });
+    }
+    return result;
+  }
+
+  /// 从内联卡片再打开一次选择框弹窗（用户手滑关掉、或当时不在聊天页没看到）
+  void presentPendingQuestionDialog() {
+    if (_pendingQuestion == null) return;
+    _questionDialogOpen = false;
+    _presentQuestionDialog();
+  }
+
+  /// 提交答案（App 上选的）
+  Future<bool> answerQuestion(List<Map<String, dynamic>> answers) async {
+    final pending = _pendingQuestion;
+    if (pending == null) return false;
+    final questionId = pending['questionId']?.toString() ?? '';
+    if (questionId.isEmpty) {
+      dismissQuestion();
+      return false;
+    }
+    final ok = await SyncService.instance.answerAgentQuestion(
+      token: settingsProvider.settings.harnessToken,
+      questionId: questionId,
+      answers: answers,
+      userId: settingsProvider.syncUserId,
+    );
+    if (ok) dismissQuestion();
+    return ok;
+  }
+
+  /// 放弃在 App 上回答：交回电脑端网页弹窗（DSH 侧行为与装这个功能前一致）
+  Future<bool> declineQuestion() async {
+    final pending = _pendingQuestion;
+    if (pending == null) return false;
+    final questionId = pending['questionId']?.toString() ?? '';
+    if (questionId.isEmpty) {
+      dismissQuestion();
+      return false;
+    }
+    final ok = await SyncService.instance.answerAgentQuestion(
+      token: settingsProvider.settings.harnessToken,
+      questionId: questionId,
+      decline: true,
+      userId: settingsProvider.syncUserId,
+    );
+    if (ok) dismissQuestion();
+    return ok;
+  }
+
+  /// 本地清掉选择框（已被答复 / 超时交回电脑端）
+  void dismissQuestion() {
+    if (_pendingQuestion == null) return;
+    _pendingQuestion = null;
+    _questionPicks.clear();
+    _questionCustoms.clear();
+    NotificationService.instance.cancelQuestionRequest();
+    notifyListeners();
+  }
+
+  /// 补拉服务端挂起的选择框：App 启动、重连、推送通道刚连上时都要对一次账，
+  /// 否则断线期间挂起的问题在端上永远看不到（服务端 10 分钟后才过期）。
+  Future<void> refreshPendingQuestions() async {
+    if (_pendingQuestion != null) return;
+    try {
+      final items = await SyncService.instance.fetchPendingQuestions(
+        token: settingsProvider.settings.harnessToken,
+        userId: settingsProvider.syncUserId,
+      );
+      if (items.isEmpty || _pendingQuestion != null) return;
+      final first = items.first;
+      final rawQuestions = first['questions'];
+      _setPendingQuestion({
+        'questionId': first['questionId']?.toString() ?? '',
+        'sessionId': first['sessionId'],
+        'questions': rawQuestions is List ? rawQuestions : const [],
+      });
+    } catch (e) {
+      debugPrint('[ChatProvider] 补拉选择框失败: $e');
+    }
+  }
+  //#endregion
 
   // 说明：一轮结束时「阶段归 idle + 推进排队队列」统一收口在 _isGenerating 的
   // setter 里（见上方），全文件二十多处结束分支都不用各自处理。

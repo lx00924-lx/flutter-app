@@ -1069,6 +1069,62 @@ class SyncService {
     }
   }
 
+  /// 补拉挂起中的选择框（DSH 的 ask_user_question）。
+  ///
+  /// 推送通道断线期间挂起的选择框不会丢：App 启动、重连、推送通道刚连上时
+  /// 都调一次，把还没答的补出来（服务端按 questionId 存了一份，10 分钟过期）。
+  Future<List<Map<String, dynamic>>> fetchPendingQuestions({
+    String token = '',
+    String userId = '',
+  }) async {
+    try {
+      final resp = await _dio.get(
+        '$serverBaseUrl/api/agent/pending-questions',
+        queryParameters: {
+          if (token.trim().isNotEmpty) 'token': token.trim(),
+          if (userId.trim().isNotEmpty) 'userId': userId.trim(),
+        },
+      );
+      if (resp.statusCode == 200 && resp.data is Map) {
+        final list = (resp.data as Map)['questions'];
+        if (list is List) {
+          return list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+        }
+      }
+    } catch (e) {
+      debugPrint('[SyncService] fetchPendingQuestions error: $e');
+    }
+    return const [];
+  }
+
+  /// 答复一个选择框；decline=true 表示「在电脑上回答」（交回电脑端网页弹窗）。
+  Future<bool> answerAgentQuestion({
+    required String token,
+    required String questionId,
+    List<Map<String, dynamic>> answers = const [],
+    bool decline = false,
+    String userId = '',
+  }) async {
+    final cleanToken = token.trim();
+    if (cleanToken.isEmpty || questionId.isEmpty) return false;
+    try {
+      final resp = await _dio.post(
+        '$serverBaseUrl/api/agent/answer-question',
+        data: {
+          'token': cleanToken,
+          'questionId': questionId,
+          'answers': answers,
+          'decline': decline,
+          if (userId.isNotEmpty) 'userId': userId,
+        },
+      );
+      return resp.statusCode == 200;
+    } catch (e) {
+      debugPrint('[SyncService] answerAgentQuestion error: $e');
+      return false;
+    }
+  }
+
   /// 打断/停止服务端正在进行的这一轮生成。
   ///
   /// 插话发送与「停止生成」都调用它。以前 App 只断开自己的 SSE，服务端那一轮
@@ -1352,6 +1408,14 @@ class SyncService {
               yield {
                 'approval': parsed['approval'],
                 'taskId': parsed['taskId'],
+                'done': false,
+              };
+            } else if (eventName == 'question') {
+              // DSH 的 ask_user_question 挂起了：走插件 → 桥接 → 中继这条链路推上来。
+              // 和审批一样，不能只依赖推送通道（SSE 在流就顺手带一份）。
+              yield {
+                'question': parsed['questions'],
+                'questionId': parsed['questionId'],
                 'done': false,
               };
             } else if (eventName == 'done') {

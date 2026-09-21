@@ -1086,6 +1086,132 @@ async def approve_dsh_session(harness_url: str, session_id: str, approval_id: st
             continue
     return False, "提交审批失败"
 
+async def fetch_pending_questions(harness_url: str):
+    """
+    读取本地 DSH 里挂起的选择框 (GET /v1/user-questions/pending)。
+
+    返回 list（可能为空）；**返回 None 表示本地插件不支持这个接口或没起来** ——
+    调用方据此判断"App 侧能不能接管选择框"，不要把它和"没有待答问题"混为一谈。
+    """
+    harness_base = harness_url.rstrip("/")
+    loop = asyncio.get_running_loop()
+    candidates = [f"{harness_base}/v1/user-questions/pending"]
+    if "3080" in harness_base:
+        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/user-questions/pending")
+
+    def do_get(url: str):
+        req = urllib.request.Request(url, headers=dsh_headers(url), method="GET")
+        with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=4) as resp:
+            return resp.read().decode("utf-8")
+
+    for url in candidates:
+        try:
+            raw = await loop.run_in_executor(None, lambda u=url: do_get(u))
+            data = json.loads(raw)
+            items = data.get("questions")
+            if isinstance(items, list):
+                return items
+        except Exception:
+            continue
+    return None
+
+async def answer_dsh_question(harness_url: str, question_id: str, answers, decline: bool = False):
+    """
+    把 App 的答复写回本地 DSH。
+
+    decline=True → POST /v1/user-questions/decline（用户在 App 上点"在电脑上回答"，
+    DSH 侧会把这个选择框交回电脑端网页弹窗），否则 POST /v1/user-questions/answer。
+    """
+    if not question_id:
+        return False, "缺少 questionId"
+    harness_base = harness_url.rstrip("/")
+    suffix = "decline" if decline else "answer"
+    loop = asyncio.get_running_loop()
+    body = {"questionId": question_id}
+    if not decline:
+        body["answers"] = answers or []
+    candidates = [f"{harness_base}/v1/user-questions/{suffix}"]
+    if "3080" in harness_base:
+        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/user-questions/{suffix}")
+
+    last_error = None
+    for url in candidates:
+        def do_post(target: str = url):
+            req = urllib.request.Request(
+                target,
+                data=json.dumps(body).encode("utf-8"),
+                headers=dsh_headers(target),
+                method="POST"
+            )
+            with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=5) as resp:
+                return resp.read().decode("utf-8")
+        try:
+            raw = await loop.run_in_executor(None, do_post)
+            return True, raw
+        except Exception as e:
+            last_error = e
+            continue
+    return False, f"提交选择框答复失败: {last_error if last_error is not None else '未知错误'}"
+
+async def poll_dsh_questions_loop(sender, harness_url: str):
+    """
+    每 1s 拉一次 DSH 里挂起的选择框，经 sender 转发给中继 → App。
+
+    sender(payload: dict) 是个协程函数：WS 通道下就是 ws.send(json.dumps(...))，
+    HTTP 轮询通道下就是 POST /api/agent/waiting-question。
+
+    为什么用轮询而不是让插件主动推：插件跑在 DSH 进程里，它没有中继 Token、也
+    不知道中继地址；而桥接脚本两样都有。**顺带**，这个轮询本身就是"App 侧在线"
+    的心跳 —— 插件只在最近 15s 内被轮询过时才把问题交给 App（见插件里的
+    QUESTION_ARM_MS），否则原样走电脑端网页弹窗，行为与装这个功能之前一致。
+    """
+    known: dict = {}
+    while True:
+        try:
+            items = await fetch_pending_questions(harness_url)
+        except Exception:
+            items = None
+        if items is None:
+            # 插件不支持/DSH 没起来：慢一点重试，别刷屏
+            await asyncio.sleep(3)
+            continue
+        current = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            qid = str(item.get("questionId") or "")
+            if not qid:
+                continue
+            current.add(qid)
+            if qid in known:
+                continue
+            try:
+                await sender({
+                    "type": "waiting_question",
+                    "questionId": qid,
+                    "sessionId": item.get("sessionId"),
+                    "questions": item.get("questions") or [],
+                    "timestamp": int(time.time() * 1000)
+                })
+                known[qid] = True
+                print(f"\033[96m[选择框] 已把 DSH 的选择框转发给 App: {qid}\033[0m")
+            except Exception:
+                pass
+        for qid in list(known.keys()):
+            if qid in current:
+                continue
+            known.pop(qid, None)
+            try:
+                await sender({
+                    "type": "question_resolved",
+                    "questionId": qid,
+                    "reason": "closed",
+                    "timestamp": int(time.time() * 1000)
+                })
+            except Exception:
+                pass
+        await asyncio.sleep(1)
+
 async def rename_dsh_session(harness_url: str, session_id: str, title: str):
     """重命名本地 DSH 会话 (PATCH /v1/sessions/:id)"""
     if not session_id or not title:
@@ -2185,6 +2311,17 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
         except Exception:
             pass
 
+    # HTTP 轮询通道下的选择框转发：与 WS 通道同构，只是 sender 换成 POST 中继。
+    async def http_question_sender(payload: dict):
+        body = dict(payload)
+        body["token"] = token
+        await loop.run_in_executor(
+            None,
+            lambda: http_post_json(f"{server_base}/api/agent/waiting-question", body, timeout=5)
+        )
+
+    question_task = asyncio.create_task(poll_dsh_questions_loop(http_question_sender, harness_url))
+
     poll_fail_count = 0
     while True:
         try:
@@ -2202,6 +2339,15 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                 if reg_info:
                     await abort_dsh_session(reg_info["harness_url"], reg_info["session_id"])
                     print(f"\033[93m[一键中止] 已向本地 DSH 发起中止轮次请求: {reg_info['session_id']}\033[0m")
+            elif mtype in ("answer_question", "decline_question"):
+                q_id = resp.get("questionId")
+                q_decline = mtype == "decline_question"
+                q_ok, q_raw = await answer_dsh_question(
+                    harness_url, q_id, resp.get("answers") or [], decline=q_decline
+                )
+                tag = "已交回电脑端" if q_decline else "已提交答复"
+                color = "\033[92m" if q_ok else "\033[91m"
+                print(f"{color}[选择框] {tag} {q_id} → {'成功' if q_ok else q_raw}\033[0m")
             elif mtype == "agent_approve":
                 a_task_id = resp.get("taskId")
                 a_appr_id = resp.get("approvalId")
@@ -2389,6 +2535,15 @@ async def run_bridge_client(args):
                 except Exception:
                     pass
 
+                # 选择框转发：把 DSH 里 ask_user_question 挂起的提问经中继推给 App。
+                # 这个轮询同时充当"App 侧在线"的心跳（插件据此决定是否接管问题）。
+                async def ws_question_sender(payload: dict):
+                    payload = dict(payload)
+                    payload["token"] = token
+                    await ws.send(json.dumps(payload))
+
+                question_task = asyncio.create_task(poll_dsh_questions_loop(ws_question_sender, args.harness_url))
+
                 async for raw_msg in ws:
                     try:
                         msg = json.loads(raw_msg)
@@ -2449,6 +2604,18 @@ async def run_bridge_client(args):
                             if reg_info:
                                 await approve_dsh_session(reg_info["harness_url"], reg_info["session_id"], a_appr_id, a_act)
                                 print(f"\033[92m[审批裁决] 已提交审批 {a_appr_id} -> {a_act}\033[0m")
+                            continue
+
+                        if mtype in ("answer_question", "decline_question"):
+                            # App 上点了选择框的某个选项 / 点了"在电脑上回答"
+                            q_id = msg.get("questionId")
+                            q_decline = mtype == "decline_question"
+                            q_ok, q_raw = await answer_dsh_question(
+                                args.harness_url, q_id, msg.get("answers") or [], decline=q_decline
+                            )
+                            tag = "已交回电脑端" if q_decline else "已提交答复"
+                            color = "\033[92m" if q_ok else "\033[91m"
+                            print(f"{color}[选择框] {tag} {q_id} → {'成功' if q_ok else q_raw}\033[0m")
                             continue
 
                         if mtype == "rename_session":
@@ -2634,6 +2801,9 @@ async def run_bridge_client(args):
 
                     except Exception as handler_err:
                         logger.error(f"消息处理异常: {handler_err}")
+
+                # async for 结束 = 这条 WS 断了：停掉选择框轮询，避免重连后叠加多个轮询协程
+                question_task.cancel()
 
         except Exception as ws_err:
             ws_fail_count += 1

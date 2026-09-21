@@ -20,6 +20,9 @@
  *   POST   /v1/agent/abort                  中止（`{sessionId}`）
  *   POST   /v1/agent/approve                答复审批（`{approvalId, action}`）
  *   GET    /v1/plugins                      已装插件清单（走 profile 判定，复用「用户插件」逻辑）
+ *   GET    /v1/user-questions/pending       挂起中的选择框（桥接 1s 轮询，用于转发给 App）
+ *   POST   /v1/user-questions/answer        答复选择框（`{questionId, answers}`）
+ *   POST   /v1/user-questions/decline       放弃在 App 上回答（`{questionId}`）→ 交回电脑端界面
  *
  * SSE 事件名与字段按 deepseek_bridge.py 的解析实现对齐：
  *   reasoning{content} / content{content} / tool_start{id,tool,input} / tool_end{id,tool,output,status}
@@ -48,6 +51,15 @@ const HISTORY_PAGE = 500
 const HEARTBEAT_MS = 5_000
 /** 单轮默认上限（bridge 自己也有 600s 超时）。 */
 const TURN_TIMEOUT_MS = 600_000
+/**
+ * 选择框等待 App 答复的上限：超过就交回电脑端界面。
+ *
+ * 为什么不是无限等：手机可能锁屏/断网，若一直挂着，电脑前的人会看到
+ * 一个永远不出现的弹窗（DSH 侧整轮卡死）。180s 是"手机来得及掏出来"的量级。
+ */
+const QUESTION_TIMEOUT_MS = 180_000
+/** 桥接轮询心跳窗口：这段时间内来轮询过，才认为「App 侧在线、可以接管」。 */
+const QUESTION_ARM_MS = 15_000
 /** 会话读写用的共享取消信号：dsh 的服务要求显式传入 signal。 */
 const turnSignal = () => AbortSignal.timeout(TURN_TIMEOUT_MS)
 
@@ -102,6 +114,10 @@ export function apply(ctx) {
   const titleCache = new Map()
   /** 挂起中的审批：approvalId → {sessionId, tool, settle} */
   const pendingApprovals = new Map()
+  /** 挂起中的选择框：questionId → {sessionId, questions, settle, timer, createdAt} */
+  const pendingQuestions = new Map()
+  /** 桥接最近一次来轮询选择框的时间戳（用于判定 App 侧是否在线）。 */
+  let lastQuestionPollAt = 0
 
   //#region 数据读取
 
@@ -507,6 +523,109 @@ export function apply(ctx) {
   }
   //#endregion
 
+  //#region 选择框桥（ask_user_question）
+
+  /**
+   * 把 DSH 的 `ask_user_question` 接到 App 上。
+   *
+   * 背景：`ask_user_question` 走 `ctx.userQuestions`（waterfall 事件
+   * `user-questions/request`），官方只有浏览器界面会应答；而桥接脚本吃的是
+   * 任务事件流，里面根本没有 question 事件 —— 所以 App 在结构上永远收不到
+   * 选择框（实测：问一句"3+3=几"，手机和电脑 App 全程静默，只有网页弹窗）。
+   * 这里补上那个 answerer：问题排队 → 桥接脚本轮询取走 → 经中继推给 App。
+   *
+   * 与电脑端**并存**，不抢占：
+   *   · 只在桥接最近 QUESTION_ARM_MS 内来过轮询时接管（否则原样 next()）；
+   *   · 同时并行调用下游 answerer —— 电脑端网页弹窗照旧出现，谁先答谁生效；
+   *   · App 点"在电脑上回答"或等满 QUESTION_TIMEOUT_MS → 复用同一个下游调用，
+   *     行为和装这个功能之前完全一致（也不会让电脑端弹两次）。
+   */
+  ctx.on('user-questions/request', async (request, next) => {
+    const sessionId = request?.agent?.session?.id
+    if (typeof sessionId !== 'string') return next()
+    if (Date.now() - lastQuestionPollAt > QUESTION_ARM_MS) return next()
+
+    const questionId = randomUUID()
+    const questions = Array.isArray(request?.questions) ? request.questions : []
+    let settle
+    const answered = new Promise((resolve) => { settle = resolve })
+    const entry = { questionId, sessionId, questions, settle, createdAt: Date.now(), timer: undefined }
+    pendingQuestions.set(questionId, entry)
+    ctx.logger?.info?.(`[app-bridge] 选择框 ${questionId} 已排给 App（${questions.length} 个问题）`)
+    entry.timer = setTimeout(() => {
+      if (pendingQuestions.delete(questionId)) {
+        ctx.logger?.warn?.(`[app-bridge] 选择框 ${questionId} 等 App 超时，交回电脑端界面`)
+        settle({ kind: 'handoff' })
+      }
+    }, QUESTION_TIMEOUT_MS)
+
+    let downstreamFailed
+    const downstream = Promise.resolve()
+      .then(() => next())
+      .catch((error) => {
+        downstreamFailed = error
+        return new Promise(() => {})
+      })
+
+    try {
+      const winner = await Promise.race([
+        answered.then((value) => ({ from: 'app', value })),
+        downstream.then((value) => ({ from: 'ui', value })),
+      ])
+      if (winner.from === 'ui') return winner.value
+      if (winner.value?.kind === 'answered') return winner.value.answers
+      if (downstreamFailed !== undefined) throw downstreamFailed
+      return await downstream
+    } finally {
+      const live = pendingQuestions.get(questionId)
+      if (live !== undefined) {
+        pendingQuestions.delete(questionId)
+        clearTimeout(live.timer)
+      }
+    }
+  })
+
+  /** 答复一个选择框：answers 形如 `[{id, selected:[...], custom?}]`。 */
+  function answerQuestion(questionId, answers) {
+    const entry = pendingQuestions.get(questionId)
+    if (entry === undefined) return false
+    pendingQuestions.delete(questionId)
+    clearTimeout(entry.timer)
+    const clean = (Array.isArray(answers) ? answers : [])
+      .map((item) => ({
+        id: typeof item?.id === 'string' ? item.id : String(item?.id ?? ''),
+        selected: Array.isArray(item?.selected) ? item.selected.map((value) => String(value)) : [],
+        ...(typeof item?.custom === 'string' && item.custom.length > 0 ? { custom: item.custom } : {}),
+      }))
+      .filter((item) => item.id.length > 0)
+    entry.settle({ kind: 'answered', answers: { answers: clean } })
+    return true
+  }
+
+  /** 放弃在 App 上回答 → 交回电脑端界面。 */
+  function declineQuestion(questionId) {
+    const entry = pendingQuestions.get(questionId)
+    if (entry === undefined) return false
+    pendingQuestions.delete(questionId)
+    clearTimeout(entry.timer)
+    entry.settle({ kind: 'handoff' })
+    return true
+  }
+
+  /** 待答清单（桥接脚本轮询用；这次轮询同时表示「App 侧在线」）。 */
+  function questionsPayload() {
+    return {
+      status: 'success',
+      questions: [...pendingQuestions.values()].map((entry) => ({
+        questionId: entry.questionId,
+        sessionId: entry.sessionId,
+        createdAt: entry.createdAt,
+        questions: entry.questions,
+      })),
+    }
+  }
+  //#endregion
+
   //#region 路由注册（node:http 原生路由 + Fetch 形态适配）
 
   /** 读原始 body 文本（上限 8MB）。 */
@@ -625,6 +744,9 @@ export function apply(ctx) {
       'POST /v1/agent/abort',
       'POST /v1/agent/approve',
       'GET /v1/plugins',
+      'GET /v1/user-questions/pending',
+      'POST /v1/user-questions/answer',
+      'POST /v1/user-questions/decline',
     ],
   }))
 
@@ -650,6 +772,47 @@ export function apply(ctx) {
       const approvalId = typeof input.approvalId === 'string' ? input.approvalId : ''
       const settled = answerApproval(approvalId, input.action ?? 'allow')
       return json(200, { status: 'success', approvalId, action: input.action ?? 'allow', settled })
+    }
+
+    // ── 选择框（ask_user_question）→ 手机 App ────────────────────
+    //
+    // 桥接脚本每 1s 拉一次待答清单：既拿到新问题，也顺带告诉本插件
+    // "App 侧在线，可以把问题交给它"（见上面的 answerer）。
+    if (pathname === '/v1/user-questions/pending' && method === 'GET') {
+      lastQuestionPollAt = Date.now()
+      return json(200, questionsPayload())
+    }
+
+    if (pathname === '/v1/user-questions/answer' && method === 'POST') {
+      const input = await body(request)
+      const questionId = typeof input.questionId === 'string' && input.questionId.length > 0
+        ? input.questionId
+        : (typeof input.id === 'string' ? input.id : '')
+      if (questionId.length === 0) {
+        return json(400, { status: 'error', error: { code: 'bad-id', message: '缺少 questionId' } })
+      }
+      const settled = answerQuestion(questionId, input.answers)
+      if (!settled) {
+        return json(404, {
+          status: 'error',
+          error: { code: 'not-found', message: '该选择框已不在等待中（已超时，或已在电脑端答复）' },
+        })
+      }
+      return json(200, { status: 'success', questionId, answered: true })
+    }
+
+    if (pathname === '/v1/user-questions/decline' && method === 'POST') {
+      const input = await body(request)
+      const questionId = typeof input.questionId === 'string' && input.questionId.length > 0
+        ? input.questionId
+        : (typeof input.id === 'string' ? input.id : '')
+      if (questionId.length === 0) {
+        return json(400, { status: 'error', error: { code: 'bad-id', message: '缺少 questionId' } })
+      }
+      const settled = declineQuestion(questionId)
+      return json(settled ? 200 : 404, settled
+        ? { status: 'success', questionId, declined: true }
+        : { status: 'error', error: { code: 'not-found', message: '该选择框已不在等待中' } })
     }
 
     if (pathname === '/v1/agent/prompt' && method === 'POST') return promptSync(await body(request))

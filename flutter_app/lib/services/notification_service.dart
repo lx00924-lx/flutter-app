@@ -20,11 +20,21 @@ class NotificationService {
   static const String _channelDesc = '电脑端本地 Agent 请求执行敏感操作时提醒';
   static const int _approvalNotificationId = 8801;
 
+  /// 选择框（ask_user_question）用独立渠道/独立 id：两条通知可以同时在，
+  /// 互不覆盖；用户也能单独关掉其中一类提醒。
+  static const String _questionChannelId = 'lx_question';
+  static const String _questionChannelName = '需要选择';
+  static const String _questionChannelDesc = '电脑端 Agent 提问、等你选一个答案时提醒';
+  static const int _questionNotificationId = 8802;
+
   final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
   bool _initialized = false;
 
   /// 用户点了通知（payload 为 approvalId）
   void Function(String approvalId)? onApprovalTapped;
+
+  /// 用户点了选择框通知（payload 为 questionId）
+  void Function(String questionId)? onQuestionTapped;
 
   Future<void> init() async {
     if (_initialized || kIsWeb) return;
@@ -39,7 +49,12 @@ class NotificationService {
         settings: const InitializationSettings(android: android, iOS: darwin, macOS: darwin),
         onDidReceiveNotificationResponse: (response) {
           final payload = response.payload ?? '';
-          if (payload.isNotEmpty) onApprovalTapped?.call(payload);
+          if (payload.isEmpty) return;
+          if (payload.startsWith('q:')) {
+            onQuestionTapped?.call(payload.substring(2));
+            return;
+          }
+          onApprovalTapped?.call(payload);
         },
       );
       _initialized = true;
@@ -118,6 +133,50 @@ class NotificationService {
     try {
       await init();
       await _plugin.cancel(id: _approvalNotificationId);
+    } catch (_) {}
+  }
+
+  /// 弹出"电脑端 Agent 在问你"通知（选择框）
+  Future<void> showQuestionRequest({
+    required String questionId,
+    required String title,
+    String body = '',
+  }) async {
+    if (kIsWeb || !Platform.isAndroid) return;
+    try {
+      await init();
+      if (!await hasPermission()) return;
+      const details = NotificationDetails(
+        android: AndroidNotificationDetails(
+          _questionChannelId,
+          _questionChannelName,
+          channelDescription: _questionChannelDesc,
+          importance: Importance.max,
+          priority: Priority.high,
+          category: AndroidNotificationCategory.reminder,
+          autoCancel: true,
+          ongoing: false,
+        ),
+      );
+      await _plugin.show(
+        id: _questionNotificationId,
+        title: title.isEmpty ? '电脑端 Agent 在等你选择' : title,
+        body: body.isEmpty ? '点击选择一个答案（本地 Agent 正在等待）' : body,
+        notificationDetails: details,
+        payload: 'q:$questionId',
+      );
+      debugPrint('[Notify] 已发出选择框提醒通知（$questionId）');
+    } catch (e) {
+      debugPrint('[Notify] 发送选择框通知失败: $e');
+    }
+  }
+
+  /// 选择框处理完了，撤掉通知
+  Future<void> cancelQuestionRequest() async {
+    if (kIsWeb || !Platform.isAndroid) return;
+    try {
+      await init();
+      await _plugin.cancel(id: _questionNotificationId);
     } catch (_) {}
   }
 }

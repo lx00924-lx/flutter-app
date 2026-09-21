@@ -186,6 +186,10 @@ class SettingsProvider extends ChangeNotifier {
   void _handlePushEvent(String event, Map<String, dynamic> data) {
     switch (event) {
       case 'push_connected':
+        SyncService.instance.refreshPollingInterval();
+        // 顺带让 ChatProvider 补拉"断线期间挂起的选择框"
+        chatPushHandler?.call(event, data);
+        return;
       case 'push_disconnected':
         SyncService.instance.refreshPollingInterval();
         return;

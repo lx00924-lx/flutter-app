@@ -503,6 +503,31 @@ interface ActiveGeneration {
 
 const activeGenerations = new Map<string, ActiveGeneration>();
 
+/**
+ * 挂起中的「选择框」（DSH 的 ask_user_question）。
+ *
+ * 为什么中继也要存一份：选择框是**没有任务归属**的 —— DSH 侧插件排队等答复，
+ * 桥接脚本轮询取走再推上来，此刻可能压根没有正在跑的任务（比如用户在电脑网页
+ * 里发起的一轮）。App 断线重连后也要能补拉，所以按 questionId 落在这里。
+ */
+const pendingQuestions = new Map<string, {
+  questionId: string;
+  sessionId?: string;
+  questions: any[];
+  token?: string;
+  userId?: string;
+  at: number;
+}>();
+
+/** 简易 TTL：选择框超过 10 分钟没人答就丢掉（DSH 侧插件 180s 也就交回电脑端了）。 */
+const QUESTION_TTL_MS = 10 * 60 * 1000;
+const prunePendingQuestions = () => {
+  const now = Date.now();
+  for (const [id, item] of pendingQuestions) {
+    if (now - item.at > QUESTION_TTL_MS) pendingQuestions.delete(id);
+  }
+};
+
 /** 按「用户+会话」找到当前在跑的那一轮（插话时需要）。 */
 const findActiveGenerationBySession = (userId: string, sessionId: string): ActiveGeneration | undefined => {
   if (!userId || !sessionId) return undefined;
@@ -1814,6 +1839,14 @@ async function startServer() {
       });
     };
 
+    // 选择框（ask_user_question）：同样走 SSE 送一份，App 在流式接收时能立刻弹卡片
+    const questionHandler = (data: any) => {
+      sendEvent("question", {
+        questionId: data.questionId,
+        questions: data.questions,
+      });
+    };
+
     const taskFinishedHandler = (data: any) => {
       if (data.messageId === assistantMessageId) {
         sendEvent("agent_finished", { result: data.result, taskId: data.taskId });
@@ -1856,6 +1889,7 @@ async function startServer() {
       generationEvents.off(`task_finished_${assistantMessageId}`, taskFinishedHandler);
       generationEvents.off(`phase_${assistantMessageId}`, phaseHandler);
       generationEvents.off(`approval_${assistantMessageId}`, approvalHandler);
+      generationEvents.off(`question_${assistantMessageId}`, questionHandler);
       generationEvents.off(`completed_${assistantMessageId}`, completedHandler);
       generationEvents.off(`error_${assistantMessageId}`, errorHandler);
     };
@@ -1876,6 +1910,7 @@ async function startServer() {
     generationEvents.on(`task_finished_${assistantMessageId}`, taskFinishedHandler);
     generationEvents.on(`phase_${assistantMessageId}`, phaseHandler);
     generationEvents.on(`approval_${assistantMessageId}`, approvalHandler);
+    generationEvents.on(`question_${assistantMessageId}`, questionHandler);
     generationEvents.on(`completed_${assistantMessageId}`, completedHandler);
     generationEvents.on(`error_${assistantMessageId}`, errorHandler);
 
@@ -3027,6 +3062,131 @@ if %errorlevel% neq 0 (
     }
   });
 
+  // ── 选择框（DSH 的 ask_user_question）→ App ─────────────────────
+  //
+  // 背景：ask_user_question 走的是 DSH 的「客户端 UI」能力（ctx.userQuestions），
+  // 只有连到 DSH 的界面能应答；桥接脚本吃的是任务事件流，里面没有 question 事件，
+  // 所以 App 在结构上永远收不到选择框。现在由 DSH 侧插件排队 + 桥接轮询转发，
+  // 中继这里负责转投给 App 并把答复送回去。
+
+  /**
+   * 把一个挂起的选择框投递给该用户的所有在线端（手机/电脑 App）。
+   *
+   * 走 `io.to(user_x).emit` —— 推送通道的包装层会把它同时复制到 /ws/app，
+   * 所以新事件不用再手写一份推送逻辑；同时按 questionId 存一份，供 App 重连补拉。
+   */
+  const deliverQuestionToUser = async (qToken: string, question: {
+    questionId: string;
+    sessionId?: string;
+    questions: any[];
+  }) => {
+    prunePendingQuestions();
+    const agent = connectedAgents.get(qToken);
+    let userId = "";
+    if (agent?.activeUserSessions && agent.activeUserSessions.size > 0) {
+      userId = Array.from(agent.activeUserSessions.keys())[0] || "";
+    }
+    if (!userId) {
+      try {
+        userId = (await resolveTokenOwnerUserId(qToken)) || "";
+      } catch {
+        userId = "";
+      }
+    }
+    const payload = {
+      questionId: question.questionId,
+      sessionId: question.sessionId || "",
+      questions: question.questions || [],
+      at: Date.now(),
+    };
+    pendingQuestions.set(question.questionId, { ...payload, token: qToken, userId: userId || undefined });
+    if (userId) io.to(`user_${userId}`).emit("agent_question", payload);
+    else io.emit("agent_question", payload);
+    // 正在流式接收的那一轮也顺手带一份（推送通道没连上时 SSE 是唯一活路）
+    for (const gen of activeGenerations.values()) {
+      if (userId && gen.userId !== userId) continue;
+      generationEvents.emit(`question_${gen.assistantMessageId}`, payload);
+    }
+  };
+
+  app.post("/api/agent/waiting-question", (req, res) => {
+    try {
+      const { token, questionId, sessionId, questions } = req.body || {};
+      const qid = (questionId || "").toString().trim();
+      if (!qid) return res.status(400).json({ error: "缺少 questionId" });
+      const qToken = (token || "").toString().trim();
+      void deliverQuestionToUser(qToken, {
+        questionId: qid,
+        sessionId,
+        questions: Array.isArray(questions) ? questions : [],
+      });
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // App 启动/重连时补拉：推送通道断线期间挂起的选择框不会丢
+  app.get("/api/agent/pending-questions", (req, res) => {
+    try {
+      prunePendingQuestions();
+      const userId = ((req.query.userId as string) || "").trim();
+      const token = ((req.query.token as string) || "").trim();
+      const questions = [...pendingQuestions.values()].filter((item) => {
+        if (token && item.token && item.token !== token) return false;
+        if (userId && item.userId && item.userId !== userId) return false;
+        return true;
+      });
+      res.json({ success: true, questions });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // App 上的答复 / 「在电脑上回答」→ 送回桥接 → 本地 DSH 插件
+  app.post("/api/agent/answer-question", (req, res) => {
+    try {
+      const { token, questionId, answers, decline } = req.body || {};
+      const qid = (questionId || "").toString().trim();
+      if (!qid) return res.status(400).json({ error: "缺少 questionId" });
+      const pending = pendingQuestions.get(qid);
+      const targetToken = ((token || pending?.token || "") as string).trim();
+      if (!isPlausibleAgentToken(targetToken)) {
+        return res.status(401).json({ error: "无效或缺失的 Agent Token" });
+      }
+      const agent = connectedAgents.get(targetToken);
+      if (!agent) {
+        return res.status(404).json({ error: "Agent not connected or offline" });
+      }
+
+      const isDecline = decline === true;
+      const payload = {
+        type: isDecline ? "decline_question" : "answer_question",
+        questionId: qid,
+        answers: Array.isArray(answers) ? answers : [],
+      };
+
+      if (agent.ws && agent.ws.readyState === WSWebSocket.OPEN) {
+        agent.ws.send(JSON.stringify(payload));
+      } else if (agent.pendingPollResolvers && agent.pendingPollResolvers.length > 0) {
+        const resolver = agent.pendingPollResolvers.shift();
+        if (resolver) resolver(payload);
+      } else {
+        if (!agent.queuedTasks) agent.queuedTasks = [];
+        agent.queuedTasks.push(payload);
+      }
+
+      pendingQuestions.delete(qid);
+      io.emit("agent_question_resolved", {
+        questionId: qid,
+        reason: isDecline ? "declined" : "answered",
+      });
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // User decision for approval (allow / deny)
   app.post("/api/agent/approve", (req, res) => {
     try {
@@ -3910,6 +4070,21 @@ if %errorlevel% neq 0 (
             const resolved = msg.approvalId ? { approvalId: msg.approvalId, outcome: msg.outcome } : msg;
             io.emit("agent_approval_resolved", resolved);
             generationEvents.emit('approval_resolved_broadcast', resolved);
+          } else if (msg.type === "waiting_question") {
+            // DSH 的 ask_user_question 挂起了：桥接轮询到就推上来，转给 App 弹卡片。
+            // 注意这里**不依赖 taskId**：用户在电脑网页里发起的一轮同样可能有提问。
+            const qToken = (msg.token || token || "").trim();
+            console.log(`[Agent Hub] Agent waiting user question ${msg.questionId} (session ${msg.sessionId || '-'})`);
+            void deliverQuestionToUser(qToken, {
+              questionId: String(msg.questionId || ""),
+              sessionId: msg.sessionId,
+              questions: Array.isArray(msg.questions) ? msg.questions : [],
+            });
+          } else if (msg.type === "question_resolved") {
+            // 问题已经被答复（在 App 上或在电脑端网页上）→ 让各端把卡片收起来
+            const qid = String(msg.questionId || "");
+            if (qid) pendingQuestions.delete(qid);
+            io.emit("agent_question_resolved", { questionId: qid, reason: msg.reason || "closed" });
           } else if (msg.type === "sync_sessions" || msg.type === "sessions_result") {
             agentInfo.workspaces = msg.workspaces || [];
             agentInfo.sessions = msg.sessions || [];

@@ -732,6 +732,96 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   );
                 },
               ),
+              // 0.5 选择框卡片：DSH 的 ask_user_question 挂起时，App 直接在这里答。
+              //     （弹窗可能因为不在聊天页而错过，这里始终能在输入框上方看到）
+              Consumer<ChatProvider>(
+                builder: (context, chat, _) {
+                  final question = chat.pendingQuestion;
+                  if (question == null) return const SizedBox.shrink();
+                  final rawQuestions = question['questions'];
+                  final items = rawQuestions is List
+                      ? rawQuestions.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+                      : <Map<String, dynamic>>[];
+                  final head = items.isEmpty
+                      ? '电脑端 Agent 提了一个问题'
+                      : (items.first['header'] ?? items.first['question'] ?? '电脑端 Agent 提了一个问题').toString();
+                  final firstOptions = items.isEmpty ? const <Map>[] : (items.first['options'] is List
+                      ? (items.first['options'] as List).whereType<Map>().toList()
+                      : const <Map>[]);
+                  final multi = items.isNotEmpty &&
+                      (items.first['multi_select'] == true || items.first['multiSelect'] == true);
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: isDark ? const Color(0xFF0F2338) : const Color(0xFFEFF6FF),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFF3B82F6)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.help_outline, size: 16, color: Color(0xFF3B82F6)),
+                            const SizedBox(width: 6),
+                            const Expanded(
+                              child: Text(
+                                '电脑端 Agent 在等你选择',
+                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                            InkWell(
+                              onTap: () => chat.declineQuestion(),
+                              child: Text(
+                                '在电脑上回答',
+                                style: TextStyle(fontSize: 11, color: Colors.blue.shade700),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          head,
+                          style: TextStyle(fontSize: 12, color: Colors.grey.shade800, height: 1.35),
+                        ),
+                        const SizedBox(height: 8),
+                        if (firstOptions.isNotEmpty && !multi)
+                          Wrap(
+                            spacing: 6,
+                            runSpacing: 4,
+                            children: [
+                              for (final opt in firstOptions)
+                                OutlinedButton(
+                                  style: OutlinedButton.styleFrom(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                    minimumSize: const Size(0, 30),
+                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  onPressed: () => chat.answerQuestion([
+                                    {
+                                      'id': items.first['id']?.toString() ?? '',
+                                      'selected': [opt['label']?.toString() ?? ''],
+                                    }
+                                  ]),
+                                  child: Text(opt['label']?.toString() ?? '', style: const TextStyle(fontSize: 12)),
+                                ),
+                            ],
+                          ),
+                        if (firstOptions.isEmpty || multi)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: FilledButton(
+                              style: FilledButton.styleFrom(backgroundColor: const Color(0xFF3B82F6)),
+                              onPressed: () => chat.presentPendingQuestionDialog(),
+                              child: const Text('去选择 / 输入回答', style: TextStyle(fontSize: 12)),
+                            ),
+                          ),
+                      ],
+                    ),
+                  );
+                },
+              ),
               // 1. 引用消息卡片预览
               Consumer<ChatProvider>(
                 builder: (context, chat, _) {
