@@ -14,6 +14,7 @@ import '../utils/image_picker_helper.dart';
 import '../screens/voice_call_screen.dart';
 import '../screens/scanner_screen.dart';
 import 'agent_quick_bar.dart';
+import 'slash_command_menu.dart';
 
 class ChatInputBar extends StatefulWidget {
   final Function(String text, {List<String>? attachments}) onSend;
@@ -106,6 +107,8 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
           }
         });
       }
+      // 输入以 `/` 开头时，浮出命令面板（Telegram 那种）
+      _syncSlashMenu();
     });
 
     _focusNode.addListener(() {
@@ -121,6 +124,90 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
+  }
+
+  // ==================== 斜杠命令面板 ====================
+
+  /// 面板是否可见
+  bool _slashMenuVisible = false;
+  /// `/` 之后已输入的内容（用于过滤命令）
+  String _slashQuery = '';
+  /// 已展开参数的命令（例如 /permission 展开三种预设）
+  SlashCommand? _slashExpanded;
+
+  /// 根据输入内容决定命令面板的显示与过滤。
+  ///
+  /// 触发条件（避免误伤正常输入）：整段文本以 `/` 开头、且是单行。
+  void _syncSlashMenu() {
+    final text = _controller.text;
+    final shouldShow = text.startsWith('/') && !text.contains('\n');
+
+    if (!shouldShow) {
+      if (_slashMenuVisible || _slashExpanded != null) {
+        setState(() {
+          _slashMenuVisible = false;
+          _slashExpanded = null;
+        });
+      }
+      return;
+    }
+
+    // `/permission ` 后面已带空格 → 直接展开该命令的参数候选
+    final body = text.substring(1);
+    final spaceIdx = body.indexOf(' ');
+    if (spaceIdx >= 0) {
+      final name = body.substring(0, spaceIdx);
+      final cmd = kSlashCommands.where((c) => c.name == name).firstOrNull;
+      if (cmd != null && cmd.options.isNotEmpty) {
+        if (!_slashMenuVisible || _slashExpanded?.name != cmd.name) {
+          setState(() {
+            _slashMenuVisible = true;
+            _slashExpanded = cmd;
+            _slashQuery = '';
+          });
+        }
+        return;
+      }
+    }
+
+    final query = spaceIdx >= 0 ? body.substring(0, spaceIdx) : body;
+    if (!_slashMenuVisible || _slashQuery != query || _slashExpanded != null) {
+      setState(() {
+        _slashMenuVisible = true;
+        _slashExpanded = null;
+        _slashQuery = query;
+      });
+    }
+  }
+
+  /// 点了命令：带参数的展开候选，不带参数的直接发出去
+  void _onPickSlashCommand(SlashCommand cmd) {
+    if (cmd.options.isNotEmpty) {
+      setState(() {
+        _slashExpanded = cmd;
+        _slashMenuVisible = true;
+      });
+      // 顺带把命令补全到输入框，用户也能直接手敲参数
+      _controller.text = '/${cmd.name} ';
+      _controller.selection = TextSelection.collapsed(offset: _controller.text.length);
+      return;
+    }
+    _sendSlashCommand(cmd.textWith(null));
+  }
+
+  /// 点了某个参数：拼成完整命令并**直接发送**
+  void _onPickSlashOption(SlashCommand cmd, SlashCommandOption opt) {
+    _sendSlashCommand(cmd.textWith(opt.value));
+  }
+
+  void _sendSlashCommand(String commandText) {
+    _controller.text = commandText;
+    _controller.selection = TextSelection.collapsed(offset: commandText.length);
+    setState(() {
+      _slashMenuVisible = false;
+      _slashExpanded = null;
+    });
+    _handleSend();
   }
 
   void _handleSend() {
@@ -953,7 +1040,20 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   ),
                 ),
 
-              // 5. 主输入条
+              // 5. 斜杠命令面板（输入 / 时浮出，Telegram 风格）
+              if (_slashMenuVisible)
+                SlashCommandMenu(
+                  query: _slashQuery,
+                  expanded: _slashExpanded,
+                  onPickCommand: _onPickSlashCommand,
+                  onPickOption: _onPickSlashOption,
+                  onClose: () => setState(() {
+                    _slashMenuVisible = false;
+                    _slashExpanded = null;
+                  }),
+                ),
+
+              // 6. 主输入条
               Row(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
