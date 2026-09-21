@@ -136,7 +136,8 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
         final snippet = quote.content.length > 100 ? '${quote.content.substring(0, 100)}...' : quote.content;
         final cleanSnippet = snippet.replaceAll('\n', ' ');
         finalText = '> 💬 **引用 [$quoteSender]**：$cleanSnippet\n\n$text';
-        chat.clearQuotedMessage();
+        // 刻意不在这里清引用：生成中会先弹选择框，用户可能取消或犹豫到这一轮结束，
+        // 那种情况下引用卡片应该还在。真正发出去时再清（见 _submitSend）。
       }
 
       final List<String> attachments = List.from(_pendingAttachments);
@@ -162,6 +163,8 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   ) {
     action(text, attachments: attachments);
     _controller.clear();
+    // 消息确实发出去了，这时才消费掉引用卡片
+    if (mounted) context.read<ChatProvider>().clearQuotedMessage();
     if (!mounted) return;
     setState(() {
       _pendingAttachments.clear();
@@ -265,12 +268,13 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
 
     if (!mounted) return;
 
-    // 犹豫期间这一轮已经跑完了：直接按普通消息发出去，不需要打断也不需要排队
+    // 犹豫期间这一轮已经跑完了：自动收起选择框，**但不代发** ——
+    // 消息原样留在输入框里，由用户自己点发送（是否要跟这条已完成的回复一起看，
+    // 应该由用户决定，不该替他决定）
     if (mode == null && turnFinished) {
-      _submitSend(text, attachments, widget.onSend);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('上一轮已经结束了，已直接发送'),
+          content: Text('上一轮已经结束，消息仍在输入框，点发送即可发出'),
           behavior: SnackBarBehavior.floating,
           duration: Duration(seconds: 2),
         ),
