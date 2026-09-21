@@ -177,73 +177,107 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   /// 两者差别很大 ——
   /// · 插话：打断当前这轮，立刻处理你这条（Agent 执行阶段会连本地任务一起中止）；
   /// · 排队：不打断，等这轮结束后自动发出。
+  ///
+  /// 用户犹豫期间这一轮可能已经结束了：此时"插话"已无意义，弹窗会自动关闭并按
+  /// 普通发送处理（下面监听 ChatProvider 的生成状态）。
   Future<void> _showSendModeSheet(String text, List<String>? attachments) async {
     final chat = context.read<ChatProvider>();
     final executing = chat.isAgentExecuting;
+    bool turnFinished = false;
 
-    final mode = await showModalBottomSheet<String>(
-      context: context,
-      showDragHandle: true,
-      builder: (ctx) {
-        final isDark = Theme.of(ctx).brightness == Brightness.dark;
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 6),
-                child: Row(
-                  children: [
-                    const Icon(Icons.bolt_outlined, size: 18, color: Color(0xFF0284C7)),
-                    const SizedBox(width: 8),
-                    Text(
-                      executing ? '本地 Agent 正在执行' : '正在生成回复',
-                      style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                    ),
-                  ],
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
-                child: Text(
-                  executing
-                      ? '这条消息要怎么发？执行阶段的插话会中止电脑上正在跑的本地任务。'
-                      : '这条消息要怎么发？',
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                ),
-              ),
-              ListTile(
-                leading: const Icon(Icons.bolt_rounded, color: Color(0xFFF59E0B)),
-                title: const Text('插话发送', style: TextStyle(fontWeight: FontWeight.w600)),
-                subtitle: Text(
-                  executing
-                      ? '打断当前这轮（含电脑上正在执行的本地任务），立刻处理这条'
-                      : '打断当前生成，立刻处理这条',
-                  style: const TextStyle(fontSize: 12),
-                ),
-                onTap: () => Navigator.pop(ctx, 'interject'),
-              ),
-              ListTile(
-                leading: const Icon(Icons.playlist_add_rounded, color: Color(0xFF0284C7)),
-                title: const Text('排队发送', style: TextStyle(fontWeight: FontWeight.w600)),
-                subtitle: const Text('不打断，等这一轮结束后自动发出', style: TextStyle(fontSize: 12)),
-                onTap: () => Navigator.pop(ctx, 'queue'),
-              ),
-              const SizedBox(height: 8),
-              Divider(height: 1, color: isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0)),
-              ListTile(
-                leading: const Icon(Icons.close, size: 20),
-                title: const Text('取消', style: TextStyle(fontSize: 14)),
-                onTap: () => Navigator.pop(ctx, null),
-              ),
-              const SizedBox(height: 6),
-            ],
-          ),
-        );
-      },
-    );
+    // 轮次结束 → 关掉弹窗（返回值 'finished' 表示"已经不需要打断/排队了"）
+    void onChatChanged() {
+      if (!chat.isGenerating && !turnFinished) {
+        turnFinished = true;
+        if (mounted && Navigator.of(context).canPop()) {
+          Navigator.of(context).pop('finished');
+        }
+      }
+    }
 
-    if (!mounted || mode == null) return;
+    chat.addListener(onChatChanged);
+    String? mode;
+    try {
+      mode = await showModalBottomSheet<String>(
+        context: context,
+        showDragHandle: true,
+        builder: (ctx) {
+          final isDark = Theme.of(ctx).brightness == Brightness.dark;
+          return SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 6),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.bolt_outlined, size: 18, color: Color(0xFF0284C7)),
+                      const SizedBox(width: 8),
+                      Text(
+                        executing ? '本地 Agent 正在执行' : '正在生成回复',
+                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+                  child: Text(
+                    executing
+                        ? '这条消息要怎么发？执行阶段的插话会中止电脑上正在跑的本地任务。'
+                        : '这条消息要怎么发？',
+                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.bolt_rounded, color: Color(0xFFF59E0B)),
+                  title: const Text('插话发送', style: TextStyle(fontWeight: FontWeight.w600)),
+                  subtitle: Text(
+                    executing
+                        ? '打断当前这轮（含电脑上正在执行的本地任务），立刻处理这条'
+                        : '打断当前生成，立刻处理这条',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  onTap: () => Navigator.pop(ctx, 'interject'),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.playlist_add_rounded, color: Color(0xFF0284C7)),
+                  title: const Text('排队发送', style: TextStyle(fontWeight: FontWeight.w600)),
+                  subtitle: const Text('不打断，等这一轮结束后自动发出', style: TextStyle(fontSize: 12)),
+                  onTap: () => Navigator.pop(ctx, 'queue'),
+                ),
+                const SizedBox(height: 8),
+                Divider(height: 1, color: isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0)),
+                ListTile(
+                  leading: const Icon(Icons.close, size: 20),
+                  title: const Text('取消', style: TextStyle(fontSize: 14)),
+                  onTap: () => Navigator.pop(ctx, null),
+                ),
+                const SizedBox(height: 6),
+              ],
+            ),
+          );
+        },
+      );
+    } finally {
+      chat.removeListener(onChatChanged);
+    }
+
+    if (!mounted) return;
+
+    // 犹豫期间这一轮已经跑完了：直接按普通消息发出去，不需要打断也不需要排队
+    if (mode == null && turnFinished) {
+      _submitSend(text, attachments, widget.onSend);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('上一轮已经结束了，已直接发送'),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+    if (mode == null) return; // 用户主动取消
 
     if (mode == 'interject') {
       final action = widget.onInterject ?? widget.onSend;
@@ -536,6 +570,66 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                               ),
                             ],
                           ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+              // 0.4 DSH 审批卡片：本地执行敏感操作前挂起等用户拍板。
+              //     以前这条通知只走 socket.io，而 App 没有 socket.io 客户端，
+              //     所以只有 DSH 自己弹窗；现在经 SSE 同步到这里。
+              Consumer<ChatProvider>(
+                builder: (context, chat, _) {
+                  final approval = chat.pendingApproval;
+                  if (approval == null) return const SizedBox.shrink();
+                  final tool = approval['tool']?.toString() ?? '敏感操作';
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: isDark ? const Color(0xFF2A1F0B) : const Color(0xFFFFFBEB),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFFF59E0B)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.gpp_maybe_outlined, size: 16, color: Color(0xFFF59E0B)),
+                            const SizedBox(width: 6),
+                            const Expanded(
+                              child: Text(
+                                '电脑端等待你的授权',
+                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          '本地 Agent 想执行：$tool',
+                          style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () => chat.resolveApproval('deny'),
+                                child: const Text('拒绝', style: TextStyle(fontSize: 12)),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: FilledButton(
+                                style: FilledButton.styleFrom(backgroundColor: const Color(0xFFF59E0B)),
+                                onPressed: () => chat.resolveApproval('allow'),
+                                child: const Text('允许本次', style: TextStyle(fontSize: 12)),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),

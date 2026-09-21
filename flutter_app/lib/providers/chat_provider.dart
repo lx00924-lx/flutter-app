@@ -67,6 +67,13 @@ class ChatProvider extends ChangeNotifier {
   /// 当前轮次所处阶段（用于插话判定与界面提示）
   TurnPhase _turnPhase = TurnPhase.idle;
 
+  /// 轮次编号：每开一轮 +1；SSE 事件按编号认领，过期事件一律丢弃
+  int _turnSeq = 0;
+
+  /// 正在等待用户拍板的审批请求（DSH 执行敏感操作前）
+  Map<String, dynamic>? _pendingApproval;
+  Map<String, dynamic>? get pendingApproval => _pendingApproval;
+
   /// 排队中等待自动发送的消息
   final List<QueuedMessage> _queue = [];
 
@@ -182,9 +189,12 @@ class ChatProvider extends ChangeNotifier {
 
   /// 插话发送：打断当前轮次并立刻把这条发出去。
   ///
-  /// 关键在于"真打断"：只断开本地 SSE 是不够的 —— 服务端那次生成、以及电脑上
-  /// 正在跑的 DSH 任务都还在继续，结果过一会儿又会同步回来。所以这里先调
-  /// `/api/chat/cancel`，再本地收尾，最后开新一轮。
+  /// 设计取舍（按实测调整）：
+  /// · 只断开本地 SSE 是不够的 —— 服务端那次生成、电脑上正在跑的 DSH 任务都还在
+  ///   继续，结果过一会儿又同步回来，所以先调 `/api/chat/cancel` 真打断；
+  /// · 打断后的半截气泡**只留在本地、不推云端**：另一端拉到一半的内容再被服务端
+  ///   的收尾版本覆盖，就会出现"这端有内容、那端是空气泡"。**完整消息才同步**；
+  /// · 立刻开新一轮，旧轮的迟到事件由轮次编号拦掉，不会把新轮状态改坏。
   Future<void> interjectMessage(String text, {List<String>? attachments}) async {
     final cleanText = text.trim();
     if (cleanText.isEmpty && (attachments == null || attachments.isEmpty)) return;
@@ -196,43 +206,72 @@ class ChatProvider extends ChangeNotifier {
 
     final streaming = (_messages.isNotEmpty && _messages.last.isStreaming) ? _messages.last : null;
 
-    // 1) 通知服务端真正中止（含本地 DSH 任务）
-    await SyncService.instance.cancelServerGeneration(
-      userId: settingsProvider.syncUserId,
-      assistantMessageId: streaming?.id ?? '',
-      sessionId: _currentSession?.id ?? '',
-    );
+    try {
+      // 1) 通知服务端真正中止（含本地 DSH 任务）
+      await SyncService.instance.cancelServerGeneration(
+        userId: settingsProvider.syncUserId,
+        assistantMessageId: streaming?.id ?? '',
+        sessionId: _currentSession?.id ?? '',
+      );
+    } catch (e) {
+      debugPrint('[ChatProvider] 插话时取消上一轮失败（继续发送）: $e');
+    }
 
-    // 2) 本地收尾：保留已生成的部分并标注被打断
+    // 2) 本地收尾：保留已生成的部分、就地标注被打断；不推云端
+    _streamSub?.cancel();
+    _streamSub = null;
     _cancelToken?.cancel('interrupted by user');
     _cancelToken = null;
-    await _streamSub?.cancel();
-    _streamSub = null;
     _isGenerating = false;
-    _turnPhase = TurnPhase.idle;
 
     if (streaming != null) {
       final hasContent = streaming.content.trim().isNotEmpty ||
           (streaming.reasoningContent?.trim().isNotEmpty ?? false);
       if (!hasContent) {
-        // 一个字都没吐出来：直接移除空占位，不留噪音
         _messages.remove(streaming);
         _storage.deleteMessage(streaming.id);
       } else {
         streaming.isStreaming = false;
         streaming.content = '${streaming.content.trimRight()}\n\n*（已被新消息打断）*';
         _storage.saveMessage(streaming);
-        SyncService.instance.pushMessages(
-          userId: settingsProvider.syncUserId,
-          messages: [streaming],
-          clientSessionId: settingsProvider.clientSessionId,
-        );
+        // 刻意不 pushMessages：半截内容同步到另一端只会造成状态打架
       }
     }
     notifyListeners();
 
-    // 3) 立刻发出插话内容
+    // 3) 立刻开新一轮（新气泡）
     await sendMessage(text, attachments: attachments);
+  }
+
+  /// 回报一次本地操作的审批决定（allow / deny）。
+  Future<bool> resolveApproval(String action) async {
+    final pending = _pendingApproval;
+    if (pending == null) return false;
+    final approvalId = pending['approvalId']?.toString() ?? '';
+    if (approvalId.isEmpty) {
+      _pendingApproval = null;
+      notifyListeners();
+      return false;
+    }
+    final ok = await SyncService.instance.approveAgentTask(
+      token: settingsProvider.settings.harnessToken,
+      approvalId: approvalId,
+      action: action,
+      taskId: pending['taskId']?.toString() ?? '',
+      userId: settingsProvider.syncUserId,
+    );
+    if (ok) {
+      _pendingApproval = null;
+      notifyListeners();
+    }
+    return ok;
+  }
+
+  /// 本地直接清掉审批卡片（例如任务已结束）
+  void dismissApproval() {
+    if (_pendingApproval == null) return;
+    _pendingApproval = null;
+    notifyListeners();
   }
 
   // 说明：一轮结束时「阶段归 idle + 推进排队队列」统一收口在 _isGenerating 的
@@ -575,6 +614,10 @@ class ChatProvider extends ChangeNotifier {
     final startTime = DateTime.now();
     final cancelToken = CancelToken();
     _cancelToken = cancelToken;
+    // 本轮编号：插话会立刻开新一轮，而旧一轮的 SSE 事件可能姗姗来迟
+    // （done/error/chunk 都可能），必须让它们认领自己那一轮，否则会把新一轮的
+    // 生成状态、气泡内容改坏 —— 表现为"插话后没有新消息、按钮卡在停止态"。
+    final myTurn = ++_turnSeq;
 
     try {
       if (isAgentMode) {
@@ -589,12 +632,25 @@ class ChatProvider extends ChangeNotifier {
 
         _streamSub = stream.listen(
           (chunk) {
+            // 过期轮次的事件直接丢弃（插话后旧流可能还会吐 done/error）
+            if (myTurn != _turnSeq) return;
             if (chunk['error'] != null) {
               assistantMsg.isStreaming = false;
               assistantMsg.content += '\n\n*(智能体执行异常: ${chunk['error']})*';
               _storage.saveMessage(assistantMsg);
               _isGenerating = false;
               _cancelToken = null;
+              notifyListeners();
+              return;
+            }
+
+            // DSH 请求用户拍板：在输入框上方弹出审批卡片
+            if (chunk['approval'] is Map) {
+              _pendingApproval = {
+                ...Map<String, dynamic>.from(chunk['approval'] as Map),
+                if (chunk['taskId'] != null) 'taskId': chunk['taskId'],
+                'messageId': assistantMsg.id,
+              };
               notifyListeners();
               return;
             }
@@ -862,6 +918,10 @@ class ChatProvider extends ChangeNotifier {
     final startTime = DateTime.now();
     final cancelToken = CancelToken();
     _cancelToken = cancelToken;
+    // 本轮编号：插话会立刻开新一轮，而旧一轮的 SSE 事件可能姗姗来迟
+    // （done/error/chunk 都可能），必须让它们认领自己那一轮，否则会把新一轮的
+    // 生成状态、气泡内容改坏 —— 表现为"插话后没有新消息、按钮卡在停止态"。
+    final myTurn = ++_turnSeq;
 
     try {
       final stream = _apiService.streamChatCompletion(
@@ -872,6 +932,8 @@ class ChatProvider extends ChangeNotifier {
 
       _streamSub = stream.listen(
         (chunk) {
+          // 过期轮次的事件直接丢弃（插话后旧流可能还会吐 done/error）
+          if (myTurn != _turnSeq) return;
           if (chunk['done'] == true) {
             assistantMsg.isStreaming = false;
             assistantMsg.elapsedSeconds = DateTime.now().difference(startTime).inSeconds;
@@ -1029,6 +1091,10 @@ class ChatProvider extends ChangeNotifier {
     final startTime = DateTime.now();
     final cancelToken = CancelToken();
     _cancelToken = cancelToken;
+    // 本轮编号：插话会立刻开新一轮，而旧一轮的 SSE 事件可能姗姗来迟
+    // （done/error/chunk 都可能），必须让它们认领自己那一轮，否则会把新一轮的
+    // 生成状态、气泡内容改坏 —— 表现为"插话后没有新消息、按钮卡在停止态"。
+    final myTurn = ++_turnSeq;
 
     try {
       if (isAgentMode) {
@@ -1042,12 +1108,25 @@ class ChatProvider extends ChangeNotifier {
 
         _streamSub = stream.listen(
           (chunk) {
+            // 过期轮次的事件直接丢弃（插话后旧流可能还会吐 done/error）
+            if (myTurn != _turnSeq) return;
             if (chunk['error'] != null) {
               assistantMsg.isStreaming = false;
               assistantMsg.content += '\n\n*(智能体执行异常: ${chunk['error']})*';
               _storage.saveMessage(assistantMsg);
               _isGenerating = false;
               _cancelToken = null;
+              notifyListeners();
+              return;
+            }
+
+            // DSH 请求用户拍板：在输入框上方弹出审批卡片
+            if (chunk['approval'] is Map) {
+              _pendingApproval = {
+                ...Map<String, dynamic>.from(chunk['approval'] as Map),
+                if (chunk['taskId'] != null) 'taskId': chunk['taskId'],
+                'messageId': assistantMsg.id,
+              };
               notifyListeners();
               return;
             }

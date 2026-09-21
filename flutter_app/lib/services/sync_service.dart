@@ -861,6 +861,37 @@ class SyncService {
     return const [];
   }
 
+  /// 回报一次本地操作的审批决定（allow / deny）。
+  ///
+  /// DSH 在本地执行敏感操作前会挂起等用户拍板；App 通过 SSE 收到请求，
+  /// 用户点完按钮后走这里把决定送回去。
+  Future<bool> approveAgentTask({
+    required String token,
+    required String approvalId,
+    required String action,
+    String taskId = '',
+    String userId = '',
+  }) async {
+    final cleanToken = token.trim();
+    if (cleanToken.isEmpty || approvalId.isEmpty) return false;
+    try {
+      final resp = await _dio.post(
+        '$serverBaseUrl/api/agent/approve',
+        data: {
+          'token': cleanToken,
+          'approvalId': approvalId,
+          'action': action,
+          if (taskId.isNotEmpty) 'taskId': taskId,
+          if (userId.isNotEmpty) 'userId': userId,
+        },
+      );
+      return resp.statusCode == 200;
+    } catch (e) {
+      debugPrint('[SyncService] approveAgentTask error: $e');
+      return false;
+    }
+  }
+
   /// 打断/停止服务端正在进行的这一轮生成。
   ///
   /// 插话发送与「停止生成」都调用它。以前 App 只断开自己的 SSE，服务端那一轮
@@ -1133,6 +1164,19 @@ class SyncService {
                 'result': parsed['result'],
                 'done': false,
               };
+            } else if (eventName == 'phase') {
+              yield {
+                'phase': parsed['phase'] ?? '',
+                'done': false,
+              };
+            } else if (eventName == 'approval') {
+              // DSH 在本地执行时请求用户拍板（越权操作确认）。以前这条通知只走
+              // socket.io，而 App 没有 socket.io 客户端 —— 所以只有 DSH 自己弹窗。
+              yield {
+                'approval': parsed['approval'],
+                'taskId': parsed['taskId'],
+                'done': false,
+              };
             } else if (eventName == 'done') {
               yield {
                 'content': '',
@@ -1140,6 +1184,7 @@ class SyncService {
                 'fullContent': parsed['fullContent'],
                 'fullReasoning': parsed['fullReasoning'],
                 'agentExecution': parsed['agentExecution'],
+                'interrupted': parsed['interrupted'] == true,
                 'done': true,
               };
             } else if (eventName == 'error') {

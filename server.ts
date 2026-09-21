@@ -567,6 +567,17 @@ async function upsertMessage(userId: string, message: any) {
   });
 }
 
+/** 按消息 id 读取云端已存的那条（用于"不要用更短的内容覆盖更长内容"）。 */
+async function findMessageById(userId: string, messageId: string): Promise<any | undefined> {
+  if (!userId || userId === 'guest' || !messageId) return undefined;
+  try {
+    const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+    return (allMessages[userId] || []).find((m: any) => m?.id === messageId);
+  } catch {
+    return undefined;
+  }
+}
+
 async function runServerSideGeneration({
   userId,
   assistantMessageId,
@@ -615,7 +626,12 @@ async function runServerSideGeneration({
     type: 'text',
     status: 'generating',
   };
-  await upsertMessage(userId, initialAssistantMessage);
+  // 不要用这个空占位覆盖云端已有的同 id 消息：那条可能已经有内容
+  // （例如客户端在插话前已经把半句推上来过），覆盖掉就会出现"这端有、那端空"。
+  const existingBeforeStart = await findMessageById(userId, assistantMessageId);
+  if (!existingBeforeStart || (existingBeforeStart.content ?? '').toString().trim().isEmpty) {
+    await upsertMessage(userId, initialAssistantMessage);
+  }
 
   // 这三个变量提到 try 外面：catch 里的"被用户打断"分支也要用它们
   // （保留已生成的内容与执行结果），放在 try 内会取不到作用域。
@@ -1071,12 +1087,18 @@ async function runServerSideGeneration({
     if (genState.cancelledByUser) {
       genState.status = 'cancelled';
       const partial = (genState.content || '').trim();
+      // 关键：不要用服务端这份（可能更短的）内容覆盖客户端已经推到云端的版本。
+      // 插话时手机本地气泡里往往已经有半句，而服务端这一轮可能一个字都没攒下，
+      // 直接 upsert 会把对方的半句清空 —— 表现为"手机有内容、电脑是空气泡"。
+      const existing = await findMessageById(userId, assistantMessageId);
+      const existingContent = (existing?.content ?? '').toString();
+      const keepContent = existingContent.length > partial.length ? existingContent : partial;
       const interruptedMessage = {
         id: assistantMessageId,
         sessionId: resolvedSessionId,
         role: 'assistant',
-        content: partial,
-        reasoningContent: accumulatedReasoning,
+        content: keepContent,
+        reasoningContent: accumulatedReasoning || (existing?.reasoningContent ?? ''),
         timestamp: new Date().toISOString(),
         type: 'text',
         status: 'cancelled',
@@ -1086,21 +1108,21 @@ async function runServerSideGeneration({
       await upsertMessage(userId, interruptedMessage);
       io.to(`user_${userId}`).emit("chat_completed", {
         messageId: assistantMessageId,
-        content: partial,
-        reasoningContent: accumulatedReasoning,
+        content: keepContent,
+        reasoningContent: interruptedMessage.reasoningContent,
         interrupted: true,
         isAgentMode: isAgentMode || false,
         agentExecution: agentExecutionResult
       });
       generationEvents.emit(`completed_${assistantMessageId}`, {
         messageId: assistantMessageId,
-        content: partial,
-        reasoningContent: accumulatedReasoning,
+        content: keepContent,
+        reasoningContent: interruptedMessage.reasoningContent,
         interrupted: true,
         isAgentMode: isAgentMode || false,
         agentExecution: agentExecutionResult
       });
-      console.log(`[Server Background Gen] 已被用户打断，保留部分内容 ${partial.length} 字 (${assistantMessageId})`);
+      console.log(`[Server Background Gen] 已被用户打断，保留内容 ${keepContent.length} 字 (${assistantMessageId})`);
       return;
     }
     console.error(`[Server Background Gen] Error for msg ${assistantMessageId}:`, err);
@@ -1782,6 +1804,16 @@ async function startServer() {
       sendEvent("phase", { phase: data.phase });
     };
 
+    // DSH 在本地执行时可能要用户拍板（越权操作确认等）。服务端把它通过 SSE
+    // 送到 App，用户在 App 上点了之后走 /api/agent/approve 回传 —— 之前这条
+    // 通知只走 socket.io，而 App 没有 socket.io 客户端，所以只有 DSH 自己弹窗。
+    const approvalHandler = (data: any) => {
+      sendEvent("approval", {
+        taskId: data.taskId,
+        approval: data.approval,
+      });
+    };
+
     const taskFinishedHandler = (data: any) => {
       if (data.messageId === assistantMessageId) {
         sendEvent("agent_finished", { result: data.result, taskId: data.taskId });
@@ -1823,6 +1855,7 @@ async function startServer() {
       generationEvents.off(`task_started_${assistantMessageId}`, taskStartedHandler);
       generationEvents.off(`task_finished_${assistantMessageId}`, taskFinishedHandler);
       generationEvents.off(`phase_${assistantMessageId}`, phaseHandler);
+      generationEvents.off(`approval_${assistantMessageId}`, approvalHandler);
       generationEvents.off(`completed_${assistantMessageId}`, completedHandler);
       generationEvents.off(`error_${assistantMessageId}`, errorHandler);
     };
@@ -1842,6 +1875,7 @@ async function startServer() {
     generationEvents.on(`task_started_${assistantMessageId}`, taskStartedHandler);
     generationEvents.on(`task_finished_${assistantMessageId}`, taskFinishedHandler);
     generationEvents.on(`phase_${assistantMessageId}`, phaseHandler);
+    generationEvents.on(`approval_${assistantMessageId}`, approvalHandler);
     generationEvents.on(`completed_${assistantMessageId}`, completedHandler);
     generationEvents.on(`error_${assistantMessageId}`, errorHandler);
 
@@ -3716,12 +3750,24 @@ if %errorlevel% neq 0 (
                 messageId: pending.assistantMessageId,
                 approval: msg.approval
               });
+              // App 没有 socket.io 客户端，只有 SSE 通道 —— 必须在这里也推一份，
+              // 否则"DSH 弹选项等用户点"这件事 App 永远看不到。
+              generationEvents.emit(`approval_${pending.assistantMessageId}`, {
+                messageId: pending.assistantMessageId,
+                taskId: msg.taskId,
+                approval: msg.approval,
+              });
             } else {
               io.emit("agent_waiting_approval", {
                 taskId: msg.taskId,
                 approval: msg.approval
               });
             }
+          } else if (msg.type === "approval_resolved") {
+            // DSH 侧已给出结论（用户点了/超时），同步给所有在等的界面
+            const resolved = msg.approvalId ? { approvalId: msg.approvalId, outcome: msg.outcome } : msg;
+            io.emit("agent_approval_resolved", resolved);
+            generationEvents.emit('approval_resolved_broadcast', resolved);
           } else if (msg.type === "sync_sessions" || msg.type === "sessions_result") {
             agentInfo.workspaces = msg.workspaces || [];
             agentInfo.sessions = msg.sessions || [];
