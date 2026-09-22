@@ -1367,9 +1367,10 @@ async def apply_dsh_session_permission(harness_url: str, session_id: str, preset
     """
     立即切换某个 DSH 会话的权限预设 (POST /v1/session/permission)。
 
-    为什么单独做一个接口：以前只有"下一轮对话开始时顺手塞一条 /permission"，
-    而且预设名不合法时 DSH 会返回 unknown preset 被静默吞掉 —— App 上改了
-    看起来像生效，实际什么都没变。这里把结果（含失败原因）原样带回。
+    为什么要看回执而不是只看 HTTP 200：插件早先那版是"往会话排一条 /permission 文本"
+    然后无条件回 applied:true —— DSH 并不把排队文本当命令，于是 App 上"切换成功"
+    是假的（会话日志里 permission/preset 事件始终只有建会话那一条）。现在插件返回
+    真实结果，这里必须解析 applied/current，避免再把假成功透传给 App。
     """
     if not session_id or not preset:
         return False, "缺少会话ID或权限预设"
@@ -1391,6 +1392,16 @@ async def apply_dsh_session_permission(harness_url: str, session_id: str, preset
                 return resp.read().decode("utf-8")
         try:
             raw = await loop.run_in_executor(None, do_post)
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                return True, raw
+            if payload.get("applied") is False:
+                current = payload.get("current")
+                return False, (
+                    f"DSH 未应用该预设（当前实际为 {current or '未知'}）"
+                    if current else "DSH 未应用该预设"
+                )
             return True, raw
         except urllib.error.HTTPError as he:
             # 4xx 是"预设名不合法"这类业务错误：把 DSH 的原话带回去，
@@ -1403,6 +1414,38 @@ async def apply_dsh_session_permission(harness_url: str, session_id: str, preset
         except Exception:
             continue
     return False, "权限切换失败：本地 DSH 未响应（可能插件版本过旧，缺少 /v1/session/permission）"
+
+async def query_dsh_session_permission(harness_url: str, session_id: str):
+    """
+    读取会话**真实生效**的权限预设 (GET /v1/session/permission)。
+
+    用于对账：App 显示的是本地设置，电脑端可能被别处改过；有了这个接口就能
+    以 DSH 为准回写，而不是各说各话。
+    """
+    if not session_id:
+        return None
+    harness_base = harness_url.rstrip("/")
+    loop = asyncio.get_running_loop()
+    quoted = urllib.parse.quote(session_id, safe="")
+    candidates = [f"{harness_base}/v1/session/permission?sessionId={quoted}"]
+    if "3080" in harness_base:
+        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/session/permission?sessionId={quoted}")
+
+    def do_get(url: str):
+        req = urllib.request.Request(url, headers=dsh_headers(url), method="GET")
+        with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=6) as resp:
+            return resp.read().decode("utf-8")
+
+    for url in candidates:
+        try:
+            raw = await loop.run_in_executor(None, lambda u=url: do_get(u))
+            data = json.loads(raw)
+            preset = data.get("preset")
+            if isinstance(preset, str) and preset:
+                return preset
+        except Exception:
+            continue
+    return None
 
 async def apply_dsh_session_model(harness_url: str, session_id: str, model: str, reasoning_effort: str):
     """

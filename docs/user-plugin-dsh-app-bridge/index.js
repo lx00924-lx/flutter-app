@@ -119,6 +119,58 @@ export function apply(ctx) {
   /** 桥接最近一次来轮询选择框的时间戳（用于判定 App 侧是否在线）。 */
   let lastQuestionPollAt = 0
 
+  /**
+   * 按 sessionId 拿到 **会话对象**（不是 API 层的 sessionId 字符串）。
+   *
+   * 为什么需要：切换权限预设要用 `permissionPresets.apply(session, …)`，它内部会
+   * `session.append('permission/preset', …)` —— 必须是真的会话对象。API 层的
+   * sessionController 只吃 sessionId，拿不到它，所以这里走内部的 sessions 服务。
+   */
+  async function resolveSessionObject(sessionId) {
+    const service = ctx.get('sessions')
+    if (service === undefined) return undefined
+    for (const method of ['get', 'resolve']) {
+      if (typeof service[method] !== 'function') continue
+      try {
+        const found = await service[method](sessionId)
+        if (found?.append !== undefined || found?.id === sessionId) return found
+      } catch {
+        /* 换下一个方法试 */
+      }
+    }
+    if (typeof service.list === 'function') {
+      try {
+        for (const session of service.list()) {
+          if (session?.id === sessionId) return session
+        }
+      } catch {
+        /* 忽略：交给调用方报"会话不在活动列表" */
+      }
+    }
+    return undefined
+  }
+
+  /** 找出该会话当前活跃的 agent（有它才能改"正在跑的这一轮"的审批策略）。 */
+  function findLiveAgentForSession(sessionId) {
+    const agents = ctx.get('agents')
+    if (agents === undefined) return undefined
+    const pool = []
+    try {
+      if (typeof agents.roots === 'function') pool.push(...agents.roots())
+    } catch {
+      /* 忽略 */
+    }
+    try {
+      if (typeof agents.list === 'function') pool.push(...agents.list())
+    } catch {
+      /* 忽略 */
+    }
+    for (const agent of pool) {
+      if (agent?.session?.id === sessionId) return agent
+    }
+    return undefined
+  }
+
   //#region 数据读取
 
   /** 读模型目录（带短缓存）。 */
@@ -625,8 +677,7 @@ export function apply(ctx) {
   }
 
   /** 待答清单（桥接脚本轮询用；这次轮询同时表示「App 侧在线」）。 */
-  function questionsPayload() {
-    return {
+  function questionsPayload() {    return {
       status: 'success',
       questions: [...pendingQuestions.values()].map((entry) => ({
         questionId: entry.questionId,
@@ -852,11 +903,25 @@ export function apply(ctx) {
       })
     }
 
+    // 读：当前会话真正生效的权限预设（App 用它显示真值，别再靠"下发成功"猜）
+    if (pathname === '/v1/session/permission' && method === 'GET') {
+      const query = new URL(request.url).searchParams
+      const sessionId = readSessionId(query.get('sessionId'))
+      if (sessionId === undefined) return json(400, { status: 'error', error: { code: 'bad-id', message: '缺少 sessionId' } })
+      const service = ctx.get('permissionPresets')
+      const names = Array.isArray(service?.names) ? service.names : []
+      const session = await resolveSessionObject(sessionId)
+      if (session === undefined) {
+        return json(404, { status: 'error', error: { code: 'session-not-found', message: `会话 ${sessionId} 不在活动列表里` } })
+      }
+      const current = typeof service?.current === 'function' ? service.current(session) : undefined
+      return json(200, { status: 'success', sessionId, preset: current, available: names })
+    }
+
     if (pathname === '/v1/session/permission' && method === 'POST') {
       const input = await body(request)
       const sessionId = readSessionId(input.sessionId)
       if (sessionId === undefined) return json(400, { status: 'error', error: { code: 'bad-id', message: '缺少 sessionId' } })
-      if (sessions() === undefined) return json(503, { status: 'error', error: { code: 'unavailable', message: 'sessions() 缺失' } })
       const preset = typeof input.preset === 'string' ? input.preset.trim() : ''
       const service = ctx.get('permissionPresets')
       const names = Array.isArray(service?.names) ? service.names : []
@@ -867,14 +932,43 @@ export function apply(ctx) {
           error: { code: 'unknown-preset', message: `未知权限预设 "${preset}"（可用：${names.join(', ')}）` },
         })
       }
-      // 与 /permission 命令同一路径：往该会话排一条命令，DSH 会真正切换预设
-      await sessions().prompt({
-        requestId: randomUUID(),
+      if (typeof service?.apply !== 'function') {
+        return json(503, {
+          status: 'error',
+          error: { code: 'unsupported', message: 'permissionPresets.apply 不可用：DSH 版本过旧或插件未加载' },
+        })
+      }
+      const session = await resolveSessionObject(sessionId)
+      if (session === undefined) {
+        return json(404, {
+          status: 'error',
+          error: { code: 'session-not-found', message: `会话 ${sessionId} 不在活动列表里，无法即时切换` },
+        })
+      }
+      // 真正的切换：与 DSH 内置 /permission 命令完全同一条路径 ——
+      // 写一条 permission/preset 会话事实 + 改沙箱模式 + 改审批策略。
+      //
+      // 历史教训：上一版是往会话里排一条文本 `/permission <preset>`，以为 DSH 会把
+      // 它当命令执行；实际它只是一条普通用户消息（会话日志里能看到 permission/preset
+      // 事件始终只有建会话时那一条），于是 App 上"切换成功"是假的、越权操作照旧
+      // 不弹审批。这里改成直接调用服务方法，并且把真实结果回传。
+      const agent = findLiveAgentForSession(sessionId)
+      if (agent !== undefined && typeof ctx.get('approval')?.setPolicy === 'function') {
+        // 会话正在跑：连"当前这轮"的审批策略一起改（内置命令用的是同一个实时写法）
+        service.apply(session, preset, (policy) => ctx.get('approval').setPolicy(agent, policy))
+      } else {
+        // 没有活跃 agent：写持久化事实 + 会话级开关，下一轮生效
+        service.set(session, preset)
+      }
+      const current = typeof service.current === 'function' ? service.current(session) : undefined
+      return json(200, {
+        status: 'success',
         sessionId,
-        mode: 'queue',
-        content: [{ type: 'text', text: `/permission ${preset}` }],
-      }, turnSignal())
-      return json(200, { status: 'success', sessionId, preset, applied: true })
+        preset,
+        current,
+        applied: current === undefined ? true : current === preset,
+        live: agent !== undefined,
+      })
     }
 
     // ── 思考深度：立即切换（不必等下一轮对话才生效）─────────────

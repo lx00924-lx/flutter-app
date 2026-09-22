@@ -1001,7 +1001,27 @@ class SyncService {
         },
       );
       if (resp.statusCode == 200 && resp.data is Map && resp.data['success'] == true) {
-        return (ok: true, message: resp.data['message']?.toString() ?? '');
+        final raw = resp.data['message']?.toString() ?? '';
+        // 关键：不能只看 HTTP 成功。插件历史上出现过"排了一条命令就回 applied:true"
+        // 的假成功（DSH 根本不把排队文本当命令），所以这里解析真实回执，
+        // applied:false 一律按失败报给用户，并把"当前实际值"带出来。
+        if (kind == 'permission' && raw.contains('"applied"')) {
+          try {
+            final decoded = jsonDecode(raw);
+            if (decoded is Map && decoded['applied'] == false) {
+              final current = decoded['current']?.toString() ?? '';
+              return (
+                ok: false,
+                message: current.isEmpty
+                    ? '电脑端没有应用这个权限预设（DSH 回执 applied:false）'
+                    : '电脑端没有应用：它当前实际是「$current」',
+              );
+            }
+          } catch (_) {
+            // 解析不了就当成功（老版本插件返回的是别的形状）
+          }
+        }
+        return (ok: true, message: raw);
       }
       return (ok: false, message: resp.data is Map ? (resp.data['error']?.toString() ?? '切换失败') : '切换失败');
     } on DioException catch (e) {
