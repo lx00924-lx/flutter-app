@@ -1114,6 +1114,11 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
 
 ACTIVE_SESSION_REGISTRY = {}
 
+# WS 通道里跑着的任务协程引用。
+# 为什么要留着：asyncio 只对任务持弱引用，光 create_task 不保存引用的话，
+# 任务可能跑到一半被 GC 回收（官方文档明确提醒过）。任务结束后由回调移除。
+RUNNING_WS_TASKS = set()
+
 async def query_dsh_models(harness_url: str):
     """从本地 DSH (3080/3081) 获取可用模型列表与各模型的思考深度(推理等级)"""
     harness_base = harness_url.rstrip("/")
@@ -2737,6 +2742,91 @@ async def run_bridge_client(args):
 
                 question_task = asyncio.create_task(poll_dsh_questions_loop(ws_question_sender, args.harness_url))
 
+                async def _run_ws_task(msg):
+                    task_id = msg.get("taskId")
+                    prompt = msg.get("prompt", "")
+                    messages = msg.get("messages", [])
+                    harness_url = msg.get("harnessUrl", args.harness_url)
+                    model_name = msg.get("model", args.harness_model)
+                    session_id = msg.get("agentSessionId") or msg.get("sessionId", "default_session")
+                    target_ws = msg.get("agentWorkspace") or msg.get("workspace") or ""
+
+                    print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
+                    steps_collected = []
+
+                    async def ws_step_cb(step_text: str):
+                        steps_collected.append(step_text)
+                        print(f"\033[90m  └─ {step_text}\033[0m")
+                        try:
+                            await ws.send(json.dumps({
+                                "type": "agent_step",
+                                "taskId": task_id,
+                                "step": step_text,
+                                "timestamp": int(time.time() * 1000)
+                            }))
+                        except Exception:
+                            pass
+
+                    async def ws_approval_cb(approval_data: dict):
+                        try:
+                            await ws.send(json.dumps({
+                                "type": "waiting_approval",
+                                "taskId": task_id,
+                                "approval": approval_data,
+                                "timestamp": int(time.time() * 1000)
+                            }))
+                        except Exception:
+                            pass
+
+                    extra_config = {
+                        "apiEndpoint": msg.get("apiEndpoint") or getattr(args, "chat_api_url", ""),
+                        "apiKey": msg.get("apiKey") or getattr(args, "chat_api_key", ""),
+                        "chatModel": msg.get("chatModel") or getattr(args, "chat_model", ""),
+                        "reasoningEffort": msg.get("reasoningEffort") or msg.get("reasoning_effort") or "",
+                        "permission": msg.get("permission") or "workspace-write",
+                    }
+
+                    try:
+                        # 先看是不是 DSH 斜杠命令：是就直接执行，不丢给模型
+                        handled = await try_handle_dsh_command(prompt, session_id, harness_url)
+                        if handled is not None:
+                            success, output = handled
+                            await ws_step_cb(output)
+                        else:
+                            success, output = await execute_local_harness(
+                                task_id, prompt, messages, harness_url, model_name, session_id, ws_step_cb, extra_config, target_workspace=target_ws, on_approval_callback=ws_approval_cb
+                            )
+                    except Exception as task_err:
+                        success = False
+                        output = f"本地执行异常: {task_err}"
+                        await ws_step_cb(f"❌ 任务发生未捕获异常: {task_err}")
+                    finally:
+                        ACTIVE_SESSION_REGISTRY.pop(task_id, None)
+
+                    status_tag = "✓ 任务完成" if success else "✗ 任务异常"
+                    color = "\033[92m" if success else "\033[91m"
+                    print(f"{color}[{status_tag}] 回传结果 TaskID: {task_id}\033[0m")
+
+                    await ws.send(json.dumps({
+                        "type": "agent_result",
+                        "taskId": task_id,
+                        "success": success,
+                        "steps": steps_collected,
+                        "output": output,
+                        "timestamp": int(time.time() * 1000)
+                    }))
+
+                    try:
+                        cur_ws, cur_sess = await query_dsh_workspaces_and_sessions(harness_url)
+                        await ws.send(json.dumps({
+                            "type": "sync_sessions",
+                            "token": token,
+                            "workspaces": cur_ws,
+                            "sessions": cur_sess
+                        }))
+                    except Exception:
+                        pass
+
                 async for raw_msg in ws:
                     try:
                         msg = json.loads(raw_msg)
@@ -2908,89 +2998,13 @@ async def run_bridge_client(args):
                             continue
 
                         if mtype == "run_agent":
-                            task_id = msg.get("taskId")
-                            prompt = msg.get("prompt", "")
-                            messages = msg.get("messages", [])
-                            harness_url = msg.get("harnessUrl", args.harness_url)
-                            model_name = msg.get("model", args.harness_model)
-                            session_id = msg.get("agentSessionId") or msg.get("sessionId", "default_session")
-                            target_ws = msg.get("agentWorkspace") or msg.get("workspace") or ""
-
-                            print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
-                            steps_collected = []
-
-                            async def ws_step_cb(step_text: str):
-                                steps_collected.append(step_text)
-                                print(f"\033[90m  └─ {step_text}\033[0m")
-                                try:
-                                    await ws.send(json.dumps({
-                                        "type": "agent_step",
-                                        "taskId": task_id,
-                                        "step": step_text,
-                                        "timestamp": int(time.time() * 1000)
-                                    }))
-                                except Exception:
-                                    pass
-
-                            async def ws_approval_cb(approval_data: dict):
-                                try:
-                                    await ws.send(json.dumps({
-                                        "type": "waiting_approval",
-                                        "taskId": task_id,
-                                        "approval": approval_data,
-                                        "timestamp": int(time.time() * 1000)
-                                    }))
-                                except Exception:
-                                    pass
-
-                            extra_config = {
-                                "apiEndpoint": msg.get("apiEndpoint") or getattr(args, "chat_api_url", ""),
-                                "apiKey": msg.get("apiKey") or getattr(args, "chat_api_key", ""),
-                                "chatModel": msg.get("chatModel") or getattr(args, "chat_model", ""),
-                                "reasoningEffort": msg.get("reasoningEffort") or msg.get("reasoning_effort") or "",
-                                "permission": msg.get("permission") or "workspace-write",
-                            }
-
-                            try:
-                                # 先看是不是 DSH 斜杠命令：是就直接执行，不丢给模型
-                                handled = await try_handle_dsh_command(prompt, session_id, harness_url)
-                                if handled is not None:
-                                    success, output = handled
-                                    await ws_step_cb(output)
-                                else:
-                                    success, output = await execute_local_harness(
-                                        task_id, prompt, messages, harness_url, model_name, session_id, ws_step_cb, extra_config, target_workspace=target_ws, on_approval_callback=ws_approval_cb
-                                    )
-                            except Exception as task_err:
-                                success = False
-                                output = f"本地执行异常: {task_err}"
-                                await ws_step_cb(f"❌ 任务发生未捕获异常: {task_err}")
-                            finally:
-                                ACTIVE_SESSION_REGISTRY.pop(task_id, None)
-
-                            status_tag = "✓ 任务完成" if success else "✗ 任务异常"
-                            color = "\033[92m" if success else "\033[91m"
-                            print(f"{color}[{status_tag}] 回传结果 TaskID: {task_id}\033[0m")
-
-                            await ws.send(json.dumps({
-                                "type": "agent_result",
-                                "taskId": task_id,
-                                "success": success,
-                                "steps": steps_collected,
-                                "output": output,
-                                "timestamp": int(time.time() * 1000)
-                            }))
-
-                            try:
-                                cur_ws, cur_sess = await query_dsh_workspaces_and_sessions(harness_url)
-                                await ws.send(json.dumps({
-                                    "type": "sync_sessions",
-                                    "token": token,
-                                    "workspaces": cur_ws,
-                                    "sessions": cur_sess
-                                }))
-                            except Exception:
-                                pass
+                            # 关键：任务丢到后台协程执行，绝不在这里 await —— 否则任务一跑起来，
+                            # 这个接收循环就被堵住，期间到达的「答复选择框 / 审批 / 中止 / 切权限」
+                            # 全都要排队等任务结束。实测症状：手机答了选择框、App 卡片也收起了，
+                            # 但 DSH 侧一直卡着不解开（用户只能去网页端补一个空答案）。
+                            _ws_task = asyncio.create_task(_run_ws_task(dict(msg)))
+                            RUNNING_WS_TASKS.add(_ws_task)
+                            _ws_task.add_done_callback(RUNNING_WS_TASKS.discard)
 
                     except Exception as handler_err:
                         logger.error(f"消息处理异常: {handler_err}")
