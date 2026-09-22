@@ -407,6 +407,142 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     sp.updateSettings(s);
   }
 
+  /// 渲染选择框卡片里的一个问题：标题 + 正文 + 逐项带描述的选项。
+  ///
+  /// 交互按问题类型分两种：
+  ///   · 单选且有选项 → 点整行即作答（最快，也是绝大多数情况）；
+  ///   · 多选 / 没有选项 → 行内勾选 + 下方输入框，最后统一按「提交」。
+  /// 刻意不再提供「在电脑上回答」：别的设备或电脑网页端先答了，服务端会广播
+  /// agent_question_resolved，本卡片自动收起。
+  List<Widget> _buildQuestionCardBlock(
+    BuildContext context,
+    ChatProvider chat,
+    Map<String, dynamic> item,
+    bool isDark,
+  ) {
+    final id = item['id']?.toString() ?? '';
+    final header = item['header']?.toString() ?? '';
+    final text = item['question']?.toString() ?? '';
+    final multi = item['multi_select'] == true || item['multiSelect'] == true;
+    final rawOptions = item['options'];
+    final options = rawOptions is List ? rawOptions.whereType<Map>().toList() : const <Map>[];
+    final instant = chat.isInstantAnswerQuestion(item);
+    final picked = chat.questionPicksFor(id);
+    final custom = chat.questionCustomFor(id);
+
+    return [
+      if (header.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 3),
+          child: Text(header, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+        ),
+      if (text.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Text(
+            text,
+            style: TextStyle(
+              fontSize: 13,
+              height: 1.4,
+              color: isDark ? Colors.white70 : Colors.black87,
+            ),
+          ),
+        ),
+      for (final opt in options)
+        Builder(
+          builder: (_) {
+            final label = opt['label']?.toString() ?? '';
+            if (label.isEmpty) return const SizedBox.shrink();
+            final desc = opt['description']?.toString() ?? '';
+            final selected = picked.contains(label);
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: instant
+                    ? () => chat.answerQuestion([
+                          {
+                            'id': id,
+                            'selected': [label],
+                          }
+                        ])
+                    : () => chat.toggleQuestionPick(id, label, multiSelect: multi),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: selected
+                        ? const Color(0xFF3B82F6).withOpacity(0.14)
+                        : (isDark ? const Color(0xFF13293F) : Colors.white),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: selected
+                          ? const Color(0xFF3B82F6)
+                          : (isDark ? const Color(0xFF27405C) : const Color(0xFFCBD5E1)),
+                      width: selected ? 1.4 : 1,
+                    ),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(top: 1),
+                        child: Icon(
+                          instant
+                              ? Icons.touch_app_outlined
+                              : (selected ? Icons.check_box : Icons.check_box_outline_blank),
+                          size: 16,
+                          color: selected ? const Color(0xFF3B82F6) : const Color(0xFF94A3B8),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+                            if (desc.isNotEmpty) ...[
+                              const SizedBox(height: 3),
+                              Text(
+                                desc,
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  height: 1.35,
+                                  color: isDark ? Colors.white60 : Colors.black54,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      if (instant)
+                        const Padding(
+                          padding: EdgeInsets.only(left: 6, top: 1),
+                          child: Text('点击即作答', style: TextStyle(fontSize: 10, color: Color(0xFF94A3B8))),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      if (!instant) ...[
+        const SizedBox(height: 2),
+        TextFormField(
+          initialValue: custom,
+          style: const TextStyle(fontSize: 12.5),
+          decoration: const InputDecoration(
+            isDense: true,
+            hintText: '也可以直接输入回答（可选）',
+            border: OutlineInputBorder(),
+          ),
+          onChanged: (value) => chat.setQuestionCustom(id, value),
+        ),
+      ],
+    ];
+  }
+
   // 1. 发送图片：调用原生相册
   Future<void> _handlePickImage() async {
     setState(() => _isMenuOpen = false);
@@ -733,91 +869,65 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                 },
               ),
               // 0.5 选择框卡片：DSH 的 ask_user_question 挂起时，App 直接在这里答。
-              //     （弹窗可能因为不在聊天页而错过，这里始终能在输入框上方看到）
+              //
+              // 刻意不做成模态弹窗（用户要求）：弹窗会盖住聊天、还得先关掉；选择框
+              // 本来就该"贴在输入框上方"。别的设备或电脑网页端先答了 → 服务端广播
+              // agent_question_resolved → 这里自动收起，所以不需要"在电脑上回答"按钮。
               Consumer<ChatProvider>(
                 builder: (context, chat, _) {
-                  final question = chat.pendingQuestion;
-                  if (question == null) return const SizedBox.shrink();
-                  final rawQuestions = question['questions'];
-                  final items = rawQuestions is List
-                      ? rawQuestions.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
-                      : <Map<String, dynamic>>[];
-                  final head = items.isEmpty
-                      ? '电脑端 Agent 提了一个问题'
-                      : (items.first['header'] ?? items.first['question'] ?? '电脑端 Agent 提了一个问题').toString();
-                  final firstOptions = items.isEmpty ? const <Map>[] : (items.first['options'] is List
-                      ? (items.first['options'] as List).whereType<Map>().toList()
-                      : const <Map>[]);
-                  final multi = items.isNotEmpty &&
-                      (items.first['multi_select'] == true || items.first['multiSelect'] == true);
+                  final items = chat.pendingQuestionItems;
+                  if (items.isEmpty) return const SizedBox.shrink();
+                  final needsSubmit = chat.pendingQuestionNeedsSubmit;
                   return Container(
                     margin: const EdgeInsets.only(bottom: 8),
-                    padding: const EdgeInsets.all(10),
+                    padding: const EdgeInsets.fromLTRB(10, 10, 10, 8),
                     decoration: BoxDecoration(
                       color: isDark ? const Color(0xFF0F2338) : const Color(0xFFEFF6FF),
-                      borderRadius: BorderRadius.circular(8),
+                      borderRadius: BorderRadius.circular(10),
                       border: Border.all(color: const Color(0xFF3B82F6)),
                     ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
+                    child: ConstrainedBox(
+                      // 选项多、描述长时给一个较高的可视区，超出内部滚动，别把输入框顶没
+                      constraints: const BoxConstraints(maxHeight: 380),
+                      child: SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Icon(Icons.help_outline, size: 16, color: Color(0xFF3B82F6)),
-                            const SizedBox(width: 6),
-                            const Expanded(
-                              child: Text(
-                                '电脑端 Agent 在等你选择',
-                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
-                              ),
+                            const Row(
+                              children: [
+                                Icon(Icons.help_outline, size: 16, color: Color(0xFF3B82F6)),
+                                SizedBox(width: 6),
+                                Expanded(
+                                  child: Text(
+                                    '电脑端 Agent 在等你选择',
+                                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                                  ),
+                                ),
+                                Text(
+                                  '另一台设备回答后会自动收起',
+                                  style: TextStyle(fontSize: 10, color: Color(0xFF64748B)),
+                                ),
+                              ],
                             ),
-                            InkWell(
-                              onTap: () => chat.declineQuestion(),
-                              child: Text(
-                                '在电脑上回答',
-                                style: TextStyle(fontSize: 11, color: Colors.blue.shade700),
+                            const SizedBox(height: 8),
+                            for (final item in items) ..._buildQuestionCardBlock(context, chat, item, isDark),
+                            if (needsSubmit) ...[
+                              const SizedBox(height: 2),
+                              Align(
+                                alignment: Alignment.centerRight,
+                                child: FilledButton(
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: const Color(0xFF3B82F6),
+                                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+                                  ),
+                                  onPressed: chat.pendingQuestion == null ? null : () => chat.submitPendingQuestion(),
+                                  child: const Text('提交', style: TextStyle(fontSize: 12.5)),
+                                ),
                               ),
-                            ),
+                            ],
                           ],
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          head,
-                          style: TextStyle(fontSize: 12, color: Colors.grey.shade800, height: 1.35),
-                        ),
-                        const SizedBox(height: 8),
-                        if (firstOptions.isNotEmpty && !multi)
-                          Wrap(
-                            spacing: 6,
-                            runSpacing: 4,
-                            children: [
-                              for (final opt in firstOptions)
-                                OutlinedButton(
-                                  style: OutlinedButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                    minimumSize: const Size(0, 30),
-                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                  ),
-                                  onPressed: () => chat.answerQuestion([
-                                    {
-                                      'id': items.first['id']?.toString() ?? '',
-                                      'selected': [opt['label']?.toString() ?? ''],
-                                    }
-                                  ]),
-                                  child: Text(opt['label']?.toString() ?? '', style: const TextStyle(fontSize: 12)),
-                                ),
-                            ],
-                          ),
-                        if (firstOptions.isEmpty || multi)
-                          Align(
-                            alignment: Alignment.centerLeft,
-                            child: FilledButton(
-                              style: FilledButton.styleFrom(backgroundColor: const Color(0xFF3B82F6)),
-                              onPressed: () => chat.presentPendingQuestionDialog(),
-                              child: const Text('去选择 / 输入回答', style: TextStyle(fontSize: 12)),
-                            ),
-                          ),
-                      ],
+                      ),
                     ),
                   );
                 },

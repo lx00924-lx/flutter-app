@@ -438,10 +438,7 @@ class ChatProvider extends ChangeNotifier {
   Map<String, dynamic>? _pendingQuestion;
   Map<String, dynamic>? get pendingQuestion => _pendingQuestion;
 
-  /// 弹窗是否已打开（避免重复堆叠）
-  bool _questionDialogOpen = false;
-
-  /// 每个问题已勾选的选项：questionId(问题自身 id) → 选中的 label
+  /// 每个问题已勾选的选项：问题自身 id → 选中的 label（多选/需要提交时用）
   final Map<String, Set<String>> _questionPicks = {};
 
   /// 每个问题的自定义输入（也可以直接打字回答）
@@ -456,7 +453,58 @@ class ChatProvider extends ChangeNotifier {
     return const [];
   }
 
-  /// 记录一个待答选择框：更新状态 + 系统通知 + 弹窗
+  /// 供内联卡片渲染：当前挂起的问题（只读副本）
+  List<Map<String, dynamic>> get pendingQuestionItems => _pendingQuestionItems;
+
+  /// 供内联卡片渲染：某个问题已勾选的选项
+  Set<String> questionPicksFor(String questionItemId) =>
+      Set.unmodifiable(_questionPicks[questionItemId] ?? <String>{});
+
+  /// 该问题是否「点一下就能作答」——单选且有选项。
+  ///
+  /// 只有这种情况才允许"点选项即提交"；多选、或没有选项（纯自由回答）都要走
+  /// 卡片底部的输入框 + 提交按钮，否则用户没机会补第二个选择。
+  bool isInstantAnswerQuestion(Map<String, dynamic> item) {
+    final multi = item['multi_select'] == true || item['multiSelect'] == true;
+    final raw = item['options'];
+    final options = raw is List ? raw.whereType<Map>() : const <Map>[];
+    return !multi && options.isNotEmpty;
+  }
+
+  /// 是否需要"提交"按钮：只要有一个问题不是点一下就能答的，就得让用户显式提交
+  bool get pendingQuestionNeedsSubmit =>
+      _pendingQuestionItems.any((item) => !isInstantAnswerQuestion(item));
+
+  /// 卡片里勾选/取消一个选项（多选可多勾，单选互斥）
+  void toggleQuestionPick(String questionItemId, String label, {required bool multiSelect}) {
+    if (questionItemId.isEmpty || label.isEmpty) return;
+    final picks = _questionPicks.putIfAbsent(questionItemId, () => <String>{});
+    if (multiSelect) {
+      if (!picks.remove(label)) picks.add(label);
+    } else {
+      picks
+        ..clear()
+        ..add(label);
+    }
+    notifyListeners();
+  }
+
+  /// 卡片里的自定义回答输入
+  void setQuestionCustom(String questionItemId, String text) {
+    if (questionItemId.isEmpty) return;
+    _questionCustoms.putIfAbsent(questionItemId, () => TextEditingController()).text = text;
+  }
+
+  /// 供卡片渲染：某个问题当前的自定义输入
+  String questionCustomFor(String questionItemId) =>
+      _questionCustoms[questionItemId]?.text.trim() ?? '';
+
+  /// 记录一个待答选择框：更新状态 + 系统通知。
+  ///
+  /// **刻意不弹模态对话框**（用户要求）：弹窗会盖住整个界面、还得先关掉才能看聊天，
+  /// 而选择框本来就是个"附在输入框上方"的东西。现在只在输入框上方出内联卡片；
+  /// App 不在前台时靠系统通知提醒；别的设备/网页端先答了 → 收到
+  /// `agent_question_resolved` 广播，卡片自动收起（不需要"在电脑上回答"按钮）。
   void _setPendingQuestion(Map<String, dynamic> question) {
     final questionId = question['questionId']?.toString() ?? '';
     if (questionId.isEmpty) return;
@@ -479,155 +527,8 @@ class ChatProvider extends ChangeNotifier {
       title: '电脑端 Agent 在等你选择',
       body: head.length > 90 ? '${head.substring(0, 90)}…' : head,
     );
-    _presentQuestionDialog();
   }
 
-  /// 用根导航器弹选择框（跨页面可见，和审批同一套机制）
-  void _presentQuestionDialog() {
-    if (_questionDialogOpen) return;
-    final ctx = rootNavigatorKey.currentContext;
-    if (ctx == null) {
-      debugPrint('[ChatProvider] 暂无可用的根上下文，选择框改为内联卡片展示');
-      return;
-    }
-    _questionDialogOpen = true;
-    showDialog<void>(
-      context: ctx,
-      barrierDismissible: false,
-      builder: (dialogCtx) => StatefulBuilder(
-        builder: (context, setDialogState) {
-          return AlertDialog(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            title: const Row(
-              children: [
-                Icon(Icons.help_outline, color: Color(0xFF3B82F6), size: 24),
-                SizedBox(width: 8),
-                Text('电脑端 Agent 提问', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
-              ],
-            ),
-            content: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (final item in _pendingQuestionItems) ..._buildQuestionBlock(item, setDialogState),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () async {
-                  Navigator.of(dialogCtx).pop();
-                  await declineQuestion();
-                },
-                child: const Text('在电脑上回答'),
-              ),
-              FilledButton(
-                onPressed: () async {
-                  Navigator.of(dialogCtx).pop();
-                  await answerQuestion(_collectQuestionAnswers());
-                },
-                child: const Text('提交'),
-              ),
-            ],
-          );
-        },
-      ),
-    ).whenComplete(() => _questionDialogOpen = false);
-  }
-
-  /// 渲染一个问题的正文 + 选项 chip + 自定义输入
-  List<Widget> _buildQuestionBlock(
-    Map<String, dynamic> item,
-    void Function(void Function()) setDialogState,
-  ) {
-    final id = item['id']?.toString() ?? '';
-    final header = item['header']?.toString() ?? '';
-    final text = item['question']?.toString() ?? '';
-    final multi = item['multi_select'] == true || item['multiSelect'] == true;
-    final rawOptions = item['options'];
-    final options = rawOptions is List ? rawOptions.whereType<Map>().toList() : const <Map>[];
-    final picked = _questionPicks.putIfAbsent(id, () => <String>{});
-    final controller = _questionCustoms.putIfAbsent(id, () => TextEditingController());
-
-    return [
-      if (header.isNotEmpty)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 4),
-          child: Text(header, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-        ),
-      if (text.isNotEmpty)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Text(text, style: const TextStyle(fontSize: 13.5, height: 1.4)),
-        ),
-      if (options.isNotEmpty)
-        Wrap(
-          spacing: 8,
-          runSpacing: 6,
-          children: [
-            for (final opt in options)
-              Builder(builder: (_) {
-                final label = opt['label']?.toString() ?? '';
-                if (label.isEmpty) return const SizedBox.shrink();
-                final selected = picked.contains(label);
-                final desc = opt['description']?.toString() ?? '';
-                if (multi) {
-                  return FilterChip(
-                    label: Text(label),
-                    selected: selected,
-                    tooltip: desc.isEmpty ? null : desc,
-                    onSelected: (value) => setDialogState(() {
-                      if (value) {
-                        picked.add(label);
-                      } else {
-                        picked.remove(label);
-                      }
-                    }),
-                  );
-                }
-                return ChoiceChip(
-                  label: Text(label),
-                  selected: selected,
-                  tooltip: desc.isEmpty ? null : desc,
-                  onSelected: (_) => setDialogState(() {
-                    picked
-                      ..clear()
-                      ..add(label);
-                  }),
-                );
-              }),
-          ],
-        ),
-      if (options.any((opt) => (opt['description']?.toString() ?? '').isNotEmpty))
-        Padding(
-          padding: const EdgeInsets.only(top: 6),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              for (final opt in options)
-                if ((opt['description']?.toString() ?? '').isNotEmpty)
-                  Text(
-                    '· ${opt['label']}：${opt['description']}',
-                    style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600),
-                  ),
-            ],
-          ),
-        ),
-      const SizedBox(height: 8),
-      TextField(
-        controller: controller,
-        style: const TextStyle(fontSize: 13),
-        decoration: const InputDecoration(
-          isDense: true,
-          hintText: '也可以直接输入回答（可选）',
-          border: OutlineInputBorder(),
-        ),
-        onChanged: (_) => setDialogState(() {}),
-      ),
-      const SizedBox(height: 14),
-    ];
-  }
 
   /// 把当前选择收成 DSH 要的答案格式：`[{id, selected:[...], custom?}]`
   List<Map<String, dynamic>> _collectQuestionAnswers() {
@@ -646,12 +547,11 @@ class ChatProvider extends ChangeNotifier {
     return result;
   }
 
-  /// 从内联卡片再打开一次选择框弹窗（用户手滑关掉、或当时不在聊天页没看到）
-  void presentPendingQuestionDialog() {
-    if (_pendingQuestion == null) return;
-    _questionDialogOpen = false;
-    _presentQuestionDialog();
-  }
+  /// 卡片底部「提交」：把勾选的选项 + 自定义输入一起交上去。
+  ///
+  /// 只在需要显式提交的场景用（多选、或纯自由回答）；单选有选项时点一下即作答，
+  /// 走 [answerQuestion] 的单题快捷路径。
+  Future<bool> submitPendingQuestion() => answerQuestion(_collectQuestionAnswers());
 
   /// 提交答案（App 上选的）
   Future<bool> answerQuestion(List<Map<String, dynamic>> answers) async {
