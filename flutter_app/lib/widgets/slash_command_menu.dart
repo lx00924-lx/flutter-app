@@ -51,20 +51,55 @@ class SlashCommandOption {
   const SlashCommandOption(this.value, this.label);
 }
 
-/// App 侧支持的斜杠命令表。
+/// App 侧支持的斜杠命令表（**静态部分**）。
 ///
-/// 目前只有 /permission —— 桥接实现了命令路由，会在派发任务前把它当命令执行
-/// （见 deepseek_bridge.try_handle_dsh_command）。这里只列**确实能用**的，
-/// 不摆样子货。
+/// 这些命令全部由 App 本地执行，不再"发一条文本让桥接/DSH 当命令处理"——
+/// 那条路走过一次弯路：DSH 不会把排队进会话的 `/xxx` 文本当命令执行，
+/// 结果是会话里堆了一串命令消息而权限从未真正改变（见 bridge/plugin 的修复）。
+/// 带动态候选的命令（/model、/workspace、/session）由调用方用真实目录拼出来。
 const List<SlashCommand> kSlashCommands = [
   SlashCommand(
+    name: 'help',
+    description: '显示全部命令与用法',
+  ),
+  SlashCommand(
     name: 'permission',
-    description: '切换本地 DSH 的权限预设（沙箱范围与是否弹审批）',
+    description: '切换 DSH 权限预设（沙箱范围 / 越界是否弹审批）',
     options: [
       SlashCommandOption('read-only', '只读：仅允许读取，禁止写入'),
       SlashCommandOption('workspace-write', '工作区可写：越界操作会弹审批'),
       SlashCommandOption('danger-full-access', '完全访问：不限范围、不再弹审批'),
     ],
+  ),
+  SlashCommand(
+    name: 'model',
+    description: '切换智能体模型（电脑端真实模型目录）',
+  ),
+  SlashCommand(
+    name: 'effort',
+    description: '切换思考链预算（档位随所选模型而定）',
+    options: [
+      SlashCommandOption('off', '关闭思考：最快'),
+      SlashCommandOption('low', '低：少量思考'),
+      SlashCommandOption('high', '高：深度推演（默认）'),
+      SlashCommandOption('max', '最高：最充分'),
+    ],
+  ),
+  SlashCommand(
+    name: 'workspace',
+    description: '切换目标工作区（电脑端真实目录）',
+  ),
+  SlashCommand(
+    name: 'session',
+    description: '切换目标会话（当前工作区下的真实会话）',
+  ),
+  SlashCommand(
+    name: 'new',
+    description: '在电脑端新建会话并选中（可跟名字：/new 登录页重构）',
+  ),
+  SlashCommand(
+    name: 'stop',
+    description: '立刻停止当前这一轮生成',
   ),
 ];
 
@@ -72,13 +107,15 @@ const List<SlashCommand> kSlashCommands = [
 ///
 /// 交互：
 /// · 输入以 `/` 开头时出现，按已输入内容过滤；
-/// · 无参数命令 → 点一下直接发送；
-/// · 带参数命令 → 点一下展开参数候选（如三种权限预设），选中后发送完整命令。
+/// · 无参数命令 → 点一下直接执行；
+/// · 带参数命令 → 点一下展开参数候选（如三种权限预设），选中后执行。
 class SlashCommandMenu extends StatelessWidget {
   final String query; // `/` 之后已输入的命令名部分（用于过滤）
   /// 已输入的命令参数部分（如 `/permission work` 里的 `work`），用于过滤参数候选
   final String argQuery;
   final SlashCommand? expanded; // 已展开参数的命令
+  /// 可列出的命令（调用方传入，含按真实目录拼出来的动态候选）
+  final List<SlashCommand> commands;
   final ValueChanged<SlashCommand> onPickCommand;
   final void Function(SlashCommand command, SlashCommandOption option) onPickOption;
   final VoidCallback onClose;
@@ -88,6 +125,7 @@ class SlashCommandMenu extends StatelessWidget {
     required this.query,
     this.argQuery = '',
     required this.expanded,
+    this.commands = kSlashCommands,
     required this.onPickCommand,
     required this.onPickOption,
     required this.onClose,
@@ -101,7 +139,7 @@ class SlashCommandMenu extends StatelessWidget {
 
     // 模糊匹配 + 打分排序（前缀 > 子串 > 子序列 > 中文说明命中）
     final scored = <MapEntry<SlashCommand, int>>[];
-    for (final c in kSlashCommands) {
+    for (final c in commands) {
       final score = slashMatchScore(name: c.name, description: c.description, query: query);
       if (score >= 0) scored.add(MapEntry(c, score));
     }

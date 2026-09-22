@@ -10,6 +10,7 @@ import '../models/chat_message.dart';
 import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/audio_recorder_service.dart';
+import '../services/sync_service.dart';
 import '../utils/image_picker_helper.dart';
 import '../screens/voice_call_screen.dart';
 import '../screens/scanner_screen.dart';
@@ -160,7 +161,10 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     if (spaceIdx >= 0) {
       final name = body.substring(0, spaceIdx);
       final argText = body.substring(spaceIdx + 1).trim();
-      final cmd = kSlashCommands.where((c) => c.name == name).firstOrNull;
+      // 用动态命令表（/model、/workspace、/session 的候选来自电脑端真实目录）
+      final cmd = _slashCommandsFor(context.read<SettingsProvider>())
+          .where((c) => c.name == name)
+          .firstOrNull;
       if (cmd != null && cmd.options.isNotEmpty) {
         if (!_slashMenuVisible || _slashExpanded?.name != cmd.name || _slashArgQuery != argText) {
           setState(() {
@@ -185,7 +189,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     }
   }
 
-  /// 点了命令：带参数的展开候选，不带参数的直接发出去
+  /// 点了命令：带参数的展开候选，不带参数的直接执行
   void _onPickSlashCommand(SlashCommand cmd) {
     if (cmd.options.isNotEmpty) {
       setState(() {
@@ -197,27 +201,243 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
       _controller.selection = TextSelection.collapsed(offset: _controller.text.length);
       return;
     }
-    _sendSlashCommand(cmd.textWith(null));
+    _dismissSlashMenu();
+    unawaited(_runSlashCommand(cmd.name, ''));
   }
 
-  /// 点了某个参数：拼成完整命令并**直接发送**
+  /// 点了某个参数：直接执行整条命令
   void _onPickSlashOption(SlashCommand cmd, SlashCommandOption opt) {
-    _sendSlashCommand(cmd.textWith(opt.value));
+    _dismissSlashMenu();
+    unawaited(_runSlashCommand(cmd.name, opt.value));
   }
 
-  void _sendSlashCommand(String commandText) {
-    _controller.text = commandText;
-    _controller.selection = TextSelection.collapsed(offset: commandText.length);
-    setState(() {
-      _slashMenuVisible = false;
-      _slashExpanded = null;
-    });
-    _handleSend();
+  void _dismissSlashMenu() {
+    _controller.clear();
+    if (mounted) {
+      setState(() {
+        _slashMenuVisible = false;
+        _slashExpanded = null;
+      });
+    }
+  }
+
+  /// 构造当前可用的斜杠命令：静态命令 + 用电脑端真实目录拼出的动态候选。
+  List<SlashCommand> _slashCommandsFor(SettingsProvider sp) {
+    final models = <SlashCommandOption>[];
+    for (final m in sp.agentModels) {
+      final id = m['id']?.toString().trim() ?? '';
+      if (id.isEmpty) continue;
+      models.add(SlashCommandOption(id, SettingsProvider.agentModelLabel(m)));
+    }
+    final workspaces = sp.agentWorkspaces
+        .map((w) => SlashCommandOption(w, w))
+        .toList();
+    final sessions = <SlashCommandOption>[];
+    for (final item in sp.sessionsForWorkspace(sp.settings.targetWorkspace)) {
+      final id = item['id']?.toString().trim() ?? '';
+      if (id.isEmpty) continue;
+      sessions.add(SlashCommandOption(id, SettingsProvider.agentSessionLabel(item)));
+    }
+    return [
+      for (final cmd in kSlashCommands)
+        switch (cmd.name) {
+          'model' => SlashCommand(name: cmd.name, description: cmd.description, options: models),
+          'workspace' => SlashCommand(name: cmd.name, description: cmd.description, options: workspaces),
+          'session' => SlashCommand(name: cmd.name, description: cmd.description, options: sessions),
+          _ => cmd,
+        },
+    ];
+  }
+
+  /// 本地执行一条斜杠命令（**不再把命令当消息发给模型**）。
+  ///
+  /// 为什么改成本地执行：DSH 不会把"排队进会话的 /xxx 文本"当命令执行 ——
+  /// /permission 那次踩过坑（排了 13 条全成了聊天消息、预设从未改变）。这些能力
+  /// App 本来就有对应的真接口（会话选项 / 建会话 / 取消生成），本地执行最可靠，
+  /// 也不会污染会话记录。
+  Future<void> _runSlashCommand(String name, String arg) async {
+    final sp = context.read<SettingsProvider>();
+    final chat = context.read<ChatProvider>();
+    final s = sp.settings;
+    switch (name) {
+      case 'help':
+        await _showSlashHelp();
+        return;
+      case 'permission':
+      case 'model':
+      case 'effort':
+        await _applyAgentOption(kind: name, value: arg);
+        return;
+      case 'workspace':
+        if (arg.isEmpty) {
+          _slashToast('用法：/workspace <路径>（可选值见命令面板）');
+          return;
+        }
+        s.targetWorkspace = arg;
+        // 换了工作区，原会话基本不属于它了
+        s.targetSessionId = '';
+        sp.updateSettings(s);
+        unawaited(sp.refreshAgentCatalog(silent: true));
+        _slashToast('✅ 目标工作区已切到：$arg');
+        return;
+      case 'session':
+        if (arg.isEmpty) {
+          _slashToast('用法：/session <会话 id>（可选值见命令面板）');
+          return;
+        }
+        s.targetSessionId = arg;
+        sp.updateSettings(s);
+        _slashToast('✅ 目标会话已切换');
+        return;
+      case 'new':
+        if (s.isHarnessOnline != true) {
+          _slashToast('电脑端桥接未在线，无法新建会话');
+          return;
+        }
+        final newId = await sp.createAgentSessionOnPc(workspace: s.targetWorkspace, title: arg);
+        if (newId == null) {
+          _slashToast('新建会话失败：请确认电脑端 LxAI 在运行');
+          return;
+        }
+        s.targetSessionId = newId;
+        sp.updateSettings(s);
+        _slashToast('✅ 已新建并选中会话');
+        return;
+      case 'stop':
+        chat.stopGeneration();
+        _slashToast('已停止当前生成');
+        return;
+      default:
+        _slashToast('未知命令：/$name（输入 /help 看全部）');
+    }
+  }
+
+  /// /permission、/model、/effort 共用的"改设置并立即下发到电脑端会话"。
+  Future<void> _applyAgentOption({required String kind, required String value}) async {
+    final sp = context.read<SettingsProvider>();
+    final s = sp.settings;
+    if (value.isEmpty) {
+      _slashToast('用法：/$kind <值>（可选值见命令面板）');
+      return;
+    }
+    switch (kind) {
+      case 'permission':
+        s.agentPermission = value;
+      case 'effort':
+        s.agentReasoningEffort = value;
+      case 'model':
+        s.agentModel = value;
+        // 换模型后档位集合可能不同，顺手对齐，避免下发非法档位
+        final efforts = sp.reasoningEffortsFor(value);
+        if (efforts.isNotEmpty && !efforts.contains(s.agentReasoningEffort)) {
+          s.agentReasoningEffort = efforts.contains('high') ? 'high' : efforts.first;
+        }
+    }
+    sp.updateSettings(s);
+
+    final sessionId = s.targetSessionId.trim();
+    if (sessionId.isEmpty) {
+      _slashToast('已保存，下一条消息生效（当前没有选中会话）');
+      return;
+    }
+    final res = await SyncService.instance.applyAgentSessionOption(
+      token: s.harnessToken,
+      userId: sp.syncUserId,
+      kind: kind == 'effort' ? 'model' : kind,
+      sessionId: sessionId,
+      permission: s.agentPermission,
+      reasoningEffort: s.agentReasoningEffort,
+      model: s.agentModel,
+      harnessUrl: s.harnessServiceUrl,
+    );
+    _slashToast(res.ok ? '✅ 已切换电脑端${kind == 'permission' ? '权限' : (kind == 'model' ? '模型' : '思考深度')}：$value' : '切换失败：${res.message}');
+  }
+
+  /// /help：列出全部命令与用法
+  Future<void> _showSlashHelp() async {
+    final sp = context.read<SettingsProvider>();
+    final commands = _slashCommandsFor(sp);
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('可用命令', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final cmd in commands)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '/${cmd.name}',
+                          style: const TextStyle(
+                            fontFamily: 'monospace',
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        Text(cmd.description, style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+                        if (cmd.options.isNotEmpty)
+                          Text(
+                            '可选值：${cmd.options.map((o) => o.value).join(' / ')}',
+                            style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                          ),
+                      ],
+                    ),
+                  ),
+                Text(
+                  '提示：输入 / 会自动浮出命令面板，支持模糊匹配（如 /pm 也能找到 /permission）。',
+                  style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('知道了')),
+        ],
+      ),
+    );
+  }
+
+  /// 手敲命令直接发送时的拦截：认得出来就在本地执行，不当消息发出去。
+  bool _tryRunSlashFromText(String text) {
+    if (!text.startsWith('/')) return false;
+    final body = text.substring(1).trim();
+    if (body.isEmpty) return false;
+    final spaceIdx = body.indexOf(RegExp(r'\s'));
+    final name = (spaceIdx < 0 ? body : body.substring(0, spaceIdx)).toLowerCase();
+    final arg = spaceIdx < 0 ? '' : body.substring(spaceIdx + 1).trim();
+    final sp = context.read<SettingsProvider>();
+    if (!_slashCommandsFor(sp).any((c) => c.name == name)) return false;
+    _dismissSlashMenu();
+    unawaited(_runSlashCommand(name, arg));
+    return true;
+  }
+
+  void _slashToast(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(text),
+        duration: const Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   void _handleSend() {
     final text = _controller.text.trim();
     final hasAttachments = _pendingAttachments.isNotEmpty || _recordedPendingAudioUri != null;
+
+    // 斜杠命令：认得出来就在本地执行，绝不当消息发给模型
+    // （命令走的是真接口，见 _runSlashCommand；手敲 /help 也一样）
+    if (text.startsWith('/') && !hasAttachments && _tryRunSlashFromText(text)) return;
 
     if (text.isNotEmpty || hasAttachments) {
       final chat = context.read<ChatProvider>();
@@ -1251,6 +1471,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   query: _slashQuery,
                   argQuery: _slashArgQuery,
                   expanded: _slashExpanded,
+                  commands: _slashCommandsFor(settingsProvider),
                   onPickCommand: _onPickSlashCommand,
                   onPickOption: _onPickSlashOption,
                   onClose: () => setState(() {
