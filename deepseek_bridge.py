@@ -2492,7 +2492,17 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             lambda: http_post_json(f"{server_base}/api/agent/waiting-question", body, timeout=5)
         )
 
-    question_task = asyncio.create_task(poll_dsh_questions_loop(http_question_sender, harness_url))
+    # 注意：这个作用域里没有 harness_url 这个名字（只有 args.harness_url）。
+    # 之前这里写成 harness_url → NameError → 一旦从 WS 回退到轮询通道，桥接进程
+    # 直接崩掉、App 上显示"桥接离线"。现在取值改对，并且整段用 try 兜住：
+    # 选择框轮询只是附加功能，绝不能因为它把桥接主循环带走。
+    try:
+        question_task = asyncio.create_task(
+            poll_dsh_questions_loop(http_question_sender, args.harness_url)
+        )
+    except Exception as q_err:
+        print(f"\033[93m[选择框] 轮询任务启动失败（已忽略，不影响主流程）: {q_err}\033[0m")
+        question_task = None
 
     poll_fail_count = 0
     while True:
