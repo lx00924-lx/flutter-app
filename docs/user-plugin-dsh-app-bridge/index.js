@@ -658,23 +658,20 @@ export function apply(ctx) {
       }
     }, QUESTION_TIMEOUT_MS)
 
-    let downstreamFailed
-    const downstream = Promise.resolve()
-      .then(() => next())
-      .catch((error) => {
-        downstreamFailed = error
-        return new Promise(() => {})
-      })
-
+    // ⚠️ 这里**不再与网页端并发抢答**（曾经是 Promise.race）。
+    //
+    // 为什么改：两边同时弹框时，若 App 先答，插件这边就返回了、工具调用结束，
+    // 但网页端那个 answerer 仍在等用户点 —— 它的弹窗会**一直挂在界面上**，
+    // 用户以为"手机答了但 DSH 没反应"（截图确认过：手机已答、网页弹窗还在）。
+    //
+    // 现在 App 在线（桥接在轮询）时由 App 独占：问题只推给 App，网页端不弹框；
+    // 只有 App 超时/主动放弃时才调用 next() 把问题交回网页端 —— 那一刻弹窗
+    // 才出现，且不会再有"答完了还挂着"的脏状态。
     try {
-      const winner = await Promise.race([
-        answered.then((value) => ({ from: 'app', value })),
-        downstream.then((value) => ({ from: 'ui', value })),
-      ])
-      if (winner.from === 'ui') return winner.value
-      if (winner.value?.kind === 'answered') return winner.value.answers
-      if (downstreamFailed !== undefined) throw downstreamFailed
-      return await downstream
+      const outcome = await answered
+      if (outcome?.kind === 'answered') return outcome.answers
+      // App 放弃或超时：这时才交回电脑端界面
+      return await Promise.resolve().then(() => next())
     } finally {
       const live = pendingQuestions.get(questionId)
       if (live !== undefined) {
