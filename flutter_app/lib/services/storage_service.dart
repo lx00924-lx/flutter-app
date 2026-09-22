@@ -130,6 +130,21 @@ class StorageService {
     return box != null && box.containsKey(messageId);
   }
 
+  /// 按 id 取本地消息（取不到返回 null）。漫游对账要用它比较"哪边的版本更有内容"。
+  ChatMessage? getMessageById(String messageId) {
+    final box = _messagesBox;
+    if (box == null) return null;
+    final val = box.get(messageId);
+    if (val is Map) {
+      try {
+        return ChatMessage.fromMap(val);
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
   Future<void> deleteMessage(String messageId) async {
     final box = _messagesBox;
     if (box != null) {

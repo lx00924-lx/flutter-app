@@ -514,6 +514,8 @@ class SyncService {
     if (cleanUserId.isEmpty || _isSyncing) return 0;
     _isSyncing = true;
     int importedCount = 0;
+    // 用云端更完整的版本覆盖本地半截内容的条数（断流场景，见下方注释）
+    int updatedCount = 0;
     bool sessionListChanged = false;
 
     try {
@@ -570,6 +572,7 @@ class SyncService {
 
         // 3. 将云端新消息与会话导入本地
         final List<ChatMessage> newMessages = [];
+        final List<ChatMessage> updatedMessages = [];
         final Map<String, ChatSession> neededSessions = {};
 
         for (var item in list) {
@@ -581,10 +584,25 @@ class SyncService {
                 continue;
               }
               final msg = ChatMessage.fromMap(item);
-              if (msg.id.isNotEmpty &&
-                  msg.sessionId.trim().isNotEmpty &&
-                  !pendingDeleteIds.contains(msg.sessionId) &&
-                  !storage.hasMessage(msg.id)) {
+              if (msg.id.isEmpty ||
+                  msg.sessionId.trim().isEmpty ||
+                  pendingDeleteIds.contains(msg.sessionId)) {
+                continue;
+              }
+              // 本地已有同 id：一般不覆盖（避免把本地更全的内容冲掉），
+              // 但**云端明显更有内容**时要覆盖 —— 典型场景：手机 SSE 中途断流，
+              // 本地只剩半截 + 「连接中断」提示，而服务端其实已经存了完整回复。
+              // 这条规则是单向的：只允许"更长覆盖更短"，绝不会用空内容清掉本地。
+              if (storage.hasMessage(msg.id)) {
+                final local = storage.getMessageById(msg.id);
+                final remoteLen = msg.content.trim().length;
+                final localLen = (local?.content ?? '').trim().length;
+                if (remoteLen > localLen && remoteLen > 0) {
+                  updatedMessages.add(msg);
+                }
+                continue;
+              }
+              if (true) {
                 newMessages.add(msg);
 
                 // 检查对应 session 是否存在
@@ -618,7 +636,13 @@ class SyncService {
           importedCount++;
         }
 
-        if ((importedCount > 0 || sessionListChanged) && onNewMessagesImported != null) {
+        // 用云端更完整的版本覆盖本地（断流后本地只剩半截 + 连接中断提示的场景）
+        for (var msg in updatedMessages) {
+          await storage.saveMessage(msg);
+          updatedCount++;
+        }
+
+        if ((importedCount > 0 || updatedCount > 0 || sessionListChanged) && onNewMessagesImported != null) {
           onNewMessagesImported();
         }
       }

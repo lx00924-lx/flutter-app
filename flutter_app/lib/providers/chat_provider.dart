@@ -1083,11 +1083,17 @@ class ChatProvider extends ChangeNotifier {
               return;
             }
             assistantMsg.isStreaming = false;
-            assistantMsg.content += '\n\n*(连接中断或 Agent 离线，请检查电脑端桥接脚本)*';
+            // 流断了 ≠ 没答案：服务端那一轮通常还在跑完、并把完整结果落库。
+            // 这里只留一句轻提示（不再吓唬用户"桥接离线"），然后立刻对账拉取 ——
+            // 漫游合并会用云端更完整的版本覆盖本地这半截（见 pullAndMergeMessages）。
+            if (assistantMsg.content.trim().isEmpty) {
+              assistantMsg.content = '（连接中断，正在向电脑端取回结果…）';
+            }
             _storage.saveMessage(assistantMsg);
             _isGenerating = false;
             _cancelToken = null;
             notifyListeners();
+            _silentSyncFromServer();
           },
           onDone: () {
             if (assistantMsg.isStreaming) {
@@ -1558,11 +1564,17 @@ class ChatProvider extends ChangeNotifier {
               return;
             }
             assistantMsg.isStreaming = false;
-            assistantMsg.content += '\n\n*(连接中断或 Agent 离线，请检查电脑端桥接脚本)*';
+            // 流断了 ≠ 没答案：服务端那一轮通常还在跑完、并把完整结果落库。
+            // 这里只留一句轻提示（不再吓唬用户"桥接离线"），然后立刻对账拉取 ——
+            // 漫游合并会用云端更完整的版本覆盖本地这半截（见 pullAndMergeMessages）。
+            if (assistantMsg.content.trim().isEmpty) {
+              assistantMsg.content = '（连接中断，正在向电脑端取回结果…）';
+            }
             _storage.saveMessage(assistantMsg);
             _isGenerating = false;
             _cancelToken = null;
             notifyListeners();
+            _silentSyncFromServer();
           },
           onDone: () {
             if (assistantMsg.isStreaming) {
