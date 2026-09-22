@@ -1942,28 +1942,22 @@ async def execute_dsh_via_ws(
                 if not cur_session_id:
                     cur_session_id = str(uuid.uuid4())
 
-                # 执行权限：与 App 侧插件同样的做法 —— 往该会话里排一条 /permission 命令。
-                # 备用通道此前完全不带这个字段，用户改了权限其实没生效。
-                if permission and permission != "workspace-write":
+                # 执行权限：走插件的真实接口立即切换（POST /v1/session/permission）。
+                #
+                # 历史教训：这里原本是往会话里排一条 `/permission <preset>` 文本，以为
+                # DSH 会把它当命令执行。实际它只是一条普通用户消息 —— 表现就是用户在
+                # DSH 队列里看到"成对消息"：一条 /permission 垃圾 + 一条自己真正发的
+                # 内容；而权限预设从未真正改变（会话日志里 permission/preset 事件始终
+                # 只有建会话那一条）。现在改为调用真接口，并把真实结果回报到步骤里。
+                if permission:
                     try:
-                        perm_text = f"/permission {permission}"
-                        await dsh_ws.send(json.dumps({
-                            "type": "client-request",
-                            "rpcId": f"rpc_perm_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}",
-                            "mode": "steer",
-                            "method": "session.prompt",
-                            "payload": {
-                                "sessionId": cur_session_id,
-                                "sessionID": cur_session_id,
-                                "mode": "queue",
-                                "prompt": [{"type": "text", "text": perm_text}],
-                                "parts": [{"type": "text", "text": perm_text}],
-                                "content": [{"type": "text", "text": perm_text}],
-                                "text": perm_text,
-                            }
-                        }))
-                        await on_step_callback(f"🔐 已向本地会话下发执行权限：{permission}")
-                        await asyncio.sleep(0.3)
+                        perm_ok, perm_res = await apply_dsh_session_permission(
+                            harness_url, cur_session_id, permission
+                        )
+                        if perm_ok:
+                            await on_step_callback(f"🔐 已切换会话执行权限：{permission}")
+                        else:
+                            await on_step_callback(f"⚠️ 执行权限未切换：{perm_res}")
                     except Exception as perm_err:
                         await on_step_callback(f"⚠️ 执行权限下发失败（已忽略）：{perm_err}")
 
