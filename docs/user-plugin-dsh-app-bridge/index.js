@@ -171,6 +171,45 @@ export function apply(ctx) {
     return undefined
   }
 
+  /**
+   * 真正切换某个会话的权限预设（= DSH 内置 `/permission` 命令的同一条路径）。
+   *
+   * 为什么抽成一个函数：**两处**调用点以前都靠"排一条 `/permission <preset>` 文本"，
+   * 以为 DSH 会把它当命令执行 —— 实际只是一条普通用户消息。表现就是：用户每次从
+   * 手机发消息，会话里都会多一条 `/permission xxx` 垃圾（和正文同一秒进同一个 turn，
+   * 在 GUI 队列里看着像"成对消息"），而权限预设从未真正改变。现在两处统一走这里。
+   *
+   * @returns `{ ok, current, live, reason }`——ok 为 false 时 reason 说明原因
+   */
+  async function switchSessionPermission(sessionId, preset) {
+    const service = ctx.get('permissionPresets')
+    if (typeof service?.apply !== 'function') {
+      return { ok: false, reason: 'permissionPresets.apply 不可用：DSH 版本过旧或插件未加载' }
+    }
+    const names = Array.isArray(service.names) ? service.names : []
+    if (names.length > 0 && !names.includes(preset)) {
+      return { ok: false, reason: `未知权限预设 "${preset}"（可用：${names.join(', ')}）` }
+    }
+    const session = await resolveSessionObject(sessionId)
+    if (session === undefined) {
+      return { ok: false, reason: `会话 ${sessionId} 不在活动列表里，无法即时切换` }
+    }
+    const agent = findLiveAgentForSession(sessionId)
+    if (agent !== undefined && typeof ctx.get('approval')?.setPolicy === 'function') {
+      // 会话正在跑：连"当前这轮"的审批策略一起改（内置命令用的是同一个实时写法）
+      service.apply(session, preset, (policy) => ctx.get('approval').setPolicy(agent, policy))
+    } else {
+      // 没有活跃 agent：写持久化事实 + 会话级开关，下一轮生效
+      service.set(session, preset)
+    }
+    const current = typeof service.current === 'function' ? service.current(session) : undefined
+    return {
+      ok: current === undefined ? true : current === preset,
+      current,
+      live: agent !== undefined,
+    }
+  }
+
   //#region 数据读取
 
   /** 读模型目录（带短缓存）。 */
@@ -378,17 +417,22 @@ export function apply(ctx) {
       }
     }
 
-    // 3) 权限预设提示（走命令，和 App 侧的语义一致）
-    if (permission !== undefined) {
+    // 3) 权限预设：调真接口即时切换
+    //
+    // ⚠️ 这里以前是 sessions().prompt({ mode:'queue', content:[{text:`/permission ${permission}`}] })，，
+    // 以为 DSH 会把排队的文本当命令执行。实测不是：它只是一条普通用户消息，于是
+    // **用户每从手机发一条消息，会话里就多一条 /permission 垃圾**（和正文同一秒进
+    // 同一个 turn，在 GUI 队列里看着就是"成对消息"），而权限预设从未真正改变。
+    if (typeof permission === 'string' && permission.length > 0) {
       try {
-        await sessions().prompt({
-          requestId: randomUUID(),
-          sessionId,
-          mode: 'queue',
-          content: [{ type: 'text', text: `/permission ${permission}` }],
-        }, turnSignal())
-      } catch {
-        /* 命令不存在也不该挡住主流程 */
+        const switched = await switchSessionPermission(sessionId, permission)
+        if (!switched.ok) {
+          ctx.logger?.warn?.(
+            `[app-bridge] 本轮权限下发未生效：${switched.reason ?? `current=${switched.current ?? '未知'}`}`,
+          )
+        }
+      } catch (error) {
+        ctx.logger?.warn?.(`[app-bridge] 本轮权限下发异常(忽略): ${String(error?.message ?? error)}`)
       }
     }
 
@@ -938,36 +982,27 @@ export function apply(ctx) {
           error: { code: 'unsupported', message: 'permissionPresets.apply 不可用：DSH 版本过旧或插件未加载' },
         })
       }
-      const session = await resolveSessionObject(sessionId)
-      if (session === undefined) {
-        return json(404, {
+      // 真正的切换：与 DSH 内置 /permission 命令完全同一条路径（写 permission/preset
+      // 会话事实 + 改沙箱模式 + 改审批策略）。具体实现见 switchSessionPermission，
+      // 它与"每轮任务开头下发权限"共用同一段逻辑，避免两处再分叉。
+      const switched = await switchSessionPermission(sessionId, preset)
+      if (!switched.ok) {
+        const notFound = (switched.reason ?? '').includes('不在活动列表')
+        return json(notFound ? 404 : 400, {
           status: 'error',
-          error: { code: 'session-not-found', message: `会话 ${sessionId} 不在活动列表里，无法即时切换` },
+          error: {
+            code: notFound ? 'session-not-found' : 'apply-failed',
+            message: switched.reason ?? `DSH 未应用该预设（当前 ${switched.current ?? '未知'}）`,
+          },
         })
       }
-      // 真正的切换：与 DSH 内置 /permission 命令完全同一条路径 ——
-      // 写一条 permission/preset 会话事实 + 改沙箱模式 + 改审批策略。
-      //
-      // 历史教训：上一版是往会话里排一条文本 `/permission <preset>`，以为 DSH 会把
-      // 它当命令执行；实际它只是一条普通用户消息（会话日志里能看到 permission/preset
-      // 事件始终只有建会话时那一条），于是 App 上"切换成功"是假的、越权操作照旧
-      // 不弹审批。这里改成直接调用服务方法，并且把真实结果回传。
-      const agent = findLiveAgentForSession(sessionId)
-      if (agent !== undefined && typeof ctx.get('approval')?.setPolicy === 'function') {
-        // 会话正在跑：连"当前这轮"的审批策略一起改（内置命令用的是同一个实时写法）
-        service.apply(session, preset, (policy) => ctx.get('approval').setPolicy(agent, policy))
-      } else {
-        // 没有活跃 agent：写持久化事实 + 会话级开关，下一轮生效
-        service.set(session, preset)
-      }
-      const current = typeof service.current === 'function' ? service.current(session) : undefined
       return json(200, {
         status: 'success',
         sessionId,
         preset,
-        current,
-        applied: current === undefined ? true : current === preset,
-        live: agent !== undefined,
+        current: switched.current,
+        applied: true,
+        live: switched.live === true,
       })
     }
 

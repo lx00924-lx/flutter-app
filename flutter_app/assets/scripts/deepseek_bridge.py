@@ -1616,10 +1616,21 @@ async def execute_dsh_sse_stream(
     if reasoning_effort and reasoning_effort != "default":
         payload["reasoningEffort"] = reasoning_effort
         payload["reasoning_effort"] = reasoning_effort
-    if permission:
-        payload["permission"] = permission
-    else:
-        payload["permission"] = "workspace-write"
+
+    # 执行权限：**不再**把 permission 塞进 payload。
+    #
+    # 以前带上它，插件就会"往会话里排一条 `/permission <preset>` 文本"来生效 —— 而 DSH
+    # 不会把排队文本当命令执行：用户每从手机发一条消息，会话里就多一条 /permission 垃圾
+    # （和正文同一秒进同一个 turn，在 GUI 队列里看着就是"成对消息"），权限却从未真正改变。
+    # 现在改由桥接直接调插件的真接口即时切换（与 WS 通道同一套做法）。
+    if permission and real_session_id:
+        try:
+            perm_ok, perm_res = await apply_dsh_session_permission(harness_base, real_session_id, permission)
+            if not perm_ok:
+                await on_step_callback(f"⚠️ 执行权限未切换：{perm_res}")
+        except Exception as perm_err:
+            await on_step_callback(f"⚠️ 执行权限下发异常（忽略，继续本轮）：{perm_err}")
+    # 没有会话 id 时不再回填默认权限：那只会让插件又排一条无效的 /permission 文本
 
     req_data = json.dumps(payload).encode("utf-8")
 
