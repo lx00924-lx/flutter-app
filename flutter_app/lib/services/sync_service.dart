@@ -1239,7 +1239,12 @@ class SyncService {
       final resp = await _dio.get(url);
       if (resp.statusCode == 200 && resp.data is Map) {
         return {
+          // ok=这次请求本身成功了（区别于"服务端明确说电脑端不在线"）。
+          // 以前把任何异常都压成 online:false，于是一次网络抖动就会让界面
+          // 显示"桥接不在线"，还弹出误导性的"请确认电脑端桥接在线"。
+          'ok': true,
           'online': resp.data['online'] == true,
+          'error': resp.data['error']?.toString() ?? '',
           // 不再用假值兜底：服务端返回空即代表未取到真实工作区
           'workspaces': List<String>.from(resp.data['workspaces'] ?? const []),
           'sessions': resp.data['sessions'] as List? ?? [],
@@ -1247,11 +1252,22 @@ class SyncService {
           'clientName': resp.data['clientName']?.toString() ?? 'DeepSeek-Harness-Local',
         };
       }
+      return {
+        'ok': false,
+        'online': false,
+        'error': '中继返回 HTTP ${resp.statusCode}',
+        'workspaces': <String>[],
+        'sessions': <dynamic>[],
+        'models': <dynamic>[],
+        'clientName': 'DeepSeek-Harness-Local',
+      };
     } catch (e) {
       debugPrint('[SyncService] getAgentSessions error: $e');
     }
     return {
+      'ok': false,
       'online': false,
+      'error': '没连上中继（网络/服务器暂时不可达）',
       // 取不到就返回空：界面显示空白框，绝不编一个 'deepseek-agent' 出来
       'workspaces': <String>[],
       'sessions': <dynamic>[],

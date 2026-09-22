@@ -405,7 +405,16 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                     _requestedCatalog = true;
                     final ok = await sp.refreshAgentCatalog();
                     if (!mounted) return;
-                    if (!ok) _toast('没取到目录：请确认电脑端桥接在线', isError: true);
+                    if (!ok) {
+                      // 按真实原因给提示：以前一律说"请确认电脑端桥接在线"，
+                      // 网络抖动时会把用户指向错误的方向（实测过一次）。
+                      final why = sp.lastCatalogError.isNotEmpty
+                          ? sp.lastCatalogError
+                          : (sp.lastCatalogOnline
+                              ? '电脑端在线，但这次没取到目录（本地 DSH 可能正忙），稍后再试'
+                              : '电脑端桥接不在线：请先在电脑上启动桥接');
+                      _toast('没取到目录：$why', isError: true);
+                    }
                   },
           ),
         ],

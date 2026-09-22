@@ -524,13 +524,29 @@ class SettingsProvider extends ChangeNotifier {
       _settings.harnessToken,
       userId: _settings.loginAccount,
     );
-    final isOnline = data['online'] == true;
-    if (_settings.isHarnessOnline != isOnline) {
-      _settings.isHarnessOnline = isOnline;
-      _save();
+    final requestOk = data['ok'] == true;
+    // 只有服务端**明确**说"电脑端不在线"才改本地在线标记。
+    // 请求本身失败（断网/中继抖动/超时）不改 —— 否则一次抖动就把界面打成
+    // "离线"，还弹"请确认电脑端桥接在线"，把用户指向错误的方向。
+    if (requestOk) {
+      final isOnline = data['online'] == true;
+      if (_settings.isHarnessOnline != isOnline) {
+        _settings.isHarnessOnline = isOnline;
+        _save();
+      }
     }
+    _lastCatalogError = requestOk ? (data['error']?.toString() ?? '') : (data['error']?.toString() ?? '请求失败');
+    _lastCatalogOnline = data['online'] == true;
     return data;
   }
+
+  /// 最近一次目录刷新的失败原因（空 = 没失败）；供界面给出准确提示。
+  String _lastCatalogError = '';
+  String get lastCatalogError => _lastCatalogError;
+
+  /// 服务端最近一次是否报告"电脑端在线"（用于区分"离线"和"在线但没取到"）。
+  bool _lastCatalogOnline = false;
+  bool get lastCatalogOnline => _lastCatalogOnline;
 
   // ==================== 电脑端工作区 / 会话目录缓存 ====================
   //
@@ -632,6 +648,7 @@ class SettingsProvider extends ChangeNotifier {
       return wsList.isNotEmpty || sessList.isNotEmpty;
     } catch (e) {
       debugPrint('[Settings] refreshAgentCatalog 失败: $e');
+      _lastCatalogError = '$e';
       if (!silent) rethrow;
       return false;
     } finally {
