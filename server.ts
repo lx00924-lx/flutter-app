@@ -9,6 +9,7 @@ import { WebSocketServer, WebSocket as WSWebSocket } from "ws";
 import { EventEmitter } from "events";
 import path from "path";
 import fs from "fs/promises";
+import fsSync from "node:fs";
 import multer from "multer";
 import { createServer as createViteServer } from "vite";
 import cors from "cors";
@@ -66,6 +67,14 @@ generationEvents.setMaxListeners(500);
 
 // 监听端口：默认 3000，可用环境变量 PORT 覆盖（便于本地起隔离实例做安全回归测试）
 const PORT = Number(process.env.PORT) || 3000;
+/**
+ * 本次中继进程的启动标识。
+ *
+ * 为什么需要：桥接脚本从中继掉线时会退到 HTTP 长轮询，而**旧实现再也不切回**
+ * WebSocket —— 中继重启后桥接就一直挂在轮询模式（会话列表不再同步、能力降级）。
+ * 桥接把这里下发的 bootId 记下来，一旦发现变了（= 中继重启过）就主动切回 WS。
+ */
+const SERVER_BOOT_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const DATA_DIR = path.join(process.cwd(), "messages_data");
 const MESSAGES_FILE = path.join(DATA_DIR, "messages_v2.json"); // Use v2 to avoid conflicts
 const USERS_FILE = path.join(DATA_DIR, "users.json");
@@ -517,10 +526,19 @@ const pendingQuestions = new Map<string, {
   token?: string;
   userId?: string;
   at: number;
+  /** true = DSH 侧那一轮已经结束（超过阻塞窗口），答复要走「续跑」。 */
+  deferred?: boolean;
 }>();
 
-/** 简易 TTL：选择框超过 10 分钟没人答就丢掉（DSH 侧插件 180s 也就交回电脑端了）。 */
-const QUESTION_TTL_MS = 10 * 60 * 1000;
+/**
+ * 待办保留时长：24 小时。
+ *
+ * 为什么从 10 分钟提到 24 小时（用户场景：发完指令人就走了，隔天才回来）：
+ * DSH 的提问自己没有任何超时，人不在时那一轮会一直挂着；现在插件 5 分钟后主动
+ * 结束本轮、把问题转成「延后待答」——卡片必须还在，否则用户回来什么都没有，
+ * 只能重新发一遍指令。24 小时后才真正丢弃，避免无限堆积。
+ */
+const QUESTION_TTL_MS = 24 * 60 * 60 * 1000;
 const prunePendingQuestions = () => {
   const now = Date.now();
   for (const [id, item] of pendingQuestions) {
@@ -2455,7 +2473,7 @@ async function startServer() {
             const idx = agent.pendingPollResolvers.indexOf(deliverTask);
             if (idx !== -1) agent.pendingPollResolvers.splice(idx, 1);
           }
-          res.json({ type: "noop", timestamp: Date.now() });
+          res.json({ type: "noop", timestamp: Date.now(), bootId: SERVER_BOOT_ID });
         }
       }, timeoutSec * 1000);
 
@@ -2546,7 +2564,7 @@ async function startServer() {
       connectedAgents.set(token, agent);
       io.emit("agent_status_change", { token, online: true, clientName: agent.clientName });
     }
-    res.json({ success: true, timestamp: Date.now() });
+    res.json({ success: true, timestamp: Date.now(), bootId: SERVER_BOOT_ID });
   });
 
   app.get("/deepseek_bridge.py", async (req, res) => {
@@ -3079,6 +3097,7 @@ if %errorlevel% neq 0 (
     questionId: string;
     sessionId?: string;
     questions: any[];
+    deferred?: boolean;
   }) => {
     prunePendingQuestions();
     const agent = connectedAgents.get(qToken);
@@ -3097,9 +3116,11 @@ if %errorlevel% neq 0 (
       questionId: question.questionId,
       sessionId: question.sessionId || "",
       questions: question.questions || [],
+      deferred: question.deferred === true,
       at: Date.now(),
     };
     pendingQuestions.set(question.questionId, { ...payload, token: qToken, userId: userId || undefined });
+    savePendingDecisions();
     if (userId) io.to(`user_${userId}`).emit("agent_question", payload);
     else io.emit("agent_question", payload);
     // 正在流式接收的那一轮也顺手带一份（推送通道没连上时 SSE 是唯一活路）
@@ -3111,7 +3132,7 @@ if %errorlevel% neq 0 (
 
   app.post("/api/agent/waiting-question", (req, res) => {
     try {
-      const { token, questionId, sessionId, questions } = req.body || {};
+      const { token, questionId, sessionId, questions, deferred } = req.body || {};
       const qid = (questionId || "").toString().trim();
       if (!qid) return res.status(400).json({ error: "缺少 questionId" });
       const qToken = (token || "").toString().trim();
@@ -3119,6 +3140,7 @@ if %errorlevel% neq 0 (
         questionId: qid,
         sessionId,
         questions: Array.isArray(questions) ? questions : [],
+        deferred: deferred === true,
       });
       res.json({ success: true });
     } catch (err: any) {
@@ -3177,6 +3199,7 @@ if %errorlevel% neq 0 (
       }
 
       pendingQuestions.delete(qid);
+      savePendingDecisions();
       io.emit("agent_question_resolved", {
         questionId: qid,
         reason: isDecline ? "declined" : "answered",
@@ -3204,9 +3227,11 @@ if %errorlevel% neq 0 (
     at: number;
     token?: string;
     userId?: string;
+    /** true = DSH 侧那一轮已结束，批准后要走「续跑」重试该操作。 */
+    deferred?: boolean;
   }>();
-  /** 审批缓存有效期：比 DSH 侧 30 分钟超时略长一点即可。 */
-  const PENDING_APPROVAL_TTL_MS = 35 * 60 * 1000;
+  /** 审批缓存有效期：与选择框一致 24 小时（人隔天回来还能看到并批准）。 */
+  const PENDING_APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 
   const prunePendingApprovals = () => {
     const now = Date.now();
@@ -3215,12 +3240,69 @@ if %errorlevel% neq 0 (
     }
   };
 
+  // ── 待办落盘 ─────────────────────────────────────────────────
+  //
+  // 为什么必须落盘：中继每次部署/重启都会清空内存里的待办，而这些东西代表
+  // "电脑端还在等人拍板"。用户隔天回来时若什么都没了，只能重新发一遍指令。
+  // 文件：messages_data/pending-decisions.json（与其它持久化数据同目录）。
+  const PENDING_STORE_FILE = path.join(DATA_DIR, "pending-decisions.json");
+  let pendingStoreTimer: NodeJS.Timeout | null = null;
+
+  const writePendingDecisions = () => {
+    try {
+      fsSync.mkdirSync(DATA_DIR, { recursive: true });
+      fsSync.writeFileSync(PENDING_STORE_FILE, JSON.stringify({
+        version: 1,
+        savedAt: Date.now(),
+        questions: [...pendingQuestions.values()],
+        approvals: [...pendingApprovals.values()],
+      }), "utf-8");
+    } catch (err: any) {
+      console.error("[Pending] 待办落盘失败:", err?.message ?? err);
+    }
+  };
+
+  /** 落盘（默认 500ms 防抖；immediate=true 立刻写）。 */
+  const savePendingDecisions = (immediate = false) => {
+    if (immediate) {
+      if (pendingStoreTimer) { clearTimeout(pendingStoreTimer); pendingStoreTimer = null; }
+      writePendingDecisions();
+      return;
+    }
+    if (pendingStoreTimer) return;
+    pendingStoreTimer = setTimeout(() => { pendingStoreTimer = null; writePendingDecisions(); }, 500);
+  };
+
+  /** 启动时恢复上次没处理完的待办。 */
+  const loadPendingDecisions = () => {
+    try {
+      if (!fsSync.existsSync(PENDING_STORE_FILE)) return;
+      const raw = JSON.parse(fsSync.readFileSync(PENDING_STORE_FILE, "utf-8"));
+      for (const item of raw?.questions ?? []) {
+        if (item?.questionId) pendingQuestions.set(item.questionId, item);
+      }
+      for (const item of raw?.approvals ?? []) {
+        if (item?.approvalId) pendingApprovals.set(item.approvalId, item);
+      }
+      prunePendingQuestions();
+      prunePendingApprovals();
+      if (pendingQuestions.size > 0 || pendingApprovals.size > 0) {
+        console.log(`[Pending] 已恢复待办：选择框 ${pendingQuestions.size} 个 / 审批 ${pendingApprovals.size} 个`);
+      }
+    } catch (err: any) {
+      console.error("[Pending] 读取待办落盘文件失败:", err?.message ?? err);
+    }
+  };
+
+  loadPendingDecisions();
+
   /** 把一个挂起的审批投递给该用户的所有在线端，并缓存供补拉。 */
   const deliverApprovalToUser = async (aToken: string, approval: {
     approvalId: string;
     sessionId?: string;
     tool?: string;
     reason?: string;
+    deferred?: boolean;
   }) => {
     prunePendingApprovals();
     const agent = connectedAgents.get(aToken);
@@ -3240,9 +3322,11 @@ if %errorlevel% neq 0 (
       sessionId: approval.sessionId || "",
       tool: approval.tool || "tool",
       reason: approval.reason || "",
+      deferred: approval.deferred === true,
       at: Date.now(),
     };
     pendingApprovals.set(approval.approvalId, { ...payload, token: aToken, userId: userId || undefined });
+    savePendingDecisions();
     // App 的 ChatProvider 已经在处理 agent_waiting_approval（原先走 socket.io，
     // 推送通道的包装层会把它同时复制到 /ws/app），这里直接复用同一个事件名。
     if (userId) io.to(`user_${userId}`).emit("agent_waiting_approval", { approval: payload });
@@ -3256,16 +3340,17 @@ if %errorlevel% neq 0 (
   // 桥接轮询通道的审批事件入口（WS 通道见 agent hub 的 approval_requested 分支）
   app.post("/api/agent/approval-event", (req, res) => {
     try {
-      const { token, type, approvalId, sessionId, tool, reason } = req.body || {};
+      const { token, type, approvalId, sessionId, tool, reason, deferred } = req.body || {};
       const aid = (approvalId || "").toString().trim();
       if (!aid) return res.status(400).json({ error: "缺少 approvalId" });
       const aToken = (token || "").toString().trim();
       if (type === "approval_closed") {
         pendingApprovals.delete(aid);
+        savePendingDecisions();
         io.emit("agent_approval_resolved", { approvalId: aid, outcome: "resolved" });
         return res.json({ success: true });
       }
-      void deliverApprovalToUser(aToken, { approvalId: aid, sessionId, tool, reason });
+      void deliverApprovalToUser(aToken, { approvalId: aid, sessionId, tool, reason, deferred: deferred === true });
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -3324,6 +3409,7 @@ if %errorlevel% neq 0 (
       // （桥接侧随后也会报 approval_closed，这里先一步，避免另一端还挂着旧卡片）
       if (approvalId) {
         pendingApprovals.delete(approvalId.toString());
+        savePendingDecisions();
         io.emit("agent_approval_resolved", {
           approvalId: approvalId.toString(),
           outcome: (action || "allow") === "allow" ? "allowed-once" : "rejected",
@@ -4195,33 +4281,38 @@ if %errorlevel% neq 0 (
           } else if (msg.type === "waiting_question") {
             // DSH 的 ask_user_question 挂起了：桥接轮询到就推上来，转给 App 弹卡片。
             // 注意这里**不依赖 taskId**：用户在电脑网页里发起的一轮同样可能有提问。
+            // deferred=true 表示那一轮已结束（超过阻塞窗口），答复要走续跑。
             const qToken = (msg.token || token || "").trim();
-            console.log(`[Agent Hub] Agent waiting user question ${msg.questionId} (session ${msg.sessionId || '-'})`);
+            console.log(`[Agent Hub] Agent waiting user question ${msg.questionId} (session ${msg.sessionId || '-'}, deferred=${msg.deferred === true})`);
             void deliverQuestionToUser(qToken, {
               questionId: String(msg.questionId || ""),
               sessionId: msg.sessionId,
               questions: Array.isArray(msg.questions) ? msg.questions : [],
+              deferred: msg.deferred === true,
             });
           } else if (msg.type === "question_resolved") {
             // 问题已经被答复（在 App 上或在电脑端网页上）→ 让各端把卡片收起来
             const qid = String(msg.questionId || "");
             if (qid) pendingQuestions.delete(qid);
+            savePendingDecisions();
             io.emit("agent_question_resolved", { questionId: qid, reason: msg.reason || "closed" });
           } else if (msg.type === "approval_requested") {
             // DSH 挂起了授权请求（工具审批 / 文件沙箱越权升级）→ 转给 App 卡片。
             // 同样**不依赖 taskId**：网页端发起的一轮、或后台升级产生的审批都会走到这里。
             const aToken = (msg.token || token || "").trim();
-            console.log(`[Agent Hub] Agent waiting approval ${msg.approvalId} (tool ${msg.tool || '-'})`);
+            console.log(`[Agent Hub] Agent waiting approval ${msg.approvalId} (tool ${msg.tool || '-'}, deferred=${msg.deferred === true})`);
             void deliverApprovalToUser(aToken, {
               approvalId: String(msg.approvalId || ""),
               sessionId: msg.sessionId,
               tool: msg.tool,
               reason: msg.reason,
+              deferred: msg.deferred === true,
             });
           } else if (msg.type === "approval_closed") {
             // 审批已被裁决（App 上、或电脑端网页上）→ 各端收起卡片
             const aid = String(msg.approvalId || "");
             if (aid) pendingApprovals.delete(aid);
+            savePendingDecisions();
             io.emit("agent_approval_resolved", { approvalId: aid, outcome: "resolved" });
           } else if (msg.type === "sync_sessions" || msg.type === "sessions_result") {
             agentInfo.workspaces = msg.workspaces || [];

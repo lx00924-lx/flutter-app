@@ -54,21 +54,24 @@ const HEARTBEAT_MS = 5_000
 /** 单轮默认上限（bridge 自己也有 600s 超时）。 */
 const TURN_TIMEOUT_MS = 600_000
 /**
- * 选择框等待 App 答复的上限：超过就交回电脑端界面。
+ * 「阻塞窗口」：App 在线时，问题/审批最多按住这一轮多久（5 分钟）。
  *
- * 为什么从 180 秒放宽到 30 分钟：用户明确要求"卡片不要因为超时而消失"——
- * 手机可能锁屏、开会、隔一阵才看，180 秒一到插件就代为放弃，App 上的卡片随即
- * 收起，用户回来只看到"已经处理过了"。30 分钟足够覆盖真实使用间隔；真超时后
- * 仍然交回电脑端界面，不会把整轮对话永久挂死。
+ * 为什么从 30 分钟缩到 5 分钟（用户场景：发完指令人就去干别的了，甚至隔天才回来）：
+ *  - DSH 的 ask_user_question 自己**没有任何超时**，只要没人答，那一轮的工具调用会
+ *    一直挂着。原来超时后交给电脑端网页弹窗，而人不在电脑前时，网页那个 answerer
+ *    会**无限等下去** —— 会话就永久卡在 running，比"没人答"更糟。
+ *  - 现在窗口到期后不再交网页，而是直接把这轮**结束掉**（返回空答复 / 审批按撤销），
+ *    同时把这条待办转进「延后待答」清单：卡片在手机/电脑上继续留着（24 小时），
+ *    用户回来点答复时走**续跑**（见 DEFERRED_TTL_MS 与 App 侧 resume 逻辑）。
  */
-const QUESTION_TIMEOUT_MS = 1_800_000
+const QUESTION_BLOCK_MS = 300_000
+/** 审批的阻塞窗口（同上；审批超时按"撤销"结束，不会静默变成拒绝）。 */
+const APPROVAL_BLOCK_MS = 300_000
 /**
- * 审批等待 App 决定的上限（30 分钟，理由同上）。
- *
- * 单独一个常量而不是复用 TURN_TIMEOUT_MS：那个还兼作"单轮对话总时长"和
- * 会话读写 signal 的上限，把它一起抬到 30 分钟会让跑飞的轮次也拖住半小时。
+ * 延后待答项保留时长（24 小时）：人隔天回来仍然能在 App / 电脑端看到并答复。
+ * 到期才真正丢弃，避免无限堆积。
  */
-const APPROVAL_TIMEOUT_MS = 1_800_000
+const DEFERRED_TTL_MS = 24 * 60 * 60 * 1000
 /** 桥接轮询心跳窗口：这段时间内来轮询过，才认为「App 侧在线、可以接管」。 */
 const QUESTION_ARM_MS = 15_000
 /**
@@ -130,8 +133,53 @@ export function apply(ctx) {
   let catalogCache
   /** 会话标题缓存：sessionId → 标题。 */
   const titleCache = new Map()
-  /** 挂起中的审批：approvalId → {sessionId, tool, settle} */
+  /** 挂起中的审批：approvalId → {sessionId, tool, reason, settle} */
   const pendingApprovals = new Map()
+  /**
+   * 延后待答（阻塞窗口到期后仍想被答复的项）：id → 条目。
+   *
+   * 与 pending* 的区别：这里的东西**不再阻塞任何一轮对话**（本轮已经结束了），
+   * 只是"还欠用户一个决定"。App / 电脑端仍会看到卡片，答复时走续跑：
+   * App 侧生成一条结构化消息重新起一轮，把原来的问题/申请和用户的决定带进去。
+   */
+  const deferredQuestions = new Map()
+  const deferredApprovals = new Map()
+
+  /** 把到期的选择框转进延后清单（保留原问题内容，供晚点答复与续跑）。 */
+  function deferQuestion(entry) {
+    deferredQuestions.set(entry.questionId, {
+      questionId: entry.questionId,
+      sessionId: entry.sessionId,
+      questions: entry.questions,
+      createdAt: entry.createdAt,
+      deferredAt: Date.now(),
+    })
+    pruneDeferred()
+  }
+
+  /** 把到期的审批转进延后清单。 */
+  function deferApproval(entry) {
+    deferredApprovals.set(entry.approvalId, {
+      approvalId: entry.approvalId,
+      sessionId: entry.sessionId,
+      tool: entry.tool,
+      reason: entry.reason ?? '',
+      createdAt: entry.createdAt,
+      deferredAt: Date.now(),
+    })
+    pruneDeferred()
+  }
+
+  /** 延后项超过 24 小时就丢掉（人隔天回来仍能看到，再久就不留了）。 */
+  function pruneDeferred() {
+    const now = Date.now()
+    for (const [id, item] of deferredQuestions) {
+      if (now - item.deferredAt > DEFERRED_TTL_MS) deferredQuestions.delete(id)
+    }
+    for (const [id, item] of deferredApprovals) {
+      if (now - item.deferredAt > DEFERRED_TTL_MS) deferredApprovals.delete(id)
+    }
+  }
   /** 挂起中的选择框：questionId → {sessionId, questions, settle, timer, createdAt} */
   const pendingQuestions = new Map()
   /** 桥接最近一次来轮询选择框的时间戳（用于判定 App 侧是否在线）。 */
@@ -657,28 +705,42 @@ export function apply(ctx) {
     const tool = typeof request?.toolName === 'string' ? request.toolName : 'tool'
     const reason = typeof request?.reason === 'string' ? request.reason : ''
     return new Promise((resolve) => {
-      const entry = { sessionId, tool, reason, settle: resolve, createdAt: Date.now() }
+      const entry = { approvalId, sessionId, tool, reason, settle: resolve, createdAt: Date.now() }
       pendingApprovals.set(approvalId, entry)
       ctx.logger?.info?.(`[app-bridge] 审批 ${approvalId} 等待 App 决定（${tool}${reason.length > 0 ? `｜${reason}` : ''}）`)
       const timer = setTimeout(() => {
-        if (pendingApprovals.delete(approvalId)) {
-          ctx.logger?.warn?.(`[app-bridge] 审批 ${approvalId} 超时未答复，按拒绝处理`)
-          resolve('rejected')
-        }
-      }, APPROVAL_TIMEOUT_MS)
+        const live = pendingApprovals.get(approvalId)
+        if (live === undefined) return
+        pendingApprovals.delete(approvalId)
+        // 阻塞窗口到期：按"撤销"结束（不是"拒绝"）—— 人不在，不该替他做否定决定；
+        // 同时转进延后清单，用户回来批准时走续跑重试该操作。
+        deferApproval(live)
+        ctx.logger?.warn?.(`[app-bridge] 审批 ${approvalId} 等 App 超过 ${Math.round(APPROVAL_BLOCK_MS / 1000)}s，按撤销结束并转为延后待批（24h 内仍可批准，届时续跑）`)
+        resolve('cancelled')
+      }, APPROVAL_BLOCK_MS)
       entry.timer = timer
     })
   })
 
-  /** 答复一个审批。 */
+  /**
+   * 答复一个审批。
+   *
+   * @returns `{settled, delivered, deferred}`：deferred=true 表示那一轮早就结束了
+   *          （超过阻塞窗口后按"撤销"收场），App 侧应当走**续跑**重试该操作。
+   */
   function answerApproval(approvalId, action) {
     const entry = pendingApprovals.get(approvalId)
-    if (entry === undefined) return false
+    if (entry === undefined) {
+      if (deferredApprovals.delete(approvalId)) {
+        return { settled: true, delivered: false, deferred: true }
+      }
+      return { settled: false, delivered: false, deferred: false }
+    }
     pendingApprovals.delete(approvalId)
     clearTimeout(entry.timer)
     const allow = action === 'allow' || action === 'allowed-once' || action === 'approve' || action === true
     entry.settle(allow ? 'allowed-once' : 'rejected')
-    return true
+    return { settled: true, delivered: true, deferred: false }
   }
   //#endregion
 
@@ -715,11 +777,15 @@ export function apply(ctx) {
     pendingQuestions.set(questionId, entry)
     ctx.logger?.info?.(`[app-bridge] 选择框 ${questionId} 已排给 App（${questions.length} 个问题）`)
     entry.timer = setTimeout(() => {
-      if (pendingQuestions.delete(questionId)) {
-        ctx.logger?.warn?.(`[app-bridge] 选择框 ${questionId} 等 App 超时，交回电脑端界面`)
-        settle({ kind: 'handoff' })
-      }
-    }, QUESTION_TIMEOUT_MS)
+      // 阻塞窗口到期：不再交电脑端网页（人不在电脑前时那会无限挂住整轮），
+      // 而是结束本轮 + 转进延后清单，让用户在 App 上晚点答复（走续跑）。
+      const live = pendingQuestions.get(questionId)
+      if (live === undefined) return
+      pendingQuestions.delete(questionId)
+      deferQuestion(live)
+      ctx.logger?.warn?.(`[app-bridge] 选择框 ${questionId} 等 App 超过 ${Math.round(QUESTION_BLOCK_MS / 1000)}s，本轮结束并转为延后待答（24h 内仍可答复，届时续跑）`)
+      settle({ kind: 'deferred' })
+    }, QUESTION_BLOCK_MS)
 
     // ⚠️ 这里**不再与网页端并发抢答**（曾经是 Promise.race）。
     //
@@ -733,7 +799,10 @@ export function apply(ctx) {
     try {
       const outcome = await answered
       if (outcome?.kind === 'answered') return outcome.answers
-      // App 放弃或超时：这时才交回电脑端界面
+      // 延后待答：本轮就此结束（返回空答复 = "用户没答"），不再 next() 去挂网页弹窗 ——
+      // 那正是"人不在电脑前时整轮永久卡住"的来源。
+      if (outcome?.kind === 'deferred') return { answers: [] }
+      // App 主动放弃：这时才交回电脑端界面
       return await Promise.resolve().then(() => next())
     } finally {
       const live = pendingQuestions.get(questionId)
@@ -753,10 +822,21 @@ export function apply(ctx) {
     return undefined
   }
 
-  /** 答复一个选择框：answers 形如 `[{id, selected:[...], custom?}]`。 */
+  /**
+   * 答复一个选择框：answers 形如 `[{id, selected:[...], custom?}]`。
+   *
+   * @returns `{settled, delivered, deferred}`：deferred=true 表示这条已经不在等
+   *          任何一轮对话（本轮早已结束），App 侧应当走**续跑**把答案发回同一会话。
+   */
   function answerQuestion(questionId, answers) {
     const entry = pendingQuestions.get(questionId)
-    if (entry === undefined) return false
+    if (entry === undefined) {
+      // 延后待答：这里只做"用户已处理"的销账，真正的续跑由 App 发起
+      if (deferredQuestions.delete(questionId)) {
+        return { settled: true, delivered: false, deferred: true }
+      }
+      return { settled: false, delivered: false, deferred: false }
+    }
     pendingQuestions.delete(questionId)
     clearTimeout(entry.timer)
     const clean = (Array.isArray(answers) ? answers : [])
@@ -767,28 +847,47 @@ export function apply(ctx) {
       }))
       .filter((item) => item.id.length > 0)
     entry.settle({ kind: 'answered', answers: { answers: clean } })
-    return true
+    return { settled: true, delivered: true, deferred: false }
   }
 
-  /** 放弃在 App 上回答 → 交回电脑端界面。 */
+  /** 放弃在 App 上回答 → 交回电脑端界面（延后项则只是销账）。 */
   function declineQuestion(questionId) {
     const entry = pendingQuestions.get(questionId)
-    if (entry === undefined) return false
+    if (entry === undefined) {
+      if (deferredQuestions.delete(questionId)) {
+        return { settled: true, delivered: false, deferred: true }
+      }
+      return { settled: false, delivered: false, deferred: false }
+    }
     pendingQuestions.delete(questionId)
     clearTimeout(entry.timer)
     entry.settle({ kind: 'handoff' })
-    return true
+    return { settled: true, delivered: true, deferred: false }
   }
 
   /** 待答清单（桥接脚本轮询用；这次轮询同时表示「App 侧在线」）。 */
-  function questionsPayload() {    return {
+  function questionsPayload() {
+    pruneDeferred()
+    return {
       status: 'success',
-      questions: [...pendingQuestions.values()].map((entry) => ({
-        questionId: entry.questionId,
-        sessionId: entry.sessionId,
-        createdAt: entry.createdAt,
-        questions: entry.questions,
-      })),
+      questions: [
+        ...[...pendingQuestions.values()].map((entry) => ({
+          questionId: entry.questionId,
+          sessionId: entry.sessionId,
+          createdAt: entry.createdAt,
+          questions: entry.questions,
+          deferred: false,
+        })),
+        // 延后项：本轮已结束，但答案仍想要（App 侧答复时走续跑）
+        ...[...deferredQuestions.values()].map((entry) => ({
+          questionId: entry.questionId,
+          sessionId: entry.sessionId,
+          createdAt: entry.createdAt,
+          questions: entry.questions,
+          deferred: true,
+          deferredAt: entry.deferredAt,
+        })),
+      ],
     }
   }
 
@@ -800,15 +899,29 @@ export function apply(ctx) {
    * 「App 侧在线」的心跳（见 APPROVAL_ARM_MS）。
    */
   function approvalsPayload() {
+    pruneDeferred()
     return {
       status: 'success',
-      approvals: [...pendingApprovals.entries()].map(([approvalId, entry]) => ({
-        approvalId,
-        sessionId: entry.sessionId,
-        tool: entry.tool,
-        reason: entry.reason ?? '',
-        createdAt: entry.createdAt,
-      })),
+      approvals: [
+        ...[...pendingApprovals.entries()].map(([approvalId, entry]) => ({
+          approvalId,
+          sessionId: entry.sessionId,
+          tool: entry.tool,
+          reason: entry.reason ?? '',
+          createdAt: entry.createdAt,
+          deferred: false,
+        })),
+        // 延后项：那一轮已结束，用户晚点批准时会以续跑方式重试该操作
+        ...[...deferredApprovals.values()].map((entry) => ({
+          approvalId: entry.approvalId,
+          sessionId: entry.sessionId,
+          tool: entry.tool,
+          reason: entry.reason ?? '',
+          createdAt: entry.createdAt,
+          deferred: true,
+          deferredAt: entry.deferredAt,
+        })),
+      ],
     }
   }
   //#endregion
@@ -957,8 +1070,16 @@ export function apply(ctx) {
     if (pathname === '/v1/agent/approve' && method === 'POST') {
       const input = await body(request)
       const approvalId = typeof input.approvalId === 'string' ? input.approvalId : ''
-      const settled = answerApproval(approvalId, input.action ?? 'allow')
-      return json(200, { status: 'success', approvalId, action: input.action ?? 'allow', settled })
+      const result = answerApproval(approvalId, input.action ?? 'allow')
+      return json(200, {
+        status: 'success',
+        approvalId,
+        action: input.action ?? 'allow',
+        settled: result.settled,
+        // delivered=false + deferred=true：那一轮早已结束，App 应改为"续跑"重试该操作
+        delivered: result.delivered,
+        deferred: result.deferred,
+      })
     }
 
     // ── 选择框（ask_user_question）→ 手机 App ────────────────────
@@ -986,14 +1107,20 @@ export function apply(ctx) {
       if (questionId.length === 0) {
         return json(400, { status: 'error', error: { code: 'bad-id', message: '缺少 questionId' } })
       }
-      const settled = answerQuestion(questionId, input.answers)
-      if (!settled) {
+      const result = answerQuestion(questionId, input.answers)
+      if (!result.settled) {
         return json(404, {
           status: 'error',
           error: { code: 'not-found', message: '该选择框已不在等待中（已超时，或已在电脑端答复）' },
         })
       }
-      return json(200, { status: 'success', questionId, answered: true })
+      return json(200, {
+        status: 'success',
+        questionId,
+        answered: true,
+        delivered: result.delivered,
+        deferred: result.deferred,
+      })
     }
 
     if (pathname === '/v1/user-questions/decline' && method === 'POST') {
@@ -1004,9 +1131,9 @@ export function apply(ctx) {
       if (questionId.length === 0) {
         return json(400, { status: 'error', error: { code: 'bad-id', message: '缺少 questionId' } })
       }
-      const settled = declineQuestion(questionId)
-      return json(settled ? 200 : 404, settled
-        ? { status: 'success', questionId, declined: true }
+      const result = declineQuestion(questionId)
+      return json(result.settled ? 200 : 404, result.settled
+        ? { status: 'success', questionId, declined: true, delivered: result.delivered, deferred: result.deferred }
         : { status: 'error', error: { code: 'not-found', message: '该选择框已不在等待中' } })
     }
 
@@ -1216,8 +1343,16 @@ export function apply(ctx) {
       if (action === 'approve' && method === 'POST') {
         const input = await body(request)
         const approvalId = typeof input.approvalId === 'string' ? input.approvalId : ''
-        const settled = answerApproval(approvalId, input.action ?? 'allow')
-        return json(200, { status: 'success', sessionId, approvalId, action: input.action ?? 'allow', settled })
+        const result = answerApproval(approvalId, input.action ?? 'allow')
+        return json(200, {
+          status: 'success',
+          sessionId,
+          approvalId,
+          action: input.action ?? 'allow',
+          settled: result.settled,
+          delivered: result.delivered,
+          deferred: result.deferred,
+        })
       }
     }
 

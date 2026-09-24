@@ -801,15 +801,16 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   ///
   /// 收起后只剩这一行，输入框和聊天内容不再被提问卡挤占 —— 想边看聊天边答题时
   /// 点一下收起来，想答了点一下展开（题号与已勾选内容都保留）。
-  Widget _buildQuestionHeaderRow(int total, int step, int answered, {required bool expanded}) {
+  Widget _buildQuestionHeaderRow(int total, int step, int answered, bool deferred, {required bool expanded}) {
     final progress = total > 1 ? ' · 第 ${step + 1}/$total 题 · 已答 $answered/$total' : '';
+    final stateNote = deferred ? ' · 本轮已中止' : '';
     return Row(
       children: [
         const Icon(Icons.help_outline, size: 16, color: Color(0xFF3B82F6)),
         const SizedBox(width: 6),
         Expanded(
           child: Text(
-            '电脑端 Agent 在等你选择$progress',
+            '电脑端 Agent 在等你选择$progress$stateNote',
             style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
           ),
         ),
@@ -1168,6 +1169,9 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   // 文件沙箱越权升级这类审批，reason 才是"为什么要放行"的关键信息
                   // （例如"写入工作区之外的路径"），只给工具名等于让用户盲签。
                   final reason = approval['reason']?.toString().trim() ?? '';
+                  // 延后待批：那一轮早已结束，批准后会以「续跑」方式重试该操作。
+                  // 明确写出来，用户才知道"点了会不会有反应、会不会重跑一遍"。
+                  final deferred = chat.pendingApprovalDeferred;
                   return Container(
                     margin: const EdgeInsets.only(bottom: 8),
                     padding: const EdgeInsets.all(10),
@@ -1183,14 +1187,21 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                           children: [
                             const Icon(Icons.gpp_maybe_outlined, size: 16, color: Color(0xFFF59E0B)),
                             const SizedBox(width: 6),
-                            const Expanded(
+                            Expanded(
                               child: Text(
-                                '电脑端等待你的授权',
-                                style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                                deferred ? '电脑端等待你的授权（本轮已中止）' : '电脑端等待你的授权',
+                                style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
                               ),
                             ),
                           ],
                         ),
+                        if (deferred) ...[
+                          const SizedBox(height: 3),
+                          Text(
+                            '当时那一轮已经结束，现在批准会以「继续」的方式重试这个操作',
+                            style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
+                          ),
+                        ],
                         const SizedBox(height: 4),
                         Text(
                           '本地 Agent 想执行：$tool',
@@ -1255,6 +1266,8 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   final answered = _answeredQuestionCount(chat, items);
                   // 多题必须显式提交（点选项只是勾选）；单题单选有选项时仍是点一下即作答
                   final needsSubmit = chat.pendingQuestionNeedsSubmit;
+                  // 延后待答：那一轮已结束，答复会以「继续」的方式发回同一会话
+                  final deferred = chat.pendingQuestionDeferred;
 
                   return Container(
                     margin: const EdgeInsets.only(bottom: 8),
@@ -1267,7 +1280,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                       border: Border.all(color: const Color(0xFF3B82F6)),
                     ),
                     child: _questionCollapsed
-                        ? _buildQuestionHeaderRow(total, step, answered, expanded: false)
+                        ? _buildQuestionHeaderRow(total, step, answered, deferred, expanded: false)
                         : ConstrainedBox(
                             // 选项多、描述长时给一个较高的可视区，超出内部滚动，别把输入框顶没
                             constraints: const BoxConstraints(maxHeight: 380),
@@ -1275,7 +1288,15 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  _buildQuestionHeaderRow(total, step, answered, expanded: true),
+                                  _buildQuestionHeaderRow(total, step, answered, deferred, expanded: true),
+                                  if (deferred)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 3),
+                                      child: Text(
+                                        '当时那一轮已经结束，答复会以「继续」的方式发回去让 Agent 接着做',
+                                        style: TextStyle(fontSize: 11, color: Colors.blue.shade700),
+                                      ),
+                                    ),
                                   const SizedBox(height: 8),
                                   // 一次只渲染当前这一题
                                   ..._buildQuestionCardBlock(context, chat, items[step], isDark),

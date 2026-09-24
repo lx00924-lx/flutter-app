@@ -211,8 +211,7 @@ class ChatProvider extends ChangeNotifier {
             if (data['messageId'] != null) 'messageId': data['messageId'],
           });
         }
-        return;
-      case 'agent_approval_resolved':
+        return;      case 'agent_approval_resolved':
         dismissApproval();
         return;
       case 'agent_question':
@@ -223,6 +222,8 @@ class ChatProvider extends ChangeNotifier {
             'questionId': questionId,
             'sessionId': data['sessionId'],
             'questions': rawQuestions,
+            // true = 那一轮已结束，答复要走续跑（见 _resumeDeferredQuestion）
+            'deferred': data['deferred'] == true,
           });
         }
         return;
@@ -230,8 +231,9 @@ class ChatProvider extends ChangeNotifier {
         dismissQuestion();
         return;
       case 'push_connected':
-        // 推送通道刚连上（含断线重连）：断线期间挂起的选择框要补出来
+        // 推送通道刚连上（含断线重连）：断线期间挂起的选择框/审批要补出来
         unawaited(refreshPendingQuestions());
+        unawaited(refreshPendingApprovals());
         return;
       default:
     }
@@ -242,11 +244,38 @@ class ChatProvider extends ChangeNotifier {
     _periodicSyncTicks = 0;
     _periodicSyncTimer = Timer.periodic(const Duration(seconds: 12), (_) {
       _periodicSyncTicks++;
+      // 每 10 分钟重发一次待办通知（同一个通知 id，只是刷新时间）：
+      // 用户可能把通知清过、或手机重启过，而电脑端还在等 —— 这类"卡住"的状态
+      // 必须持续可见（用户明确要求：别因为划掉通知就消失）。
+      if (_periodicSyncTicks % 50 == 0) _refreshPendingNotifications();
       // 推送通道连通时降到 60 秒一次（只当兜底）：12 秒拉取每天每台设备 7200 次，
       // 有长连接顶着就不必这么密。
       if (SyncService.instance.pushConnected && _periodicSyncTicks % 5 != 0) return;
       if (!_isGenerating) _silentSyncFromServer();
     });
+  }
+
+  /// 重新弹出挂起中的选择框 / 审批通知（幂等：同一个 id 只是刷新）。
+  void _refreshPendingNotifications() {
+    final question = _pendingQuestion;
+    if (question != null) {
+      final items = _pendingQuestionItems;
+      final head = items.isEmpty
+          ? '电脑端 Agent 提了一个问题'
+          : (items.first['header'] ?? items.first['question'] ?? '电脑端 Agent 提了一个问题').toString();
+      NotificationService.instance.showQuestionRequest(
+        questionId: question['questionId']?.toString() ?? '',
+        title: '电脑端 Agent 在等你选择',
+        body: head.length > 90 ? '${head.substring(0, 90)}…' : head,
+      );
+    }
+    final approval = _pendingApproval;
+    if (approval != null) {
+      NotificationService.instance.showApprovalRequest(
+        approvalId: approval['approvalId']?.toString() ?? '',
+        tool: approval['tool']?.toString() ?? '敏感操作',
+      );
+    }
   }
 
   int _periodicSyncTicks = 0;
@@ -405,6 +434,10 @@ class ChatProvider extends ChangeNotifier {
   Future<bool> resolveApproval(String action) async {
     final pending = _pendingApproval;
     if (pending == null) return false;
+    // 延后项：那一轮早已结束，投回去没人接收 —— 走续跑（发一条消息让 Agent 重试/换方案）
+    if (pending['deferred'] == true) {
+      return _resumeDeferredApproval(pending, action);
+    }
     final approvalId = pending['approvalId']?.toString() ?? '';
     if (approvalId.isEmpty) {
       _pendingApproval = null;
@@ -440,6 +473,88 @@ class ChatProvider extends ChangeNotifier {
   /// 正在等待用户选择的「选择框」（DSH 里 Agent 提问后卡住等答案）
   Map<String, dynamic>? _pendingQuestion;
   Map<String, dynamic>? get pendingQuestion => _pendingQuestion;
+
+  /// 当前挂起的选择框是否已经"延后"：那一轮早已结束（人走开超过阻塞窗口 5 分钟），
+  /// 答复不能再投回原轮次，必须走**续跑**。
+  bool get pendingQuestionDeferred => _pendingQuestion?['deferred'] == true;
+
+  /// 当前挂起的审批是否已经"延后"（同上）。
+  bool get pendingApprovalDeferred => _pendingApproval?['deferred'] == true;
+
+  /// 延后项的答复：先服务端销账，再发一条**续跑**消息回同一会话。
+  ///
+  /// 为什么不能直接投答案：DSH 的提问/审批只在某一轮对话里有效，人走开超过阻塞窗口
+  /// 后那一轮就结束了 —— 把答案投回去是投给空气（会话那边没有任何人在等）。
+  /// 改成发一条结构化消息，把原始问题/申请和用户的决定一起带进去，Agent 接着做；
+  /// 消息对用户可见，不是偷偷代替用户说话。
+  Future<bool> _resumeDeferredQuestion(
+    Map<String, dynamic> pending,
+    List<Map<String, dynamic>> answers,
+  ) async {
+    final rawItems = pending['questions'];
+    final lines = <String>[];
+    if (rawItems is List) {
+      for (final q in rawItems.whereType<Map>()) {
+        final text = (q['question'] ?? q['header'] ?? '').toString().trim();
+        final id = q['id']?.toString() ?? '';
+        final picked = answers.firstWhere(
+          (a) => a['id']?.toString() == id,
+          orElse: () => const <String, dynamic>{},
+        );
+        final selected = (picked['selected'] as List?)?.map((e) => e.toString()).join('、') ?? '';
+        final custom = picked['custom']?.toString().trim() ?? '';
+        final answerText = custom.isNotEmpty ? custom : (selected.isEmpty ? '（未作答）' : selected);
+        lines.add('- 问题：${text.isEmpty ? id : text}\n  我的答复：$answerText');
+      }
+    }
+    final body = lines.isEmpty ? '（原问题内容已不可用）' : lines.join('\n');
+
+    // 服务端销账：这条待办从"等待中"变成"用户已处理"，否则卡片会反复出现
+    final questionId = pending['questionId']?.toString() ?? '';
+    if (questionId.isNotEmpty) {
+      await SyncService.instance.answerAgentQuestion(
+        token: settingsProvider.settings.harnessToken,
+        questionId: questionId,
+        answers: answers,
+        userId: settingsProvider.syncUserId,
+      );
+    }
+    _pendingQuestion = null;
+    NotificationService.instance.cancelQuestionRequest();
+    notifyListeners();
+
+    await sendMessage(
+      '[继续] 之前你问了我这些问题（当时那一轮已经结束，现在补答）：\n$body\n\n请据此继续完成原来的任务。',
+    );
+    return true;
+  }
+
+  /// 延后审批的裁决：批准/拒绝 + 续跑一条消息，让 Agent 重试或换方案。
+  Future<bool> _resumeDeferredApproval(Map<String, dynamic> pending, String action) async {
+    final tool = pending['tool']?.toString() ?? '敏感操作';
+    final reason = pending['reason']?.toString().trim() ?? '';
+    final approvalId = pending['approvalId']?.toString() ?? '';
+    if (approvalId.isNotEmpty) {
+      await SyncService.instance.approveAgentTask(
+        token: settingsProvider.settings.harnessToken,
+        approvalId: approvalId,
+        action: action,
+        taskId: pending['taskId']?.toString() ?? '',
+        userId: settingsProvider.syncUserId,
+      );
+    }
+    _pendingApproval = null;
+    NotificationService.instance.cancelApprovalRequest();
+    notifyListeners();
+
+    final allow = action == 'allow';
+    await sendMessage(
+      allow
+          ? '[继续] 之前你申请执行「$tool」${reason.isEmpty ? '' : '（原因：$reason）'}，我已批准（仅这一次）。请继续完成原来的任务。'
+          : '[继续] 之前你申请执行「$tool」，我拒绝了这次操作。请换一种方式继续，或说明为什么必须用它。',
+    );
+    return true;
+  }
 
   /// 每个问题已勾选的选项：问题自身 id → 选中的 label（多选/需要提交时用）
   final Map<String, Set<String>> _questionPicks = {};
@@ -566,6 +681,10 @@ class ChatProvider extends ChangeNotifier {
   Future<bool> answerQuestion(List<Map<String, dynamic>> answers) async {
     final pending = _pendingQuestion;
     if (pending == null) return false;
+    // 延后项：那一轮早已结束，投答案没人接收 —— 走续跑（把问题与答复作为一条新消息发回去）
+    if (pending['deferred'] == true) {
+      return _resumeDeferredQuestion(pending, answers);
+    }
     final questionId = pending['questionId']?.toString() ?? '';
     if (questionId.isEmpty) {
       dismissQuestion();
@@ -629,6 +748,7 @@ class ChatProvider extends ChangeNotifier {
         'sessionId': first['sessionId']?.toString() ?? '',
         'tool': first['tool']?.toString() ?? '敏感操作',
         'reason': first['reason']?.toString() ?? '',
+        'deferred': first['deferred'] == true,
       });
     } catch (e) {
       debugPrint('[ChatProvider] 补拉审批失败: $e');
@@ -651,6 +771,7 @@ class ChatProvider extends ChangeNotifier {
         'questionId': first['questionId']?.toString() ?? '',
         'sessionId': first['sessionId'],
         'questions': rawQuestions is List ? rawQuestions : const [],
+        'deferred': first['deferred'] == true,
       });
     } catch (e) {
       debugPrint('[ChatProvider] 补拉选择框失败: $e');

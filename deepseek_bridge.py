@@ -1348,7 +1348,10 @@ async def poll_dsh_questions_loop(sender, harness_url: str):
             if not qid:
                 continue
             current.add(qid)
-            if qid in known:
+            deferred = bool(item.get("deferred"))
+            # 状态没变就不重复推；live→deferred 那一次要推，让 App 把卡片标成
+            # "本轮已中止，答复将续跑"（人走开后卡片仍留着，回来点答复走续跑）。
+            if qid in known and known[qid] is deferred:
                 continue
             try:
                 await sender({
@@ -1356,10 +1359,14 @@ async def poll_dsh_questions_loop(sender, harness_url: str):
                     "questionId": qid,
                     "sessionId": item.get("sessionId"),
                     "questions": item.get("questions") or [],
+                    "deferred": deferred,
                     "timestamp": int(time.time() * 1000)
                 })
-                known[qid] = True
-                print(f"\033[96m[选择框] 已把 DSH 的选择框转发给 App: {qid}\033[0m")
+                known[qid] = deferred
+                if deferred:
+                    print(f"\033[93m[选择框] {qid} 已转为延后待答（本轮结束，答复将走续跑）\033[0m")
+                else:
+                    print(f"\033[96m[选择框] 已把 DSH 的选择框转发给 App: {qid}\033[0m")
             except Exception:
                 pass
         for qid in list(known.keys()):
@@ -1474,7 +1481,10 @@ async def poll_dsh_approvals_loop(sender, harness_url: str):
             if not aid:
                 continue
             current.add(aid)
-            if aid in known:
+            deferred = bool(item.get("deferred"))
+            # 状态没变就不重复推；live→deferred 那一次要推，让 App 把卡片标成
+            # "本轮已中止，批准后将续跑重试该操作"。
+            if aid in known and known[aid] is deferred:
                 continue
             try:
                 await sender({
@@ -1483,10 +1493,14 @@ async def poll_dsh_approvals_loop(sender, harness_url: str):
                     "sessionId": item.get("sessionId"),
                     "tool": item.get("tool") or "tool",
                     "reason": item.get("reason") or "",
+                    "deferred": deferred,
                     "timestamp": int(time.time() * 1000)
                 })
-                known[aid] = True
-                print(f"\033[96m[审批] 已把 DSH 的授权请求转发给 App: {aid}（{item.get('tool') or 'tool'}）\033[0m")
+                known[aid] = deferred
+                if deferred:
+                    print(f"\033[93m[审批] {aid} 已转为延后待批（本轮结束，批准将走续跑）\033[0m")
+                else:
+                    print(f"\033[96m[审批] 已把 DSH 的授权请求转发给 App: {aid}（{item.get('tool') or 'tool'}）\033[0m")
             except Exception:
                 pass
         for aid in list(known.keys()):
@@ -2481,6 +2495,12 @@ async def execute_local_harness(
 running_tasks = {}
 
 async def run_polling_bridge(args, token: str, server_base: str, concurrency_limit: int):
+    """
+    HTTP 长轮询通道。
+
+    返回 True 表示"中继已经重启过，建议切回 WebSocket"（调用方据此重连长连接）；
+    返回 None/False 表示正常退出（例如 token 被注销），调用方也应当结束。
+    """
     register_url = f"{server_base}/api/agent/register"
     poll_url = f"{server_base}/api/agent/poll"
     step_url = f"{server_base}/api/agent/step"
@@ -2489,6 +2509,9 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
 
     semaphore = asyncio.Semaphore(concurrency_limit)
     loop = asyncio.get_running_loop()
+    # 记录当前中继实例的 bootId：一旦变化就说明中继重启过，
+    # 此时应当切回 WebSocket（长轮询只是兜底通道，能力更弱）。
+    seen_boot_id = None
 
     try:
         init_workspaces, init_sessions = await query_dsh_workspaces_and_sessions(args.harness_url)
@@ -2696,6 +2719,19 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             target_poll_url = f"{poll_url}?token={urllib.parse.quote(token)}&timeout=25"
             resp = await loop.run_in_executor(None, lambda: http_get_json(target_poll_url, timeout=30))
             poll_fail_count = 0
+            # 中继每次启动都会带上新的 bootId：发现变了就说明它重启过 ——
+            # 长轮询只是兜底通道（会话不同步、能力更弱），此时应当切回 WebSocket。
+            boot_id = resp.get("bootId")
+            if isinstance(boot_id, str) and boot_id:
+                if seen_boot_id is None:
+                    seen_boot_id = boot_id
+                elif boot_id != seen_boot_id:
+                    print("\033[92m[↻ 恢复] 中继已重启（bootId 变化），切回 WebSocket 长连接...\033[0m")
+                    if question_task:
+                        question_task.cancel()
+                    if approval_task:
+                        approval_task.cancel()
+                    return True
             mtype = resp.get("type")
             if mtype == "run_agent":
                 t_id = resp.get("taskId", f"task_{int(time.time()*1000)}")
@@ -3214,7 +3250,12 @@ async def run_bridge_client(args):
         except Exception as ws_err:
             ws_fail_count += 1
             print(f"\033[93m[WS 握手受阻 ({ws_err})]\033[0m 正在自动无缝切换至 HTTP 智能长轮询通道...")
-            await run_polling_bridge(args, token, server_base, concurrency_limit)
+            # 轮询通道返回 True = 中继重启过、可以切回长连接。
+            # 旧实现在这里直接 return，于是中继一重启，桥接就永久停在轮询模式
+            # （表现为会话列表不再同步、能力降级）—— 实测踩到过。
+            switched_back = await run_polling_bridge(args, token, server_base, concurrency_limit)
+            if switched_back is True and args.transport != "polling":
+                continue
             return
 
 def main():
