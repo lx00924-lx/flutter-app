@@ -3187,6 +3187,108 @@ if %errorlevel% neq 0 (
     }
   });
 
+  // ── 审批（含文件沙箱升级）→ App ────────────────────────────────
+  //
+  // 与选择框完全对称的一条链路：DSH 插件排队 → 桥接 1s 轮询 → 中继转投 App。
+  //
+  // 为什么必须补这条：审批原先只出现在"手机发起那一轮的 SSE 流"里，于是
+  // DSH 网页端自己跑的任务、以及文件沙箱越权升级（sandbox_permissions）产生的
+  // 审批，手机侧永远收不到 —— 而插件侧会一直挂着等，电脑前的人只看到卡死。
+
+  /** 挂起中的审批：approvalId → 载荷（重连补拉用，带 TTL 清理）。 */
+  const pendingApprovals = new Map<string, {
+    approvalId: string;
+    sessionId?: string;
+    tool: string;
+    reason?: string;
+    at: number;
+    token?: string;
+    userId?: string;
+  }>();
+  /** 审批缓存有效期：比 DSH 侧 30 分钟超时略长一点即可。 */
+  const PENDING_APPROVAL_TTL_MS = 35 * 60 * 1000;
+
+  const prunePendingApprovals = () => {
+    const now = Date.now();
+    for (const [id, item] of pendingApprovals) {
+      if (now - item.at > PENDING_APPROVAL_TTL_MS) pendingApprovals.delete(id);
+    }
+  };
+
+  /** 把一个挂起的审批投递给该用户的所有在线端，并缓存供补拉。 */
+  const deliverApprovalToUser = async (aToken: string, approval: {
+    approvalId: string;
+    sessionId?: string;
+    tool?: string;
+    reason?: string;
+  }) => {
+    prunePendingApprovals();
+    const agent = connectedAgents.get(aToken);
+    let userId = "";
+    if (agent?.activeUserSessions && agent.activeUserSessions.size > 0) {
+      userId = Array.from(agent.activeUserSessions.keys())[0] || "";
+    }
+    if (!userId) {
+      try {
+        userId = (await resolveTokenOwnerUserId(aToken)) || "";
+      } catch {
+        userId = "";
+      }
+    }
+    const payload = {
+      approvalId: approval.approvalId,
+      sessionId: approval.sessionId || "",
+      tool: approval.tool || "tool",
+      reason: approval.reason || "",
+      at: Date.now(),
+    };
+    pendingApprovals.set(approval.approvalId, { ...payload, token: aToken, userId: userId || undefined });
+    // App 的 ChatProvider 已经在处理 agent_waiting_approval（原先走 socket.io，
+    // 推送通道的包装层会把它同时复制到 /ws/app），这里直接复用同一个事件名。
+    if (userId) io.to(`user_${userId}`).emit("agent_waiting_approval", { approval: payload });
+    else io.emit("agent_waiting_approval", { approval: payload });
+    for (const gen of activeGenerations.values()) {
+      if (userId && gen.userId !== userId) continue;
+      generationEvents.emit(`approval_${gen.assistantMessageId}`, { approval: payload });
+    }
+  };
+
+  // 桥接轮询通道的审批事件入口（WS 通道见 agent hub 的 approval_requested 分支）
+  app.post("/api/agent/approval-event", (req, res) => {
+    try {
+      const { token, type, approvalId, sessionId, tool, reason } = req.body || {};
+      const aid = (approvalId || "").toString().trim();
+      if (!aid) return res.status(400).json({ error: "缺少 approvalId" });
+      const aToken = (token || "").toString().trim();
+      if (type === "approval_closed") {
+        pendingApprovals.delete(aid);
+        io.emit("agent_approval_resolved", { approvalId: aid, outcome: "resolved" });
+        return res.json({ success: true });
+      }
+      void deliverApprovalToUser(aToken, { approvalId: aid, sessionId, tool, reason });
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // App 启动/重连时补拉：断线期间挂起的审批不会丢
+  app.get("/api/agent/pending-approvals", (req, res) => {
+    try {
+      prunePendingApprovals();
+      const userId = ((req.query.userId as string) || "").trim();
+      const token = ((req.query.token as string) || "").trim();
+      const approvals = [...pendingApprovals.values()].filter((item) => {
+        if (token && item.token && item.token !== token) return false;
+        if (userId && item.userId && item.userId !== userId) return false;
+        return true;
+      });
+      res.json({ success: true, approvals });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // User decision for approval (allow / deny)
   app.post("/api/agent/approve", (req, res) => {
     try {
@@ -3216,6 +3318,16 @@ if %errorlevel% neq 0 (
       } else {
         if (!agent.queuedTasks) agent.queuedTasks = [];
         agent.queuedTasks.push(approvePayload);
+      }
+
+      // 已裁决：从补拉缓存里去掉，并广播给各端收起卡片
+      // （桥接侧随后也会报 approval_closed，这里先一步，避免另一端还挂着旧卡片）
+      if (approvalId) {
+        pendingApprovals.delete(approvalId.toString());
+        io.emit("agent_approval_resolved", {
+          approvalId: approvalId.toString(),
+          outcome: (action || "allow") === "allow" ? "allowed-once" : "rejected",
+        });
       }
 
       res.json({ success: true });
@@ -3959,8 +4071,13 @@ if %errorlevel% neq 0 (
           clearInterval(pingTimer);
           return;
         }
-        // 45 秒没收到任何消息就认为这条连接已死（手机切网/休眠时很常见）
-        if (conn && Date.now() - conn.lastPing > 45000) {
+        // 空闲判定：180 秒没收到任何消息（含协议层 pong）才认为这条连接已死。
+        //
+        // 为什么从 45 秒放宽到 180 秒：手机切后台后，系统会把 Dart 定时器冻结
+        // （Doze / 应用待机），几十秒内一条消息都发不出来 —— 服务端却据此判死并
+        // close(4003)，用户回到 App 就看到"连接中断"。而 TCP 连接本身往往还活着，
+        // 真正的死连接由下面的 pong 超时兜底。
+        if (conn && Date.now() - conn.lastPing > 180000) {
           try { clientWs.close(4003, "idle timeout"); } catch {}
           clearInterval(pingTimer);
           return;
@@ -3970,6 +4087,11 @@ if %errorlevel% neq 0 (
         } catch {}
       }, 20000);
       clientWs.on("close", () => clearInterval(pingTimer));
+      // 协议层 pong 同样算"活着"：dart:io 的 WebSocket 会自动回 pong，
+      // 即使 Dart 侧定时器被系统冻结也能证明链路仍然可用。
+      clientWs.on("pong", () => {
+        if (conn) conn.lastPing = Date.now();
+      });
     } catch (err) {
       console.error("[App WS] 连接处理异常:", err);
       try { clientWs.close(1011, "server error"); } catch {}
@@ -4085,6 +4207,22 @@ if %errorlevel% neq 0 (
             const qid = String(msg.questionId || "");
             if (qid) pendingQuestions.delete(qid);
             io.emit("agent_question_resolved", { questionId: qid, reason: msg.reason || "closed" });
+          } else if (msg.type === "approval_requested") {
+            // DSH 挂起了授权请求（工具审批 / 文件沙箱越权升级）→ 转给 App 卡片。
+            // 同样**不依赖 taskId**：网页端发起的一轮、或后台升级产生的审批都会走到这里。
+            const aToken = (msg.token || token || "").trim();
+            console.log(`[Agent Hub] Agent waiting approval ${msg.approvalId} (tool ${msg.tool || '-'})`);
+            void deliverApprovalToUser(aToken, {
+              approvalId: String(msg.approvalId || ""),
+              sessionId: msg.sessionId,
+              tool: msg.tool,
+              reason: msg.reason,
+            });
+          } else if (msg.type === "approval_closed") {
+            // 审批已被裁决（App 上、或电脑端网页上）→ 各端收起卡片
+            const aid = String(msg.approvalId || "");
+            if (aid) pendingApprovals.delete(aid);
+            io.emit("agent_approval_resolved", { approvalId: aid, outcome: "resolved" });
           } else if (msg.type === "sync_sessions" || msg.type === "sessions_result") {
             agentInfo.workspaces = msg.workspaces || [];
             agentInfo.sessions = msg.sessions || [];

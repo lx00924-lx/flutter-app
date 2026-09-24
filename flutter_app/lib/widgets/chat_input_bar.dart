@@ -1165,6 +1165,9 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   final approval = chat.pendingApproval;
                   if (approval == null) return const SizedBox.shrink();
                   final tool = approval['tool']?.toString() ?? '敏感操作';
+                  // 文件沙箱越权升级这类审批，reason 才是"为什么要放行"的关键信息
+                  // （例如"写入工作区之外的路径"），只给工具名等于让用户盲签。
+                  final reason = approval['reason']?.toString().trim() ?? '';
                   return Container(
                     margin: const EdgeInsets.only(bottom: 8),
                     padding: const EdgeInsets.all(10),
@@ -1193,6 +1196,17 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                           '本地 Agent 想执行：$tool',
                           style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
                         ),
+                        if (reason.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            '原因：$reason',
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              height: 1.35,
+                              color: isDark ? Colors.white70 : Colors.black54,
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 8),
                         Row(
                           children: [

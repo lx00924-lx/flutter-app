@@ -1377,6 +1377,134 @@ async def poll_dsh_questions_loop(sender, harness_url: str):
                 pass
         await asyncio.sleep(1)
 
+async def fetch_pending_approvals(harness_url: str):
+    """
+    读取本地 DSH 里挂起的审批 (GET /v1/agent/approvals/pending)。
+
+    返回 list（可能为空）；**返回 None 表示插件不支持这个接口或没起来** ——
+    调用方据此区分"App 侧能不能接管审批"与"当前没有待审批"。
+    """
+    harness_base = harness_url.rstrip("/")
+    loop = asyncio.get_running_loop()
+    candidates = [f"{harness_base}/v1/agent/approvals/pending"]
+    if "3080" in harness_base:
+        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/agent/approvals/pending")
+
+    def do_get(url: str):
+        req = urllib.request.Request(url, headers=dsh_headers(url), method="GET")
+        with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=4) as resp:
+            return resp.read().decode("utf-8")
+
+    for url in candidates:
+        try:
+            raw = await loop.run_in_executor(None, lambda u=url: do_get(u))
+            data = json.loads(raw)
+            items = data.get("approvals")
+            if isinstance(items, list):
+                return items
+        except Exception:
+            continue
+    return None
+
+async def approve_dsh_approval(harness_url: str, approval_id: str, action: str = "allow"):
+    """
+    按 approvalId 直接答复一个审批 (POST /v1/agent/approve)。
+
+    为什么需要它（而不是只走任务注册表）：审批并不一定发生在"App 发起的那一轮"里 ——
+    DSH 网页端自己跑的任务、文件沙箱越权升级（sandbox_permissions）都会产生审批，
+    这些审批没有 taskId，注册表里查不到，旧逻辑直接静默丢弃，用户只看到电脑端一直卡着。
+    """
+    if not approval_id:
+        return False, "缺少 approvalId"
+    harness_base = harness_url.rstrip("/")
+    loop = asyncio.get_running_loop()
+    body = {"approvalId": approval_id, "action": action or "allow"}
+    candidates = [f"{harness_base}/v1/agent/approve"]
+    if "3080" in harness_base:
+        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/agent/approve")
+
+    last_error = None
+    for url in candidates:
+        def do_post(target: str = url):
+            req = urllib.request.Request(
+                target,
+                data=json.dumps(body).encode("utf-8"),
+                headers=dsh_headers(target),
+                method="POST"
+            )
+            with GLOBAL_HTTP_CLIENT.direct_opener.open(req, timeout=5) as resp:
+                return resp.read().decode("utf-8")
+
+        try:
+            raw = await loop.run_in_executor(None, do_post)
+            return True, raw
+        except Exception as e:
+            last_error = e
+            continue
+    return False, f"提交审批决定失败: {last_error if last_error is not None else '未知错误'}"
+
+async def poll_dsh_approvals_loop(sender, harness_url: str):
+    """
+    每 1s 拉一次 DSH 里挂起的审批，经 sender 转发给中继 → App 卡片。
+
+    与 poll_dsh_questions_loop 完全对称（sender 的两种形态、心跳语义都相同）。
+    存在的意义：审批原先只在"手机发起那一轮的 SSE 流"里出现，换个场景（网页端跑的任务、
+    文件沙箱升级）手机永远收不到，而插件侧还会一直挂着等 —— 两边都卡住。
+    """
+    known: dict = {}
+    not_ready_warned = False
+    print("\033[96m[审批] 轮询已启动：DSH 的授权请求（含文件沙箱升级）会经中继转发到 App\033[0m")
+    while True:
+        try:
+            items = await fetch_pending_approvals(harness_url)
+        except Exception:
+            items = None
+        if items is None:
+            if not not_ready_warned:
+                print("\033[93m[审批] 本地 DSH 还没有 /v1/agent/approvals 接口（重启 DSH 让插件生效后即可转发）\033[0m")
+                not_ready_warned = True
+            await asyncio.sleep(3)
+            continue
+        not_ready_warned = False
+        current = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            aid = str(item.get("approvalId") or "")
+            if not aid:
+                continue
+            current.add(aid)
+            if aid in known:
+                continue
+            try:
+                await sender({
+                    "type": "approval_requested",
+                    "approvalId": aid,
+                    "sessionId": item.get("sessionId"),
+                    "tool": item.get("tool") or "tool",
+                    "reason": item.get("reason") or "",
+                    "timestamp": int(time.time() * 1000)
+                })
+                known[aid] = True
+                print(f"\033[96m[审批] 已把 DSH 的授权请求转发给 App: {aid}（{item.get('tool') or 'tool'}）\033[0m")
+            except Exception:
+                pass
+        for aid in list(known.keys()):
+            if aid in current:
+                continue
+            known.pop(aid, None)
+            try:
+                await sender({
+                    "type": "approval_closed",
+                    "approvalId": aid,
+                    "reason": "resolved",
+                    "timestamp": int(time.time() * 1000)
+                })
+            except Exception:
+                pass
+        await asyncio.sleep(1)
+
+
 async def rename_dsh_session(harness_url: str, session_id: str, title: str):
     """重命名本地 DSH 会话 (PATCH /v1/sessions/:id)"""
     if not session_id or not title:
@@ -2533,6 +2661,15 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             lambda: http_post_json(f"{server_base}/api/agent/waiting-question", body, timeout=5)
         )
 
+    # 审批转发：同一个通道，只是接口/事件名不同（见 poll_dsh_approvals_loop）
+    async def http_approval_sender(payload: dict):
+        body = dict(payload)
+        body["token"] = token
+        await loop.run_in_executor(
+            None,
+            lambda: http_post_json(f"{server_base}/api/agent/approval-event", body, timeout=5)
+        )
+
     # 注意：这个作用域里没有 harness_url 这个名字（只有 args.harness_url）。
     # 之前这里写成 harness_url → NameError → 一旦从 WS 回退到轮询通道，桥接进程
     # 直接崩掉、App 上显示"桥接离线"。现在取值改对，并且整段用 try 兜住：
@@ -2544,6 +2681,14 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
     except Exception as q_err:
         print(f"\033[93m[选择框] 轮询任务启动失败（已忽略，不影响主流程）: {q_err}\033[0m")
         question_task = None
+
+    try:
+        approval_task = asyncio.create_task(
+            poll_dsh_approvals_loop(http_approval_sender, args.harness_url)
+        )
+    except Exception as a_err:
+        print(f"\033[93m[审批] 轮询任务启动失败（已忽略，不影响主流程）: {a_err}\033[0m")
+        approval_task = None
 
     poll_fail_count = 0
     while True:
@@ -2778,6 +2923,15 @@ async def run_bridge_client(args):
 
                 question_task = asyncio.create_task(poll_dsh_questions_loop(ws_question_sender, args.harness_url))
 
+                # 审批转发：与选择框同构。DSH 的授权请求（含文件沙箱升级）由插件
+                # 排队，这里 1s 轮询取走推给 App —— 不再依赖"某一轮任务流还连着"。
+                async def ws_approval_sender(payload: dict):
+                    payload = dict(payload)
+                    payload["token"] = token
+                    await ws.send(json.dumps(payload))
+
+                approval_task = asyncio.create_task(poll_dsh_approvals_loop(ws_approval_sender, args.harness_url))
+
                 async def _run_ws_task(msg):
                     task_id = msg.get("taskId")
                     prompt = msg.get("prompt", "")
@@ -2923,6 +3077,15 @@ async def run_bridge_client(args):
                             if reg_info:
                                 await approve_dsh_session(reg_info["harness_url"], reg_info["session_id"], a_appr_id, a_act)
                                 print(f"\033[92m[审批裁决] 已提交审批 {a_appr_id} -> {a_act}\033[0m")
+                            elif a_appr_id:
+                                # 不在任何已知任务里（DSH 网页端自己跑的任务、文件沙箱升级审批…）：
+                                # 直接按 approvalId 走插件接口，不依赖 taskId。旧逻辑在这里
+                                # 静默丢弃，用户点了"允许"却什么都没发生。
+                                ap_ok, ap_raw = await approve_dsh_approval(args.harness_url, a_appr_id, a_act)
+                                if ap_ok:
+                                    print(f"\033[92m[审批裁决] 已提交审批(独立通道) {a_appr_id} -> {a_act}\033[0m")
+                                else:
+                                    print(f"\033[91m[审批裁决] 提交失败: {ap_raw}\033[0m")
                             continue
 
                         if mtype in ("answer_question", "decline_question"):

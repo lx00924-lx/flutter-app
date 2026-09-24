@@ -22,6 +22,7 @@
  *   POST   /v1/agent/approve                答复审批（`{approvalId, action}`）
  *   GET    /v1/plugins                      已装插件清单（走 profile 判定，复用「用户插件」逻辑）
  *   GET    /v1/user-questions/pending       挂起中的选择框（桥接 1s 轮询，用于转发给 App）
+ *   GET    /v1/agent/approvals/pending      挂起中的审批（桥接 1s 轮询，含 reason；与选择框同机制）
  *   POST   /v1/user-questions/answer        答复选择框（`{questionId, answers}`）
  *   POST   /v1/user-questions/decline       放弃在 App 上回答（`{questionId}`）→ 交回电脑端界面
  *
@@ -55,12 +56,28 @@ const TURN_TIMEOUT_MS = 600_000
 /**
  * 选择框等待 App 答复的上限：超过就交回电脑端界面。
  *
- * 为什么不是无限等：手机可能锁屏/断网，若一直挂着，电脑前的人会看到
- * 一个永远不出现的弹窗（DSH 侧整轮卡死）。180s 是"手机来得及掏出来"的量级。
+ * 为什么从 180 秒放宽到 30 分钟：用户明确要求"卡片不要因为超时而消失"——
+ * 手机可能锁屏、开会、隔一阵才看，180 秒一到插件就代为放弃，App 上的卡片随即
+ * 收起，用户回来只看到"已经处理过了"。30 分钟足够覆盖真实使用间隔；真超时后
+ * 仍然交回电脑端界面，不会把整轮对话永久挂死。
  */
-const QUESTION_TIMEOUT_MS = 180_000
+const QUESTION_TIMEOUT_MS = 1_800_000
+/**
+ * 审批等待 App 决定的上限（30 分钟，理由同上）。
+ *
+ * 单独一个常量而不是复用 TURN_TIMEOUT_MS：那个还兼作"单轮对话总时长"和
+ * 会话读写 signal 的上限，把它一起抬到 30 分钟会让跑飞的轮次也拖住半小时。
+ */
+const APPROVAL_TIMEOUT_MS = 1_800_000
 /** 桥接轮询心跳窗口：这段时间内来轮询过，才认为「App 侧在线、可以接管」。 */
 const QUESTION_ARM_MS = 15_000
+/**
+ * 审批的接管窗口（同上，但审批由桥接轮询 `/v1/agent/approvals/pending` 维持心跳）。
+ *
+ * 为什么要判断：审批是无条件 claim 的话，手机不在线时两边都看不到（插件挂 30 分钟
+ * 才超时，电脑前的人以为死机了）。只有 App 通路真的在轮询时才接管。
+ */
+const APPROVAL_ARM_MS = 15_000
 /** 会话读写用的共享取消信号：dsh 的服务要求显式传入 signal。 */
 const turnSignal = () => AbortSignal.timeout(TURN_TIMEOUT_MS)
 
@@ -119,6 +136,8 @@ export function apply(ctx) {
   const pendingQuestions = new Map()
   /** 桥接最近一次来轮询选择框的时间戳（用于判定 App 侧是否在线）。 */
   let lastQuestionPollAt = 0
+  /** 桥接最近一次来轮询审批的时间戳（同上，审批与选择框各自独立计时）。 */
+  let lastApprovalPollAt = 0
 
   /**
    * 按 sessionId 拿到 **会话对象**（不是 API 层的 sessionId 字符串）。
@@ -621,21 +640,32 @@ export function apply(ctx) {
   //#region 审批桥
 
   // 挂上 answerer：App 没答复就一直挂着（dsh 侧等待），答复后返回结果。
+  //
+  // 只在桥接最近 APPROVAL_ARM_MS 内来轮询过时才接管（App 通路在线）；否则原样
+  // next() 交给电脑端网页弹窗 —— 与选择框同一套"谁在线谁接手"的规矩。
+  //
+  // 为什么以前"文件沙箱审批到不了 App"：审批原先只走任务 SSE 流（waiting_approval），
+  // 也就是只有"手机发起、且流还连着"的那一轮才可能被看到；DSH 网页端自己跑的任务、
+  // 或沙箱越权升级（sandbox_permissions）产生的审批，手机侧永远收不到。现在审批和
+  // 选择框一样由桥接 1 秒轮询取走，跟具体哪一轮、哪个流都无关。
   ctx.on('approval/request', (request, next) => {
     const sessionId = request?.agent?.session?.id
     if (typeof sessionId !== 'string') return next()
+    const armed = Date.now() - lastApprovalPollAt <= APPROVAL_ARM_MS
+    if (!armed) return next()
     const approvalId = typeof request?.id === 'string' ? request.id : randomUUID()
     const tool = typeof request?.toolName === 'string' ? request.toolName : 'tool'
+    const reason = typeof request?.reason === 'string' ? request.reason : ''
     return new Promise((resolve) => {
-      const entry = { sessionId, tool, settle: resolve }
+      const entry = { sessionId, tool, reason, settle: resolve, createdAt: Date.now() }
       pendingApprovals.set(approvalId, entry)
-      ctx.logger?.info?.(`[app-bridge] 审批 ${approvalId} 等待 App 决定（${tool}）`)
+      ctx.logger?.info?.(`[app-bridge] 审批 ${approvalId} 等待 App 决定（${tool}${reason.length > 0 ? `｜${reason}` : ''}）`)
       const timer = setTimeout(() => {
         if (pendingApprovals.delete(approvalId)) {
           ctx.logger?.warn?.(`[app-bridge] 审批 ${approvalId} 超时未答复，按拒绝处理`)
           resolve('rejected')
         }
-      }, TURN_TIMEOUT_MS)
+      }, APPROVAL_TIMEOUT_MS)
       entry.timer = timer
     })
   })
@@ -758,6 +788,26 @@ export function apply(ctx) {
         sessionId: entry.sessionId,
         createdAt: entry.createdAt,
         questions: entry.questions,
+      })),
+    }
+  }
+
+  /**
+   * 待审批清单（桥接脚本轮询用，与选择框同一套机制）。
+   *
+   * 带 `reason`：文件沙箱升级这类审批的理由（"写入工作区之外"等）是用户判断
+   * 该不该放行的关键信息，只给工具名等于让人盲签。这次轮询同时充当
+   * 「App 侧在线」的心跳（见 APPROVAL_ARM_MS）。
+   */
+  function approvalsPayload() {
+    return {
+      status: 'success',
+      approvals: [...pendingApprovals.entries()].map(([approvalId, entry]) => ({
+        approvalId,
+        sessionId: entry.sessionId,
+        tool: entry.tool,
+        reason: entry.reason ?? '',
+        createdAt: entry.createdAt,
       })),
     }
   }
@@ -918,6 +968,14 @@ export function apply(ctx) {
     if (pathname === '/v1/user-questions/pending' && method === 'GET') {
       lastQuestionPollAt = Date.now()
       return json(200, questionsPayload())
+    }
+
+    // 审批待办清单：与选择框完全对称的一条链路，桥接 1s 轮询一次。
+    // 有了它，审批不再依赖"手机发起的那一轮 SSE 流还连着" ——
+    // DSH 网页端跑的任务、文件沙箱越权升级产生的审批都能推到 App 卡片上。
+    if (pathname === '/v1/agent/approvals/pending' && method === 'GET') {
+      lastApprovalPollAt = Date.now()
+      return json(200, approvalsPayload())
     }
 
     if (pathname === '/v1/user-questions/answer' && method === 'POST') {

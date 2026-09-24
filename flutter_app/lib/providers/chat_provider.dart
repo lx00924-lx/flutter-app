@@ -115,11 +115,11 @@ class ChatProvider extends ChangeNotifier {
     // 系统通知：App 不在前台时这是唯一能提醒到的渠道
     NotificationService.instance.showApprovalRequest(approvalId: approvalId, tool: tool);
     // 应用内弹窗：无论在哪个页面都能跳出来
-    _presentApprovalDialog(tool);
+    _presentApprovalDialog(tool, approval['reason']?.toString().trim() ?? '');
   }
 
   /// 用根导航器弹授权对话框（与"被顶下线"弹窗同一套机制，跨页面可见）
-  void _presentApprovalDialog(String tool) {
+  void _presentApprovalDialog(String tool, [String reason = '']) {
     if (_approvalDialogOpen) return;
     final ctx = rootNavigatorKey.currentContext;
     if (ctx == null) {
@@ -140,7 +140,8 @@ class ChatProvider extends ChangeNotifier {
           ],
         ),
         content: Text(
-          '本地 Agent 想执行：$tool\n\n'
+          '本地 Agent 想执行：$tool\n'
+          '${reason.isEmpty ? '' : '原因：$reason\n'}\n'
           '允许只对**这一次**操作生效，不会改变你选择的权限预设。',
           style: const TextStyle(fontSize: 13),
         ),
@@ -178,6 +179,8 @@ class ChatProvider extends ChangeNotifier {
     settingsProvider.chatPushHandler = _handlePushEvent;
     // 启动时补一次挂起的选择框（可能是在 App 没开/断线时提出来的）
     unawaited(refreshPendingQuestions());
+    // 审批同理：电脑端后台触发/网页端发起的审批也要能补出来
+    unawaited(refreshPendingApprovals());
   }
 
   /// 来自推送长连接的事件（消息 / 审批）
@@ -605,6 +608,31 @@ class ChatProvider extends ChangeNotifier {
     _questionCustoms.clear();
     NotificationService.instance.cancelQuestionRequest();
     notifyListeners();
+  }
+
+  /// 补拉服务端挂起的审批：与选择框同一套对账逻辑。
+  ///
+  /// 审批以前只靠"手机发起那一轮的 SSE 流"推送，DSH 网页端跑的任务、文件沙箱
+  /// 越权升级产生的审批在 App 上永远看不到。现在服务端存了一份，App 启动、
+  /// 重连、回到前台都补拉一次。
+  Future<void> refreshPendingApprovals() async {
+    if (_pendingApproval != null) return;
+    try {
+      final items = await SyncService.instance.fetchPendingApprovals(
+        token: settingsProvider.settings.harnessToken,
+        userId: settingsProvider.syncUserId,
+      );
+      if (items.isEmpty || _pendingApproval != null) return;
+      final first = items.first;
+      _setPendingApproval({
+        'approvalId': first['approvalId']?.toString() ?? '',
+        'sessionId': first['sessionId']?.toString() ?? '',
+        'tool': first['tool']?.toString() ?? '敏感操作',
+        'reason': first['reason']?.toString() ?? '',
+      });
+    } catch (e) {
+      debugPrint('[ChatProvider] 补拉审批失败: $e');
+    }
   }
 
   /// 补拉服务端挂起的选择框：App 启动、重连、推送通道刚连上时都要对一次账，

@@ -1141,6 +1141,35 @@ class SyncService {
     return const [];
   }
 
+  /// 补拉挂起中的审批（含文件沙箱越权升级这类不依赖任务的授权请求）。
+  ///
+  /// 与选择框同理：审批原先只在"手机发起那一轮的 SSE 流"里出现，断线、切后台、
+  /// 或审批由电脑网页端/后台触发时就永远看不到。服务端按 approvalId 存了一份，
+  /// App 启动、重连、回到前台都补拉一次。
+  Future<List<Map<String, dynamic>>> fetchPendingApprovals({
+    String token = '',
+    String userId = '',
+  }) async {
+    try {
+      final resp = await _dio.get(
+        '$serverBaseUrl/api/agent/pending-approvals',
+        queryParameters: {
+          if (token.trim().isNotEmpty) 'token': token.trim(),
+          if (userId.trim().isNotEmpty) 'userId': userId.trim(),
+        },
+      );
+      if (resp.statusCode == 200 && resp.data is Map) {
+        final list = (resp.data as Map)['approvals'];
+        if (list is List) {
+          return list.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
+        }
+      }
+    } catch (e) {
+      debugPrint('[SyncService] fetchPendingApprovals error: $e');
+    }
+    return const [];
+  }
+
   /// 答复一个选择框；decline=true 表示「在电脑上回答」（交回电脑端网页弹窗）。
   Future<bool> answerAgentQuestion({
     required String token,
