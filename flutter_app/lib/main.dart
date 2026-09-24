@@ -112,12 +112,18 @@ class _TrayStatusBinderState extends State<TrayStatusBinder>
     super.dispose();
   }
 
-  /// 窗口回到前台：未读清掉，托盘图标跟着回到「空闲」
+  /// 窗口回到前台：未读清掉，托盘图标跟着回到「空闲」；同时补拉一次挂起状态。
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && mounted) {
-      context.read<ChatProvider>().clearAgentUnread();
-    }
+    if (state != AppLifecycleState.resumed || !mounted) return;
+    final chat = context.read<ChatProvider>();
+    chat.clearAgentUnread();
+    // 后台期间系统会冻结 Dart 定时器、长连接也可能已被回收，回到前台立刻自检：
+    // 补拉挂起的选择框（以及审批），并重新确认 Agent 在线状态 ——
+    // 否则用户看到的是"回来还是断线样"，要等下一轮 4 秒轮询才恢复。
+    unawaited(chat.refreshPendingQuestions());
+    unawaited(chat.refreshPendingApprovals());
+    unawaited(context.read<SettingsProvider>().refreshAgentStatus());
   }
 
   @override

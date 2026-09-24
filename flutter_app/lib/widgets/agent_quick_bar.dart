@@ -25,6 +25,32 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
   bool _isCreatingSession = false;
   bool _requestedCatalog = false;
 
+  /// 打开下拉菜单前，输入焦点在哪个节点上（null = 当时输入法没开）。
+  ///
+  /// 为什么需要：PopupMenuButton 关闭时 Flutter 会把焦点还给"上一个焦点节点"，
+  /// 于是点一下模型 / 思考深度 / 权限这些选项，软键盘就被顶起来 —— 而用户可能只是
+  /// 顺手改个档位，根本没打算打字。这里按打开前的真实状态恢复：
+  /// 原本没开键盘就收回焦点，原本开着就还给原来那个输入框，绝不擅自改变状态。
+  FocusNode? _imeNodeBeforeMenu;
+
+  void _rememberImeState() {
+    final focus = FocusManager.instance.primaryFocus;
+    final isInput = focus != null && focus != FocusManager.instance.rootScope && focus.hasFocus;
+    _imeNodeBeforeMenu = isInput ? focus : null;
+  }
+
+  void _restoreImeState() {
+    final node = _imeNodeBeforeMenu;
+    // 等菜单路由彻底关闭、焦点完成一轮回收之后再恢复，否则会被随后的焦点恢复覆盖
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (node != null) {
+        if (!node.hasFocus) node.requestFocus();
+      } else {
+        FocusManager.instance.primaryFocus?.unfocus();
+      }
+    });
+  }
+
   static const Map<String, String> _reasoningLabels = {
     'off': '关闭思考',
     'low': '思考·低',
@@ -437,44 +463,54 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
     required bool isDark,
     required Map<String, String> items,
     required void Function(String) onSelected,
-  }) {    return PopupMenuButton<String>(
-      tooltip: tooltip,
-      position: PopupMenuPosition.over,
-      onSelected: onSelected,
-      itemBuilder: (ctx) => items.entries
-          .map(
-            (e) => PopupMenuItem<String>(
-              value: e.key,
-              height: 38,
-              child: Text(e.value, style: const TextStyle(fontSize: 13)),
-            ),
-          )
-          .toList(),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-        decoration: BoxDecoration(
-          color: isDark ? const Color(0xFF1E293B) : Colors.white,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 14, color: const Color(0xFF0284C7)),
-            const SizedBox(width: 4),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 108),
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+  }) {
+    // Listener 只旁听指针按下（不消费事件），在菜单弹出、焦点被改掉之前先记下
+    // 输入法状态；菜单关闭后再按原状态恢复。
+    return Listener(
+      onPointerDown: (_) => _rememberImeState(),
+      child: PopupMenuButton<String>(
+        tooltip: tooltip,
+        position: PopupMenuPosition.over,
+        onSelected: (value) {
+          _restoreImeState();
+          onSelected(value);
+        },
+        onCanceled: _restoreImeState,
+        itemBuilder: (ctx) => items.entries
+            .map(
+              (e) => PopupMenuItem<String>(
+                value: e.key,
+                height: 38,
+                child: Text(e.value, style: const TextStyle(fontSize: 13)),
               ),
+            )
+            .toList(),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF1E293B) : Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
             ),
-            const Icon(Icons.arrow_drop_down, size: 16),
-          ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 14, color: const Color(0xFF0284C7)),
+              const SizedBox(width: 4),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 108),
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+                ),
+              ),
+              const Icon(Icons.arrow_drop_down, size: 16),
+            ],
+          ),
         ),
       ),
     );

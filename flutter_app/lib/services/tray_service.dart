@@ -76,7 +76,8 @@ class TrayService with TrayListener, WindowListener {
         Menu(
           items: [
             MenuItem(key: 'show', label: '显示主窗口'),
-            MenuItem(key: 'hide', label: '收进托盘'),
+            // 「收进托盘」已按用户要求移除：窗口本来就靠关闭按钮收进托盘，
+            // 菜单里再放一项等于让人在托盘菜单里把已经看不见的窗口再藏一次。
             MenuItem.separator(),
             MenuItem(key: 'exit', label: '退出 LxAI'),
           ],
@@ -186,8 +187,6 @@ class TrayService with TrayListener, WindowListener {
     switch (menuItem.key) {
       case 'show':
         showWindow();
-      case 'hide':
-        hideToTray();
       case 'exit':
         exitApp();
       default:

@@ -7,8 +7,10 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import io.flutter.embedding.engine.FlutterEngine
@@ -75,14 +77,73 @@ class LxForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /** CPU 部分唤醒锁：Doze/待机时保证 Dart 定时器仍有机会跑（否则长连接会被判死）。 */
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    /** WiFi 高性能锁：避免息屏后 WiFi 进入省电模式导致长连接静默掉线。 */
+    private var wifiLock: WifiManager.WifiLock? = null
+
     override fun onCreate() {
         super.onCreate()
         createChannel()
     }
 
+    /**
+     * 获取保活用的两把锁。
+     *
+     * 只靠前台服务是不够的：前台服务保住了进程优先级，但 CPU 仍可能进入 Doze、
+     * WiFi 仍可能进省电模式 —— 表现就是"切后台几分钟后连接被服务端判死"，用户回到
+     * App 看到"连接中断"。两把锁都是引用计数式的，重复调用安全（幂等）。
+     * WAKE_LOCK 权限已在 AndroidManifest 声明；拿不到锁时只记日志，不影响服务运行。
+     */
+    private fun acquireLocks() {
+        try {
+            if (wakeLock == null) {
+                val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$packageName:keep-alive")
+                wakeLock?.setReferenceCounted(false)
+            }
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire()
+                Log.i(TAG, "已获取 PARTIAL_WAKE_LOCK")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "获取唤醒锁失败（忽略）: ${e.localizedMessage}")
+        }
+        try {
+            if (wifiLock == null) {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                wifiLock = wm?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "$packageName:wifi-keep-alive")
+                wifiLock?.setReferenceCounted(false)
+            }
+            if (wifiLock?.isHeld == false) {
+                wifiLock?.acquire()
+                Log.i(TAG, "已获取 WifiLock(HIGH_PERF)")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "获取 WiFi 锁失败（忽略）: ${e.localizedMessage}")
+        }
+    }
+
+    private fun releaseLocks() {
+        try {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "释放唤醒锁失败: ${e.localizedMessage}")
+        }
+        try {
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "释放 WiFi 锁失败: ${e.localizedMessage}")
+        }
+        wakeLock = null
+        wifiLock = null
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFICATION_ID, buildNotification())
         isRunning = true
+        acquireLocks()
 
         // 若 FlutterEngine 已被系统回收，这里按需重建；
         // 引擎存活与否由 FlutterEngineCache 管理（MainActivity.provideFlutterEngine 放入）
@@ -97,8 +158,20 @@ class LxForegroundService : Service() {
         return START_STICKY
     }
 
+    /**
+     * 用户从最近任务里划掉 App：服务本身因 stopWithTask="false" 继续存活，
+     * 这里再补一次前台通知与保活锁（部分 ROM 会在这时回收资源）。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.i(TAG, "任务被划掉，常驻服务继续运行")
+        startForeground(NOTIFICATION_ID, buildNotification())
+        acquireLocks()
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
         isRunning = false
+        releaseLocks()
         Log.i(TAG, "常驻服务已停止")
         super.onDestroy()
     }

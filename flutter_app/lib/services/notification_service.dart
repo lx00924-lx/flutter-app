@@ -110,8 +110,10 @@ class NotificationService {
           importance: Importance.max,
           priority: Priority.high,
           category: AndroidNotificationCategory.reminder,
-          autoCancel: true,
-          ongoing: false,
+          // 不可划掉、点了不自动消失：审批是"电脑端卡住等你"的状态，
+          // 误划掉通知会让用户以为事情已经处理完了（用户明确要求保护）。
+          autoCancel: false,
+          ongoing: true,
         ),
       );
       await _plugin.show(
@@ -154,8 +156,9 @@ class NotificationService {
           importance: Importance.max,
           priority: Priority.high,
           category: AndroidNotificationCategory.reminder,
-          autoCancel: true,
-          ongoing: false,
+          // 同上：选择框通知也不允许划掉 —— 划掉即"看不见"，而电脑端还在等答案
+          autoCancel: false,
+          ongoing: true,
         ),
       );
       await _plugin.show(

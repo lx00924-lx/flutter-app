@@ -834,6 +834,29 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         ),
                       ),
                     ],
+                    // 启动时自动拉起桥接（仅电脑端有意义：手机端没有本机脚本可跑）
+                    if (Platform.isWindows || Platform.isMacOS || Platform.isLinux) ...[
+                      const SizedBox(height: 4),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('启动应用时自动启动桥接', style: TextStyle(fontSize: 14)),
+                        subtitle: Text(
+                          s.autoStartBridgeOnLaunch
+                              ? '已开启：LxAI 启动并登录后自动在后台拉起桥接，无需手动点「启动」'
+                              : '已关闭：需要每次手动点上面的「启动」（或由另一台设备下发启动指令）',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                        value: s.autoStartBridgeOnLaunch,
+                        onChanged: (val) {
+                          s.autoStartBridgeOnLaunch = val;
+                          sp.updateSettings(s);
+                          _snack(
+                            val ? '已开启：下次启动 LxAI 会自动拉起桥接' : '已关闭自动启动桥接',
+                            isError: false,
+                          );
+                        },
+                      ),
+                    ],
                     const SizedBox(height: 16),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,

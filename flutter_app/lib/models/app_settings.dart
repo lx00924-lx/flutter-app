@@ -168,6 +168,13 @@ class AppSettings {
   String agentPermission; // 'workspace-write' | 'read-only' | 'full-access'
   String agentModel; // 'deepseek-v4-flash'
 
+  /// 启动应用时自动拉起电脑端桥接（默认关：由用户自己决定，见设置页开关）。
+  ///
+  /// 为什么要有这个开关：实测桌面端 LxAI 启动后桥接**不会**自动起来，必须手动点
+  /// 「启动」或由另一端点一下，用户会以为"电脑端又掉线了"。开启后 App 启动、
+  /// 登录完成即自动拉起，桥接本来就在跑时是幂等操作。
+  bool autoStartBridgeOnLaunch;
+
   // --- 打包固件常量 (随每次打包发布更新，不可被缓存篡改) ---
   static const String currentVersion = '1.0.1';
   static const int currentBuildNumber = 101;
@@ -239,6 +246,7 @@ class AppSettings {
     this.targetWorkspace = '',
     this.targetSessionId = '',
     this.isHarnessOnline = false,
+    this.autoStartBridgeOnLaunch = false,
     this.agentReasoningEffort = 'high',
     this.agentPermission = 'workspace-write',
     this.agentModel = 'deepseek-v4-flash',
@@ -321,6 +329,7 @@ class AppSettings {
       'targetWorkspace': targetWorkspace,
       'targetSessionId': targetSessionId,
       'isHarnessOnline': isHarnessOnline,
+      'autoStartBridgeOnLaunch': autoStartBridgeOnLaunch,
       'agentReasoningEffort': agentReasoningEffort,
       'agentPermission': agentPermission,
       'agentModel': agentModel,
@@ -442,6 +451,7 @@ class AppSettings {
           : (map['targetWorkspace']?.toString() ?? ''),
       targetSessionId: map['targetSessionId']?.toString() ?? '',
       isHarnessOnline: map['isHarnessOnline'] as bool? ?? false,
+      autoStartBridgeOnLaunch: map['autoStartBridgeOnLaunch'] as bool? ?? false,
       agentReasoningEffort: map['agentReasoningEffort']?.toString() ?? 'high',
       agentPermission: map['agentPermission']?.toString() ?? 'workspace-write',
       agentModel: map['agentModel']?.toString() ?? 'deepseek-v4-flash',

@@ -181,6 +181,34 @@ class SettingsProvider extends ChangeNotifier {
     // 用户先看设置页时会一直显示自己的旧档位。这里主动对齐一次。
     // （电脑端此刻若还没起来，_applyAgentOnline 会在它上线时再补一次。）
     unawaited(refreshAgentCatalog(silent: true));
+
+    // 用户开了「启动应用时自动启动桥接」就把电脑端桥接拉起来
+    // （实测桌面端启动后桥接不会自己起，用户会以为电脑端掉线了）
+    unawaited(_autoStartBridgeIfEnabled());
+  }
+
+  /// 按设置项「启动应用时自动启动桥接」在启动/登录后拉起电脑端桥接。
+  ///
+  /// 仅电脑端执行 —— 手机端没有本机 python 脚本，它的"启动桥接"是下发指令给电脑端。
+  /// 桥接已在运行时直接返回（幂等），避免起出第二个进程抢同一个 Token。
+  Future<void> _autoStartBridgeIfEnabled() async {
+    final isDesktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+    if (!isDesktop || !_settings.autoStartBridgeOnLaunch) return;
+    final manager = BridgeProcessManager.instance;
+    if (manager.isRunning) {
+      debugPrint('[Bridge] 自动启动：桥接已在运行，跳过');
+      return;
+    }
+    final token = _settings.harnessToken.trim();
+    if (token.isEmpty) {
+      debugPrint('[Bridge] 自动启动：还没有配对 Token，跳过（登录后可手动启动一次）');
+      return;
+    }
+    // 等启动期的会话轮询/云端同步先跑完，避免和它们抢网络与磁盘
+    await Future.delayed(const Duration(seconds: 4));
+    if (!_settings.autoStartBridgeOnLaunch || manager.isRunning) return;
+    debugPrint('[Bridge] 按设置自动启动桥接（电脑端）');
+    await manager.start(token: token, harnessUrl: _harnessUrlForBridge());
   }
 
   /// 供 ChatProvider 订阅的"消息 / 审批"类推送事件
