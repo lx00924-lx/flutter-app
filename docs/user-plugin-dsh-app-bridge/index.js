@@ -9,7 +9,8 @@
  *
  *   GET    /health                          存活 + 端点清单
  *   GET    /v1/models                       模型列表（含推理档位）
- *   GET    /v1/sessions                     会话列表（含标题、工作区）
+ *   GET    /v1/sessions                     会话列表（含标题、工作区、**真实模型档位与权限预设**）
+ *   GET    /v1/session/state?sessionId=     单个会话真实生效的 {permission, provider, model, reasoningEffort}
  *   POST   /v1/sessions                     新建会话
  *   PATCH  /v1/sessions/:id                 重命名
  *   DELETE /v1/sessions/:id                 归档
@@ -350,6 +351,36 @@ export function apply(ctx) {
     return derived
   }
 
+  /**
+   * 从会话投影里读**真实生效**的模型档位与权限预设。
+   *
+   * 为什么需要：App 的 `agentModel / agentReasoningEffort / agentPermission` 此前
+   * 只写不读 —— 首次启动时界面显示的是 App 自己存的旧值，和 DSH 会话里实际生效的
+   * 档位对不上，而且下一条消息还会把旧值**推回** DSH，把电脑端的设置覆盖掉。
+   *
+   * 这两个投影本来就随会话列表一起下发（DSH 自己的 Web 端就是这么读的：
+   * `modelSelection` 的视图是 `{lastUsed, next}`，`permissions` 的视图是
+   * `{options, currentValue}`），直接透出去即可，不需要新接口。
+   *
+   * @param item - `session.list` 返回的会话摘要（含 `projections.values`）
+   * @returns `{provider?, model?, reasoningEffort?, permission?}`；读不到的键直接不出现，
+   *          让 App 保持原值，绝不拿空值覆盖用户设置
+   */
+  function sessionStateFields(item) {
+    const fields = {}
+    const selection = item?.projections?.values?.modelSelection
+    // 视图是 {lastUsed, next}：next = 用户已选定但还没跑过的档位，也就是"下次请求会用"的档位
+    const picked = selection?.next ?? selection?.lastUsed
+    if (typeof picked?.provider === 'string' && picked.provider.length > 0) fields.provider = picked.provider
+    if (typeof picked?.model === 'string' && picked.model.length > 0) fields.model = picked.model
+    if (typeof picked?.reasoningEffort === 'string' && picked.reasoningEffort.length > 0) {
+      fields.reasoningEffort = picked.reasoningEffort
+    }
+    const preset = item?.projections?.values?.permissions?.currentValue
+    if (typeof preset === 'string' && preset.length > 0) fields.permission = preset
+    return fields
+  }
+
   /** /v1/sessions 的载荷。 */
   async function sessionsPayload() {
     const controller = sessions()
@@ -371,6 +402,8 @@ export function apply(ctx) {
         running: item.running === true,
         updatedAt: item.updatedAt ?? Date.now(),
         ...(item.parentSessionId === undefined ? {} : { parentSessionId: item.parentSessionId }),
+        // 真实档位/权限（读不到就不出现这些键，App 侧保持原值）
+        ...sessionStateFields(item),
       })
     }
     return { workspaces: workspaceList.map((entry) => entry.name), sessions: rows, items: rows }
@@ -957,6 +990,41 @@ export function apply(ctx) {
       }
       const current = typeof service?.current === 'function' ? service.current(session) : undefined
       return json(200, { status: 'success', sessionId, preset: current, available: names })
+    }
+
+    // 读：某个会话**真实生效**的模型档位 + 权限预设（App 切会话 / 桥接上线时精准刷一次）
+    if (pathname === '/v1/session/state' && method === 'GET') {
+      const query = new URL(request.url).searchParams
+      const sessionId = readSessionId(query.get('sessionId'))
+      if (sessionId === undefined) {
+        return json(400, { status: 'error', error: { code: 'bad-id', message: '缺少 sessionId' } })
+      }
+      if (sessions() === undefined) {
+        return json(503, { status: 'error', error: { code: 'unavailable', message: 'sessionController 服务缺失' } })
+      }
+      // 与 /v1/sessions 读同一份投影（同源同形），避免两处各读一套、界面互相打架
+      let state = {}
+      try {
+        const value = await sessions().list({}, turnSignal())
+        const item = (value?.items ?? []).find((entry) => entry.sessionId === sessionId)
+        if (item !== undefined) state = sessionStateFields(item)
+      } catch (error) {
+        ctx.logger?.warn?.(`[app-bridge] session/state 读投影失败: ${String(error?.message ?? error)}`)
+      }
+      // 权限兜底：投影里没有时问 permissionPresets.current（与切换走的是同一条真值来源）
+      if (state.permission === undefined) {
+        const service = ctx.get('permissionPresets')
+        const session = await resolveSessionObject(sessionId)
+        if (session !== undefined && typeof service?.current === 'function') {
+          try {
+            const current = service.current(session)
+            if (typeof current === 'string' && current.length > 0) state.permission = current
+          } catch {
+            /* 读不到就不给这个键：App 保持原值，不用空值覆盖 */
+          }
+        }
+      }
+      return json(200, { status: 'success', sessionId, ...state })
     }
 
     if (pathname === '/v1/session/permission' && method === 'POST') {

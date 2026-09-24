@@ -176,6 +176,11 @@ class SettingsProvider extends ChangeNotifier {
     // 已登录：开启 Android 常驻保活前台服务，确保划掉任务栏后
     // Dart isolate 仍存活，上面的会话轮询与中继长连接得以继续运行
     KeepAliveService.enableAfterLogin();
+
+    // 启动即拉一次电脑端目录：进聊天页时快捷栏也会拉，但那是"用到了才拉"，
+    // 用户先看设置页时会一直显示自己的旧档位。这里主动对齐一次。
+    // （电脑端此刻若还没起来，_applyAgentOnline 会在它上线时再补一次。）
+    unawaited(refreshAgentCatalog(silent: true));
   }
 
   /// 供 ChatProvider 订阅的"消息 / 审批"类推送事件
@@ -223,9 +228,16 @@ class SettingsProvider extends ChangeNotifier {
   /// 因为手机无法本地探测电脑进程，此前只能手动点刷新才会更新。
   void _applyAgentOnline(bool online) {
     if (_settings.isHarnessOnline == online) return;
+    final wasOffline = !_settings.isHarnessOnline;
     _settings.isHarnessOnline = online;
     _save(pushToCloud: false);
     debugPrint('[Settings] Agent 在线状态更新: $online');
+    // 电脑端刚上线（典型场景：先开 App，再开 DSH / 桥接）：立刻补拉一次目录，
+    // 把这期间电脑端真实生效的模型 / 思考深度 / 权限对齐过来 ——
+    // 否则界面会一直停在 App 自己存的旧值，用户以为"设置没同步"。
+    if (online && wasOffline && _settings.isLoggedIn) {
+      unawaited(refreshAgentCatalog(silent: true));
+    }
   }
 
   /// 服务端下发的「桥接状态切换中」标记（null = 已切换完成/无切换）。
@@ -615,6 +627,104 @@ class SettingsProvider extends ChangeNotifier {
     }).toList();
   }
 
+  /// DSH 真实存在的权限预设（由插件 `/v1/permission-presets` 确认）。
+  ///
+  /// 采纳会话真值时要过滤：DSH 在"当前沙箱/审批策略不匹配任何预设"时会报 `custom`，
+  /// 它并不是可以下发的预设名，照抄过来只会让之后每一轮下发都失败一次。
+  static const Set<String> agentPermissionPresets = {
+    'read-only',
+    'workspace-write',
+    'danger-full-access',
+  };
+
+  /// 采纳电脑端会话**真实生效**的模型 / 思考深度 / 权限预设。
+  ///
+  /// 为什么需要：这三项此前在 App 里**只写不读** —— 启动时界面显示的是 App 自己存的
+  /// 旧值（默认 high / workspace-write / deepseek-v4-flash），与 DSH 会话里实际生效的
+  /// 档位对不上（用户看到"深度=高"，电脑端其实是最高）；更糟的是下一条消息还会把这个
+  /// 旧值**推回** DSH，把用户在电脑端调好的设置覆盖掉。
+  ///
+  /// 只对**当前目标会话**采纳：消息实际发进哪个会话，就以那个会话的真值为准。
+  /// 没选会话时（"新建会话"模式）App 的值就是准的——新会话本来就按 App 下发的值创建，
+  /// 此时若拿别的会话去覆盖，反而会把用户刚改的档位打回去。
+  ///
+  /// 只读回、**不回推**：避免读→写→再读的来回覆盖。
+  /// 字段缺失（老插件 / 老桥接）时保持原值，绝不拿空值覆盖用户设置。
+  void _adoptAgentStateFromSession() {
+    if (_agentSessions.isEmpty) return;
+
+    // 刚保存过设置（用户在下拉里改档位、跑 /effort、云端漫游合并…）就先不采纳：
+    // 那条改动可能正在下发给电脑端，此刻读到的投影还是旧值，会把界面打回去。
+    if (DateTime.now().difference(_lastSettingsSaveAt) < const Duration(seconds: 8)) {
+      debugPrint('[Settings] 刚保存过设置，本轮跳过电脑端状态对齐');
+      return;
+    }
+
+    final target = _settings.targetSessionId.trim();
+    Map<String, dynamic>? row;
+    if (target.isNotEmpty) {
+      for (final s in _agentSessions) {
+        final id = (s['id'] ?? s['sessionId'])?.toString().trim() ?? '';
+        if (id == target) {
+          row = s;
+          break;
+        }
+      }
+    }
+
+    final realModel = row?['model']?.toString().trim() ?? '';
+    final realEffort = row?['reasoningEffort']?.toString().trim() ?? '';
+    final realPermission = row?['permission']?.toString().trim() ?? '';
+
+    var changed = false;
+
+    // 1) 模型：以电脑端会话为准。另外，若 App 存的模型在电脑端目录里根本不存在
+    //    （典型：DSH 重启后旧模型下线，如 deepseek-v41-flash），**无论有没有选中会话**
+    //    都必须换掉 —— 否则下一条消息会带着这个不存在的模型名去请求，电脑端直接 404，
+    //    手机上只看到一句含糊的"本地服务连接失败"。
+    final catalogIds = _agentModels
+        .map((m) => m['id']?.toString().trim() ?? '')
+        .where((e) => e.isNotEmpty)
+        .toList();
+    var nextModel = realModel.isNotEmpty ? realModel : _settings.agentModel.trim();
+    if (catalogIds.isNotEmpty && !catalogIds.contains(nextModel)) {
+      debugPrint('[Settings] 当前模型 "$nextModel" 不在电脑端目录中，改用目录首个模型');
+      nextModel = catalogIds.first;
+    }
+    if (nextModel.isNotEmpty && nextModel != _settings.agentModel) {
+      _settings.agentModel = nextModel;
+      changed = true;
+    }
+
+    if (row != null) {
+      // 2) 思考深度：会话真值优先；缺失或该模型不支持时收敛到模型声明的档位
+      final allowed = reasoningEffortsFor(_settings.agentModel);
+      var nextEffort = realEffort.isNotEmpty ? realEffort : _settings.agentReasoningEffort;
+      if (allowed.isNotEmpty && !allowed.contains(nextEffort)) {
+        nextEffort = allowed.contains('high') ? 'high' : allowed.first;
+      }
+      if (nextEffort.isNotEmpty && nextEffort != _settings.agentReasoningEffort) {
+        _settings.agentReasoningEffort = nextEffort;
+        changed = true;
+      }
+
+      // 3) 权限预设：同样以会话真值为准，但只认真实存在的预设名（过滤 custom 这类派生值）
+      if (realPermission.isNotEmpty &&
+          agentPermissionPresets.contains(realPermission) &&
+          realPermission != _settings.agentPermission) {
+        _settings.agentPermission = realPermission;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      debugPrint('[Settings] 已按电脑端会话对齐：模型=${_settings.agentModel} '
+          '深度=${_settings.agentReasoningEffort} 权限=${_settings.agentPermission}');
+      // 派生值不推云端：否则两端会为了"谁是准的"反复写一遍
+      _save(pushToCloud: false);
+    }
+  }
+
   /// 拉取一次电脑端工作区与会话，并缓存下来供设置页与聊天快捷栏共用。
   Future<bool> refreshAgentCatalog({bool silent = true}) async {
     if (_agentCatalogLoading) return false;
@@ -640,6 +750,8 @@ class SettingsProvider extends ChangeNotifier {
       _agentWorkspaces = wsList;
       _agentSessions = sessList;
       if (modelList.isNotEmpty) _agentModels = modelList;
+      // 取到电脑端目录后，顺手把电脑端**真实生效**的模型 / 思考深度 / 权限对齐过来
+      _adoptAgentStateFromSession();
       // 只有真的取到内容才算"已加载"，避免把一次失败当成"电脑上确实没有"
       _agentCatalogLoaded = _agentCatalogLoaded || wsList.isNotEmpty || sessList.isNotEmpty;
       debugPrint('[Settings] 目录刷新: ${wsList.length} 个工作区 / ${sessList.length} 个会话 / '
@@ -799,7 +911,12 @@ class SettingsProvider extends ChangeNotifier {
     return null;
   }
 
+  /// 最近一次保存设置的时间。用于让"按电脑端会话对齐"避开刚刚发生的本地修改：
+  /// 用户刚把档位改成 max 并下发给电脑端，此刻投影可能还是旧值，立刻读回会把界面打回去。
+  DateTime _lastSettingsSaveAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   void _save({bool pushToCloud = true}) {
+    _lastSettingsSaveAt = DateTime.now();
     _updateImageCache();
     StoragePathService.instance.setCustomPath(_settings.customDataPath);
     StorageService.instance.saveSettings(_settings);

@@ -887,6 +887,42 @@ def http_get_json(url: str, timeout: int = 35) -> dict:
 
 LOCAL_SESSION_CACHE = []
 
+# 会话行里**必须原样透传**的真实状态字段（由 DSH 插件从会话投影读出）。
+# running/cwd/parentSessionId 是列表本身的信息，provider/model/reasoningEffort/permission
+# 是"电脑端实际生效"的档位与权限 —— App 首启就靠它们对齐界面。
+SESSION_STATE_KEYS = (
+    "running",
+    "cwd",
+    "parentSessionId",
+    "provider",
+    "model",
+    "reasoningEffort",
+    "permission",
+)
+
+
+def merge_session_row(sessions, index, row):
+    """
+    把一行会话合并进结果列表：新 id 追加，已存在的只补它缺的字段。
+
+    为什么不是"见过这个 id 就跳过"：WS RPC 通道先跑，它返回的行**没有**会话投影
+    （拿不到模型档位/权限），若按 seen_ids 直接跳过，随后 HTTP 通道查到的真实状态
+    就永远进不来，App 首启看到的仍是自己存的旧值。
+    """
+    sid = row.get("sessionId") or row.get("id")
+    if not sid:
+        return
+    existing = index.get(sid)
+    if existing is None:
+        index[sid] = row
+        sessions.append(row)
+        return
+    for key, value in row.items():
+        if value is None or value == "":
+            continue
+        if key not in existing:
+            existing[key] = value
+
 def is_html_content(content: str) -> bool:
     if not content or not isinstance(content, str):
         return False
@@ -944,13 +980,21 @@ def extract_dsh_sessions_and_workspaces(obj, default_ws=""):
                 workspaces.add(ws)
             title = str(it.get("title") or it.get("name") or it.get("topic") or it.get("summary") or it.get("prompt") or f"会话_{str(sid)[:6]}")
             updated = it.get("updatedAt") or it.get("createdAt") or it.get("time") or int(time.time() * 1000)
-            sessions.append({
+            row = {
                 "id": str(sid),
                 "sessionId": str(sid),
                 "title": title,
                 "workspace": ws,
                 "updatedAt": updated
-            })
+            }
+            # 会话的**真实状态**必须原样透传：插件从 DSH 会话投影里读出
+            # provider/model/reasoningEffort/permission 放在同一行里，此前这里只保留 5 个
+            # 字段，等于把它们全丢了 —— App 因此永远看不到电脑端实际生效的档位，
+            # 首启时显示的是自己存的旧值，还会在下一条消息把旧值推回 DSH 覆盖设置。
+            for key in SESSION_STATE_KEYS:
+                if it.get(key) is not None:
+                    row[key] = it.get(key)
+            sessions.append(row)
 
     if isinstance(obj, list):
         for it in obj:
@@ -991,16 +1035,14 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
     # 并不存在的选项。真实列表由下面的 session.list RPC 结果填充。
     workspaces = []
     sessions = []
-    seen_ids = set()
+    # sessionId → 已排进结果的那一行（重复出现时原地补字段，而不是整行丢弃）
+    index = {}
 
     for s in LOCAL_SESSION_CACHE:
-        sid = s.get("sessionId") or s.get("id")
-        if sid and sid not in seen_ids:
-            seen_ids.add(sid)
-            sessions.append(s)
-            ws = s.get("workspace") or ""
-            if ws and ws not in workspaces:
-                workspaces.append(ws)
+        merge_session_row(sessions, index, s)
+        ws = s.get("workspace") or ""
+        if ws and ws not in workspaces:
+            workspaces.append(ws)
 
     rpc_list_payload = {
         "type": "client-request",
@@ -1049,10 +1091,7 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
                                     if w and w not in workspaces:
                                         workspaces.append(w)
                                 for s in found_sess:
-                                    sid = s.get("sessionId") or s.get("id")
-                                    if sid and sid not in seen_ids:
-                                        seen_ids.add(sid)
-                                        sessions.append(s)
+                                    merge_session_row(sessions, index, s)
                         except Exception:
                             continue
                     if len(sessions) > 0:
@@ -1100,10 +1139,7 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
                 if w and w not in workspaces:
                     workspaces.append(w)
             for s in found_sess:
-                sid = s.get("sessionId") or s.get("id")
-                if sid and sid not in seen_ids:
-                    seen_ids.add(sid)
-                    sessions.append(s)
+                merge_session_row(sessions, index, s)
         except Exception:
             continue
 
