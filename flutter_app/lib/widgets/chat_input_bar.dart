@@ -61,6 +61,21 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   String? _recordedPendingAudioUri;
   int _recordedPendingAudioSec = 0;
 
+  // ==================== 选择框卡片：分页 + 收起 ====================
+  //
+  // 电脑端 Agent 可以一次问好几件事（DSH 的 user-questions 是数组）。一屏全摊开
+  // 会把输入框顶没，所以多题时**一次只显示一题**，用「上一题 / 下一题」翻页，
+  // 全部答完再点「提交答案」；不想看时可以把整张卡片收成一行。
+
+  /// 当前显示第几题（0 基）
+  int _questionStep = 0;
+
+  /// 是否收起整张提问卡（收起后只剩标题一行）
+  bool _questionCollapsed = false;
+
+  /// 当前挂起问题的 questionId：换了一道新问题就把题号与收起状态复位
+  String _questionNavId = '';
+
   @override
   void initState() {
     super.initState();
@@ -750,6 +765,9 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
       if (!instant) ...[
         const SizedBox(height: 2),
         TextFormField(
+          // 按问题 id 给 key：多题翻页时 Flutter 会重用同一位置的输入框 State，
+          // 没有 key 的话翻到下一题还显示上一题输入的内容（initialValue 只在首次生效）
+          key: ValueKey('question_custom_$id'),
           initialValue: custom,
           style: const TextStyle(fontSize: 12.5),
           decoration: const InputDecoration(
@@ -761,6 +779,117 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
         ),
       ],
     ];
+  }
+
+  /// 已答题目数（勾了选项，或写了自定义回答，都算答过）。
+  ///
+  /// 多题时标题行显示「已答 n/y」：翻页答题最容易漏掉后面的题，
+  /// 有一个明确的进度提示，用户提交前能一眼看出还差几题。
+  int _answeredQuestionCount(ChatProvider chat, List<Map<String, dynamic>> items) {
+    var answered = 0;
+    for (final item in items) {
+      final id = item['id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+      if (chat.questionPicksFor(id).isNotEmpty || chat.questionCustomFor(id).isNotEmpty) {
+        answered++;
+      }
+    }
+    return answered;
+  }
+
+  /// 提问卡的标题行：图标 + 标题（含「第 x/y 题 · 已答 n/y」）+ 收起/展开按钮。
+  ///
+  /// 收起后只剩这一行，输入框和聊天内容不再被提问卡挤占 —— 想边看聊天边答题时
+  /// 点一下收起来，想答了点一下展开（题号与已勾选内容都保留）。
+  Widget _buildQuestionHeaderRow(int total, int step, int answered, {required bool expanded}) {
+    final progress = total > 1 ? ' · 第 ${step + 1}/$total 题 · 已答 $answered/$total' : '';
+    return Row(
+      children: [
+        const Icon(Icons.help_outline, size: 16, color: Color(0xFF3B82F6)),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            '电脑端 Agent 在等你选择$progress',
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+          ),
+        ),
+        if (expanded)
+          const Text(
+            '另一台设备回答后会自动收起',
+            style: TextStyle(fontSize: 10, color: Color(0xFF64748B)),
+          ),
+        IconButton(
+          tooltip: expanded ? '收起提问框' : '展开提问框',
+          onPressed: () => setState(() => _questionCollapsed = !_questionCollapsed),
+          icon: Icon(
+            expanded ? Icons.expand_less : Icons.expand_more,
+            size: 20,
+            color: const Color(0xFF64748B),
+          ),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
+          visualDensity: VisualDensity.compact,
+        ),
+      ],
+    );
+  }
+
+  /// 提问卡的翻页/提交行：「上一题」「下一题」+「提交答案」。
+  ///
+  /// 多题时才有翻页（单题显示它没意义）；「提交答案」把**所有**题目的勾选与自定义
+  /// 输入一起交上去（`_collectQuestionAnswers` 是遍历全部问题的，不只当前这题）。
+  Widget _buildQuestionNavRow(ChatProvider chat, int total, int step) {
+    final multiple = total > 1;
+    final hasPrev = step > 0;
+    final hasNext = step < total - 1;
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        children: [
+          if (multiple)
+            TextButton(
+              onPressed: hasPrev ? () => setState(() => _questionStep = step - 1) : null,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.chevron_left, size: 18),
+                  Text('上一题', style: TextStyle(fontSize: 12.5)),
+                ],
+              ),
+            ),
+          if (multiple)
+            TextButton(
+              onPressed: hasNext ? () => setState(() => _questionStep = step + 1) : null,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('下一题', style: TextStyle(fontSize: 12.5)),
+                  Icon(Icons.chevron_right, size: 18),
+                ],
+              ),
+            ),
+          const Spacer(),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFF3B82F6),
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+            ),
+            onPressed: chat.pendingQuestion == null ? null : () => chat.submitPendingQuestion(),
+            child: const Text('提交答案', style: TextStyle(fontSize: 12.5)),
+          ),
+        ],
+      ),
+    );
   }
 
   // 1. 发送图片：调用原生相册
@@ -1097,58 +1226,51 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                 builder: (context, chat, _) {
                   final items = chat.pendingQuestionItems;
                   if (items.isEmpty) return const SizedBox.shrink();
+
+                  // 换了一道新问题（或第一次出现）：题号、收起状态复位。
+                  // 这里只改字段不 setState —— 正在 build 中，下一帧自然用新值。
+                  final navId = chat.pendingQuestion?['questionId']?.toString() ?? '';
+                  if (navId != _questionNavId) {
+                    _questionNavId = navId;
+                    _questionStep = 0;
+                    _questionCollapsed = false;
+                  }
+                  final step = _questionStep.clamp(0, items.length - 1);
+                  final total = items.length;
+                  // 已答几题：用于标题行提示，避免多题时漏答（答过的题换个页也要看得出来）
+                  final answered = _answeredQuestionCount(chat, items);
+                  // 多题必须显式提交（点选项只是勾选）；单题单选有选项时仍是点一下即作答
                   final needsSubmit = chat.pendingQuestionNeedsSubmit;
+
                   return Container(
                     margin: const EdgeInsets.only(bottom: 8),
-                    padding: const EdgeInsets.fromLTRB(10, 10, 10, 8),
+                    padding: _questionCollapsed
+                        ? const EdgeInsets.fromLTRB(10, 4, 6, 4)
+                        : const EdgeInsets.fromLTRB(10, 10, 10, 8),
                     decoration: BoxDecoration(
                       color: isDark ? const Color(0xFF0F2338) : const Color(0xFFEFF6FF),
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(color: const Color(0xFF3B82F6)),
                     ),
-                    child: ConstrainedBox(
-                      // 选项多、描述长时给一个较高的可视区，超出内部滚动，别把输入框顶没
-                      constraints: const BoxConstraints(maxHeight: 380),
-                      child: SingleChildScrollView(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Row(
-                              children: [
-                                Icon(Icons.help_outline, size: 16, color: Color(0xFF3B82F6)),
-                                SizedBox(width: 6),
-                                Expanded(
-                                  child: Text(
-                                    '电脑端 Agent 在等你选择',
-                                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
-                                  ),
-                                ),
-                                Text(
-                                  '另一台设备回答后会自动收起',
-                                  style: TextStyle(fontSize: 10, color: Color(0xFF64748B)),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            for (final item in items) ..._buildQuestionCardBlock(context, chat, item, isDark),
-                            if (needsSubmit) ...[
-                              const SizedBox(height: 2),
-                              Align(
-                                alignment: Alignment.centerRight,
-                                child: FilledButton(
-                                  style: FilledButton.styleFrom(
-                                    backgroundColor: const Color(0xFF3B82F6),
-                                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
-                                  ),
-                                  onPressed: chat.pendingQuestion == null ? null : () => chat.submitPendingQuestion(),
-                                  child: const Text('提交', style: TextStyle(fontSize: 12.5)),
-                                ),
+                    child: _questionCollapsed
+                        ? _buildQuestionHeaderRow(total, step, answered, expanded: false)
+                        : ConstrainedBox(
+                            // 选项多、描述长时给一个较高的可视区，超出内部滚动，别把输入框顶没
+                            constraints: const BoxConstraints(maxHeight: 380),
+                            child: SingleChildScrollView(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  _buildQuestionHeaderRow(total, step, answered, expanded: true),
+                                  const SizedBox(height: 8),
+                                  // 一次只渲染当前这一题
+                                  ..._buildQuestionCardBlock(context, chat, items[step], isDark),
+                                  if (needsSubmit)
+                                    _buildQuestionNavRow(chat, total, step),
+                                ],
                               ),
-                            ],
-                          ],
-                        ),
-                      ),
-                    ),
+                            ),
+                          ),
                   );
                 },
               ),

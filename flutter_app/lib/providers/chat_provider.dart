@@ -460,11 +460,17 @@ class ChatProvider extends ChangeNotifier {
   Set<String> questionPicksFor(String questionItemId) =>
       Set.unmodifiable(_questionPicks[questionItemId] ?? <String>{});
 
-  /// 该问题是否「点一下就能作答」——单选且有选项。
+  /// 该问题是否「点一下就能作答」——单选、有选项，**且本次只问了这一道题**。
   ///
-  /// 只有这种情况才允许"点选项即提交"；多选、或没有选项（纯自由回答）都要走
+  /// 只有这种情况才允许"点选项即提交"；多选、没有选项（纯自由回答）都要走
   /// 卡片底部的输入框 + 提交按钮，否则用户没机会补第二个选择。
+  ///
+  /// 为什么必须限制"只有一道题"：DSH 的 user-questions 一次可以问多件事
+  /// （例如同时问「重启桌面端吗」和「现在打包吗」）。这个判断是**按单个问题**
+  /// 算的，若第一题点一下就整包提交，后面几题等于被跳过 —— 用户根本没机会选，
+  /// 卡片却已经收起（实测踩到过）。
   bool isInstantAnswerQuestion(Map<String, dynamic> item) {
+    if (_pendingQuestionItems.length != 1) return false;
     final multi = item['multi_select'] == true || item['multiSelect'] == true;
     final raw = item['options'];
     final options = raw is List ? raw.whereType<Map>() : const <Map>[];
