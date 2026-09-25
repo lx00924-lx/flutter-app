@@ -467,7 +467,12 @@ class MessageBubble extends StatelessWidget {
             ),
           ],
           Flexible(
-            child: GestureDetector(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment:
+                  isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+              children: [
+                GestureDetector(
               onTapDown: (details) {
                 tapPosition = details.globalPosition;
               },
@@ -624,23 +629,13 @@ class MessageBubble extends StatelessWidget {
                         ),
                       ),
                     const SizedBox(height: 6),
-                    Align(
-                      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Text(
-                        _formatMessageTime(message.createdAt),
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w400,
-                          letterSpacing: 0.2,
-                          color: isUser
-                              ? Colors.white.withOpacity(0.85)
-                              : (isDark ? const Color(0xFFA1A1AA) : const Color(0xFF6B7280)),
-                        ),
-                      ),
-                    ),
                   ],
                 ),
               ),
+                ),
+                // 时间戳移出气泡：透明背景、跟在气泡下方（用户要求）
+                _buildTimeLabel(isDark, isUser),
+              ],
             ),
           ),
           if (isUser) ...[
@@ -654,6 +649,25 @@ class MessageBubble extends StatelessWidget {
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  /// 气泡外的时间戳（透明背景，不再是气泡里的一行）——用户要求：
+  /// 时间应该在聊天框外面，且不要有任何底色。
+  Widget _buildTimeLabel(bool isDark, bool isUser) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 3, left: 4, right: 4),
+      child: Text(
+        _formatMessageTime(message.createdAt),
+        textAlign: isUser ? TextAlign.right : TextAlign.left,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w400,
+          letterSpacing: 0.2,
+          // 透明背景 + 弱化的灰色：不抢正文，也不再叠在蓝色气泡上
+          color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF94A3B8),
+        ),
       ),
     );
   }

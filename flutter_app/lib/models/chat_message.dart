@@ -160,7 +160,12 @@ class ChatMessage {
     final timeStr = (map['createdAt'] ?? map['timestamp'])?.toString();
     DateTime createdAt = DateTime.now();
     if (timeStr != null) {
-      createdAt = DateTime.tryParse(timeStr) ?? DateTime.now();
+      final parsed = DateTime.tryParse(timeStr);
+      // 时间基准必须统一：**服务端**写 assistant 消息用的是 UTC（`...Z`，见 server.ts
+      // 的 new Date().toISOString()），而 App 本地写的用户消息是本地时间（无时区）。
+      // 直接 tryParse 会把 UTC 串当成"本地墙上时间"用，于是凌晨 3 点的 Agent 回复
+      // 显示成"昨天 19:00"（差 8 小时还跨天，用户实测抓到过）。这里统一转本地。
+      createdAt = parsed == null ? DateTime.now() : (parsed.isUtc ? parsed.toLocal() : parsed);
     }
     final sessId = (map['sessionId'] ?? 'default_session').toString();
 
