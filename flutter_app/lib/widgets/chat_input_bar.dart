@@ -801,9 +801,16 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   ///
   /// 收起后只剩这一行，输入框和聊天内容不再被提问卡挤占 —— 想边看聊天边答题时
   /// 点一下收起来，想答了点一下展开（题号与已勾选内容都保留）。
-  Widget _buildQuestionHeaderRow(int total, int step, int answered, bool deferred, {required bool expanded}) {
+  Widget _buildQuestionHeaderRow(
+    int total,
+    int step,
+    int answered,
+    bool orphaned,
+    bool waitingLong, {
+    required bool expanded,
+  }) {
     final progress = total > 1 ? ' · 第 ${step + 1}/$total 题 · 已答 $answered/$total' : '';
-    final stateNote = deferred ? ' · 本轮已中止' : '';
+    final stateNote = orphaned ? ' · 本轮已中止' : (waitingLong ? ' · 等待中' : '');
     return Row(
       children: [
         const Icon(Icons.help_outline, size: 16, color: Color(0xFF3B82F6)),
@@ -835,14 +842,16 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     );
   }
 
-  /// 提问卡的翻页/提交行：「上一题」「下一题」+「提交答案」。
+  /// 提问卡的翻页/提交行：「上一题」「下一题」+ 最后一题才有的「提交答案」。
   ///
-  /// 多题时才有翻页（单题显示它没意义）；「提交答案」把**所有**题目的勾选与自定义
-  /// 输入一起交上去（`_collectQuestionAnswers` 是遍历全部问题的，不只当前这题）。
+  /// 为什么提交按钮只在最后一题出现（用户要求）：每一题都挂一个提交按钮，
+  /// 很容易在只答了一题时就手快交卷（多题场景下漏答就是这么来的）；
+  /// 放到最后一题，等于"翻完了才能交"。
   Widget _buildQuestionNavRow(ChatProvider chat, int total, int step) {
     final multiple = total > 1;
     final hasPrev = step > 0;
     final hasNext = step < total - 1;
+    final isLast = step >= total - 1;
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Row(
@@ -879,15 +888,25 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                 ],
               ),
             ),
-          const Spacer(),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: const Color(0xFF3B82F6),
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+          if (multiple && !isLast)
+            Padding(
+              padding: const EdgeInsets.only(left: 4),
+              child: Text(
+                '翻到最后一题再提交',
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+              ),
             ),
-            onPressed: chat.pendingQuestion == null ? null : () => chat.submitPendingQuestion(),
-            child: const Text('提交答案', style: TextStyle(fontSize: 12.5)),
-          ),
+          const Spacer(),
+          // 单选一题时（点一下即作答）不需要提交按钮；多题时只在最后一题给
+          if (isLast)
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF3B82F6),
+                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+              ),
+              onPressed: chat.pendingQuestion == null ? null : () => chat.submitPendingQuestion(),
+              child: const Text('提交答案', style: TextStyle(fontSize: 12.5)),
+            ),
         ],
       ),
     );
@@ -1266,8 +1285,11 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   final answered = _answeredQuestionCount(chat, items);
                   // 多题必须显式提交（点选项只是勾选）；单题单选有选项时仍是点一下即作答
                   final needsSubmit = chat.pendingQuestionNeedsSubmit;
-                  // 延后待答：那一轮已结束，答复会以「继续」的方式发回同一会话
-                  final deferred = chat.pendingQuestionDeferred;
+                  // pending（刚问）/ waiting（等久了但**仍在等**，本轮不会交给模型）/
+                  // orphaned（本轮已中止，答复走续跑）
+                  final qState = chat.pendingQuestionState;
+                  final orphaned = qState == 'orphaned';
+                  final waitingLong = qState == 'waiting';
 
                   return Container(
                     margin: const EdgeInsets.only(bottom: 8),
@@ -1280,7 +1302,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                       border: Border.all(color: const Color(0xFF3B82F6)),
                     ),
                     child: _questionCollapsed
-                        ? _buildQuestionHeaderRow(total, step, answered, deferred, expanded: false)
+                        ? _buildQuestionHeaderRow(total, step, answered, orphaned, waitingLong, expanded: false)
                         : ConstrainedBox(
                             // 选项多、描述长时给一个较高的可视区，超出内部滚动，别把输入框顶没
                             constraints: const BoxConstraints(maxHeight: 380),
@@ -1288,13 +1310,21 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  _buildQuestionHeaderRow(total, step, answered, deferred, expanded: true),
-                                  if (deferred)
+                                  _buildQuestionHeaderRow(total, step, answered, orphaned, waitingLong, expanded: true),
+                                  if (orphaned)
                                     Padding(
                                       padding: const EdgeInsets.only(top: 3),
                                       child: Text(
-                                        '当时那一轮已经结束，答复会以「继续」的方式发回去让 Agent 接着做',
+                                        '本轮已中止（等了很久没人答）· 现在答复会以「继续」的方式发回给 Agent',
                                         style: TextStyle(fontSize: 11, color: Colors.blue.shade700),
+                                      ),
+                                    )
+                                  else if (waitingLong)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 3),
+                                      child: Text(
+                                        '已等待较久 · Agent 仍在等你的答复，不会自己继续（请在最后一题提交）',
+                                        style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
                                       ),
                                     ),
                                   const SizedBox(height: 8),

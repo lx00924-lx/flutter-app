@@ -1348,10 +1348,11 @@ async def poll_dsh_questions_loop(sender, harness_url: str):
             if not qid:
                 continue
             current.add(qid)
-            deferred = bool(item.get("deferred"))
-            # 状态没变就不重复推；live→deferred 那一次要推，让 App 把卡片标成
-            # "本轮已中止，答复将续跑"（人走开后卡片仍留着，回来点答复走续跑）。
-            if qid in known and known[qid] is deferred:
+            # 状态机：pending（刚问不久）→ waiting（等超过 5 分钟但**仍在等**，本轮不会
+            # 交给模型）→ orphaned（挂满 24h 已中止本轮，答复走续跑）。任一变化都推给
+            # App，卡片文案跟着变；只有状态没变才跳过。
+            state = str(item.get("state") or ("orphaned" if item.get("deferred") else "pending"))
+            if qid in known and known[qid] == state:
                 continue
             try:
                 await sender({
@@ -1359,12 +1360,15 @@ async def poll_dsh_questions_loop(sender, harness_url: str):
                     "questionId": qid,
                     "sessionId": item.get("sessionId"),
                     "questions": item.get("questions") or [],
-                    "deferred": deferred,
+                    "state": state,
+                    "deferred": state == "orphaned",
                     "timestamp": int(time.time() * 1000)
                 })
-                known[qid] = deferred
-                if deferred:
-                    print(f"\033[93m[选择框] {qid} 已转为延后待答（本轮结束，答复将走续跑）\033[0m")
+                known[qid] = state
+                if state == "orphaned":
+                    print(f"\033[93m[选择框] {qid} 已中止本轮、转为延后待答（答复将走续跑）\033[0m")
+                elif state == "waiting":
+                    print(f"\033[93m[选择框] {qid} 已等待较久，仍在挂起等答复（本轮不会交给模型）\033[0m")
                 else:
                     print(f"\033[96m[选择框] 已把 DSH 的选择框转发给 App: {qid}\033[0m")
             except Exception:
@@ -1481,10 +1485,9 @@ async def poll_dsh_approvals_loop(sender, harness_url: str):
             if not aid:
                 continue
             current.add(aid)
-            deferred = bool(item.get("deferred"))
-            # 状态没变就不重复推；live→deferred 那一次要推，让 App 把卡片标成
-            # "本轮已中止，批准后将续跑重试该操作"。
-            if aid in known and known[aid] is deferred:
+            state = str(item.get("state") or ("orphaned" if item.get("deferred") else "pending"))
+            # 与选择框同一套状态机（pending / waiting / orphaned），变了才推
+            if aid in known and known[aid] == state:
                 continue
             try:
                 await sender({
@@ -1493,12 +1496,15 @@ async def poll_dsh_approvals_loop(sender, harness_url: str):
                     "sessionId": item.get("sessionId"),
                     "tool": item.get("tool") or "tool",
                     "reason": item.get("reason") or "",
-                    "deferred": deferred,
+                    "state": state,
+                    "deferred": state == "orphaned",
                     "timestamp": int(time.time() * 1000)
                 })
-                known[aid] = deferred
-                if deferred:
-                    print(f"\033[93m[审批] {aid} 已转为延后待批（本轮结束，批准将走续跑）\033[0m")
+                known[aid] = state
+                if state == "orphaned":
+                    print(f"\033[93m[审批] {aid} 已中止本轮、转为延后待批（批准将走续跑）\033[0m")
+                elif state == "waiting":
+                    print(f"\033[93m[审批] {aid} 已等待较久，仍在挂起等决定（本轮不会交给模型）\033[0m")
                 else:
                     print(f"\033[96m[审批] 已把 DSH 的授权请求转发给 App: {aid}（{item.get('tool') or 'tool'}）\033[0m")
             except Exception:

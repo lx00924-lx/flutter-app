@@ -54,22 +54,28 @@ const HEARTBEAT_MS = 5_000
 /** 单轮默认上限（bridge 自己也有 600s 超时）。 */
 const TURN_TIMEOUT_MS = 600_000
 /**
- * 「阻塞窗口」：App 在线时，问题/审批最多按住这一轮多久（5 分钟）。
+ * 「等久了」提示阈值：App 在线时，问题/审批等了这么久还没答复，就把它标成
+ * `state: 'waiting'`（卡片上提示"已等待较久"）。
  *
- * 为什么从 30 分钟缩到 5 分钟（用户场景：发完指令人就去干别的了，甚至隔天才回来）：
- *  - DSH 的 ask_user_question 自己**没有任何超时**，只要没人答，那一轮的工具调用会
- *    一直挂着。原来超时后交给电脑端网页弹窗，而人不在电脑前时，网页那个 answerer
- *    会**无限等下去** —— 会话就永久卡在 running，比"没人答"更糟。
- *  - 现在窗口到期后不再交网页，而是直接把这轮**结束掉**（返回空答复 / 审批按撤销），
- *    同时把这条待办转进「延后待答」清单：卡片在手机/电脑上继续留着（24 小时），
- *    用户回来点答复时走**续跑**（见 DEFERRED_TTL_MS 与 App 侧 resume 逻辑）。
+ * ⚠️ 注意这里**不再结束本轮、也不返回空答复**。
+ * 上一版在到期时返回空答复，等于告诉 DSH"用户没答，你继续" —— 主模型于是接着
+ * 说话（用户实测看到"超时后主聊天 API 也回复了"）。现在改为：继续挂着等，
+ * 只有到 PARK_MAX_MS 才真正中止这一轮，期间模型不会说话。
  */
-const QUESTION_BLOCK_MS = 300_000
-/** 审批的阻塞窗口（同上；审批超时按"撤销"结束，不会静默变成拒绝）。 */
-const APPROVAL_BLOCK_MS = 300_000
+const WAIT_NOTICE_MS = 300_000
+/** 审批同上。 */
+const APPROVAL_WAIT_NOTICE_MS = 300_000
 /**
- * 延后待答项保留时长（24 小时）：人隔天回来仍然能在 App / 电脑端看到并答复。
- * 到期才真正丢弃，避免无限堆积。
+ * 挂起硬上限（24 小时）：到点强制中止这一轮（**不交给模型**），并把待办转成
+ * `state: 'orphaned'`——卡片继续留在 App/电脑端，用户答复时走「续跑」。
+ *
+ * 为什么不无限等：没人答的问题会把那个会话一直占住（DSH 一轮对话一次），
+ * 24 小时足够覆盖"隔天才想起来"，再久就该收场了。用户也可以随时在 App 上
+ * 点「停止」立刻结束这一轮。
+ */
+const PARK_MAX_MS = 24 * 60 * 60 * 1000
+/**
+ * 延后（已中止）待答项保留时长：24 小时，人隔天回来仍能看到并答复（走续跑）。
  */
 const DEFERRED_TTL_MS = 24 * 60 * 60 * 1000
 /** 桥接轮询心跳窗口：这段时间内来轮询过，才认为「App 侧在线、可以接管」。 */
@@ -687,6 +693,24 @@ export function apply(ctx) {
 
   //#region 审批桥
 
+  /**
+   * 中止某个会话正在跑的那一轮。
+   *
+   * 用在哪：待答/待批挂满硬上限（24h）时，必须**主动结束这一轮**而不是把空答复
+   * 交回模型 —— 后者会让主模型接着替用户说话（用户实测反馈过这个问题）。
+   */
+  async function abortTurnForSession(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return
+    const controller = sessions()
+    if (controller === undefined || typeof controller.cancel !== 'function') return
+    try {
+      await controller.cancel({ sessionId }, turnSignal())
+      ctx.logger?.info?.(`[app-bridge] 已中止会话 ${sessionId} 的当前轮次（挂起超时）`)
+    } catch (error) {
+      ctx.logger?.warn?.(`[app-bridge] 中止轮次失败（忽略）: ${String(error?.message ?? error)}`)
+    }
+  }
+
   // 挂上 answerer：App 没答复就一直挂着（dsh 侧等待），答复后返回结果。
   //
   // 只在桥接最近 APPROVAL_ARM_MS 内来轮询过时才接管（App 通路在线）；否则原样
@@ -709,16 +733,24 @@ export function apply(ctx) {
       pendingApprovals.set(approvalId, entry)
       ctx.logger?.info?.(`[app-bridge] 审批 ${approvalId} 等待 App 决定（${tool}${reason.length > 0 ? `｜${reason}` : ''}）`)
       const timer = setTimeout(() => {
+        // 「等久了」：只打标记，继续挂着等 —— 不返回任何结果，模型不会说话
+        const live = pendingApprovals.get(approvalId)
+        if (live === undefined) return
+        live.stale = true
+        ctx.logger?.warn?.(`[app-bridge] 审批 ${approvalId} 已等待 ${Math.round(APPROVAL_WAIT_NOTICE_MS / 1000)}s，继续挂起（本轮不交给模型，卡片留在 App）`)
+      }, APPROVAL_WAIT_NOTICE_MS)
+      // 硬上限：中止这一轮（不替用户做否定决定），待办转成"已中止"，晚点批准走续跑
+      const parkTimer = setTimeout(() => {
         const live = pendingApprovals.get(approvalId)
         if (live === undefined) return
         pendingApprovals.delete(approvalId)
-        // 阻塞窗口到期：按"撤销"结束（不是"拒绝"）—— 人不在，不该替他做否定决定；
-        // 同时转进延后清单，用户回来批准时走续跑重试该操作。
         deferApproval(live)
-        ctx.logger?.warn?.(`[app-bridge] 审批 ${approvalId} 等 App 超过 ${Math.round(APPROVAL_BLOCK_MS / 1000)}s，按撤销结束并转为延后待批（24h 内仍可批准，届时续跑）`)
+        ctx.logger?.warn?.(`[app-bridge] 审批 ${approvalId} 挂起已满 ${Math.round(PARK_MAX_MS / 3600000)}h，中止本轮并转为延后待批（批准走续跑）`)
+        abortTurnForSession(sessionId)
         resolve('cancelled')
-      }, APPROVAL_BLOCK_MS)
+      }, PARK_MAX_MS)
       entry.timer = timer
+      entry.parkTimer = parkTimer
     })
   })
 
@@ -738,6 +770,7 @@ export function apply(ctx) {
     }
     pendingApprovals.delete(approvalId)
     clearTimeout(entry.timer)
+    clearTimeout(entry.parkTimer)
     const allow = action === 'allow' || action === 'allowed-once' || action === 'approve' || action === true
     entry.settle(allow ? 'allowed-once' : 'rejected')
     return { settled: true, delivered: true, deferred: false }
@@ -777,15 +810,24 @@ export function apply(ctx) {
     pendingQuestions.set(questionId, entry)
     ctx.logger?.info?.(`[app-bridge] 选择框 ${questionId} 已排给 App（${questions.length} 个问题）`)
     entry.timer = setTimeout(() => {
-      // 阻塞窗口到期：不再交电脑端网页（人不在电脑前时那会无限挂住整轮），
-      // 而是结束本轮 + 转进延后清单，让用户在 App 上晚点答复（走续跑）。
+      // 「等久了」：只打标记，**不结束本轮、不返回空答复** ——
+      // 一旦返回空答复，DSH 会认为"用户没答，继续"，主模型就会接着说话。
+      const live = pendingQuestions.get(questionId)
+      if (live === undefined) return
+      live.stale = true
+      ctx.logger?.warn?.(`[app-bridge] 选择框 ${questionId} 已等待 ${Math.round(WAIT_NOTICE_MS / 1000)}s，继续挂起（本轮不交给模型，卡片留在 App）`)
+    }, WAIT_NOTICE_MS)
+
+    // 硬上限：到点中止这一轮（模型不会说话），待办转为"已中止"，用户晚点答复走续跑
+    entry.parkTimer = setTimeout(() => {
       const live = pendingQuestions.get(questionId)
       if (live === undefined) return
       pendingQuestions.delete(questionId)
       deferQuestion(live)
-      ctx.logger?.warn?.(`[app-bridge] 选择框 ${questionId} 等 App 超过 ${Math.round(QUESTION_BLOCK_MS / 1000)}s，本轮结束并转为延后待答（24h 内仍可答复，届时续跑）`)
+      ctx.logger?.warn?.(`[app-bridge] 选择框 ${questionId} 挂起已满 ${Math.round(PARK_MAX_MS / 3600000)}h，中止本轮并转为延后待答（答复走续跑）`)
+      abortTurnForSession(sessionId)
       settle({ kind: 'deferred' })
-    }, QUESTION_BLOCK_MS)
+    }, PARK_MAX_MS)
 
     // ⚠️ 这里**不再与网页端并发抢答**（曾经是 Promise.race）。
     //
@@ -809,6 +851,7 @@ export function apply(ctx) {
       if (live !== undefined) {
         pendingQuestions.delete(questionId)
         clearTimeout(live.timer)
+        clearTimeout(live.parkTimer)
       }
     }
   }, { prepend: true })
@@ -839,6 +882,7 @@ export function apply(ctx) {
     }
     pendingQuestions.delete(questionId)
     clearTimeout(entry.timer)
+    clearTimeout(entry.parkTimer)
     const clean = (Array.isArray(answers) ? answers : [])
       .map((item) => ({
         id: typeof item?.id === 'string' ? item.id : String(item?.id ?? ''),
@@ -861,6 +905,7 @@ export function apply(ctx) {
     }
     pendingQuestions.delete(questionId)
     clearTimeout(entry.timer)
+    clearTimeout(entry.parkTimer)
     entry.settle({ kind: 'handoff' })
     return { settled: true, delivered: true, deferred: false }
   }
@@ -876,14 +921,18 @@ export function apply(ctx) {
           sessionId: entry.sessionId,
           createdAt: entry.createdAt,
           questions: entry.questions,
+          // pending: 刚问不久 ｜ waiting: 等超过 5 分钟但**仍在等**（本轮不会交给模型）
+          // orphaned: 挂满 24h 已中止本轮，答复要走续跑
+          state: entry.stale === true ? 'waiting' : 'pending',
           deferred: false,
         })),
-        // 延后项：本轮已结束，但答案仍想要（App 侧答复时走续跑）
+        // 已中止的延后项：本轮结束了，但答案仍想要（App 侧答复时走续跑）
         ...[...deferredQuestions.values()].map((entry) => ({
           questionId: entry.questionId,
           sessionId: entry.sessionId,
           createdAt: entry.createdAt,
           questions: entry.questions,
+          state: 'orphaned',
           deferred: true,
           deferredAt: entry.deferredAt,
         })),
@@ -909,15 +958,17 @@ export function apply(ctx) {
           tool: entry.tool,
           reason: entry.reason ?? '',
           createdAt: entry.createdAt,
+          state: entry.stale === true ? 'waiting' : 'pending',
           deferred: false,
         })),
-        // 延后项：那一轮已结束，用户晚点批准时会以续跑方式重试该操作
+        // 已中止的延后项：那一轮结束了，晚点批准会以续跑方式重试该操作
         ...[...deferredApprovals.values()].map((entry) => ({
           approvalId: entry.approvalId,
           sessionId: entry.sessionId,
           tool: entry.tool,
           reason: entry.reason ?? '',
           createdAt: entry.createdAt,
+          state: 'orphaned',
           deferred: true,
           deferredAt: entry.deferredAt,
         })),

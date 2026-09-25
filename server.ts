@@ -526,7 +526,13 @@ const pendingQuestions = new Map<string, {
   token?: string;
   userId?: string;
   at: number;
-  /** true = DSH 侧那一轮已经结束（超过阻塞窗口），答复要走「续跑」。 */
+  /**
+   * `pending` 刚问不久 ｜ `waiting` 等超过 5 分钟但**仍在等**（DSH 那一轮没有交给
+   * 模型，所以不会出现"AI 自己把问题答了"）｜ `orphaned` 挂满 24h 已中止本轮，
+   * 用户答复时 App 走「续跑」。
+   */
+  state?: 'pending' | 'waiting' | 'orphaned';
+  /** true = state 为 orphaned（兼容旧字段）。 */
   deferred?: boolean;
 }>();
 
@@ -534,9 +540,8 @@ const pendingQuestions = new Map<string, {
  * 待办保留时长：24 小时。
  *
  * 为什么从 10 分钟提到 24 小时（用户场景：发完指令人就走了，隔天才回来）：
- * DSH 的提问自己没有任何超时，人不在时那一轮会一直挂着；现在插件 5 分钟后主动
- * 结束本轮、把问题转成「延后待答」——卡片必须还在，否则用户回来什么都没有，
- * 只能重新发一遍指令。24 小时后才真正丢弃，避免无限堆积。
+ * DSH 的提问自己没有任何超时，人不在时那一轮会一直挂着（插件到 24h 才中止本轮）；
+ * 卡片必须还在，否则用户回来什么都没有，只能重新发一遍指令。
  */
 const QUESTION_TTL_MS = 24 * 60 * 60 * 1000;
 const prunePendingQuestions = () => {
@@ -3097,6 +3102,7 @@ if %errorlevel% neq 0 (
     questionId: string;
     sessionId?: string;
     questions: any[];
+    state?: 'pending' | 'waiting' | 'orphaned';
     deferred?: boolean;
   }) => {
     prunePendingQuestions();
@@ -3116,7 +3122,8 @@ if %errorlevel% neq 0 (
       questionId: question.questionId,
       sessionId: question.sessionId || "",
       questions: question.questions || [],
-      deferred: question.deferred === true,
+      state: question.state ?? (question.deferred === true ? 'orphaned' : 'pending'),
+      deferred: (question.state ?? (question.deferred === true ? 'orphaned' : 'pending')) === 'orphaned',
       at: Date.now(),
     };
     pendingQuestions.set(question.questionId, { ...payload, token: qToken, userId: userId || undefined });
@@ -3132,7 +3139,7 @@ if %errorlevel% neq 0 (
 
   app.post("/api/agent/waiting-question", (req, res) => {
     try {
-      const { token, questionId, sessionId, questions, deferred } = req.body || {};
+      const { token, questionId, sessionId, questions, deferred, state } = req.body || {};
       const qid = (questionId || "").toString().trim();
       if (!qid) return res.status(400).json({ error: "缺少 questionId" });
       const qToken = (token || "").toString().trim();
@@ -3140,6 +3147,7 @@ if %errorlevel% neq 0 (
         questionId: qid,
         sessionId,
         questions: Array.isArray(questions) ? questions : [],
+        state,
         deferred: deferred === true,
       });
       res.json({ success: true });
@@ -3227,7 +3235,9 @@ if %errorlevel% neq 0 (
     at: number;
     token?: string;
     userId?: string;
-    /** true = DSH 侧那一轮已结束，批准后要走「续跑」重试该操作。 */
+    /** 与选择框同一套状态机（pending / waiting / orphaned）。 */
+    state?: 'pending' | 'waiting' | 'orphaned';
+    /** true = state 为 orphaned（兼容旧字段）。 */
     deferred?: boolean;
   }>();
   /** 审批缓存有效期：与选择框一致 24 小时（人隔天回来还能看到并批准）。 */
@@ -3302,6 +3312,7 @@ if %errorlevel% neq 0 (
     sessionId?: string;
     tool?: string;
     reason?: string;
+    state?: 'pending' | 'waiting' | 'orphaned';
     deferred?: boolean;
   }) => {
     prunePendingApprovals();
@@ -3322,7 +3333,8 @@ if %errorlevel% neq 0 (
       sessionId: approval.sessionId || "",
       tool: approval.tool || "tool",
       reason: approval.reason || "",
-      deferred: approval.deferred === true,
+      state: approval.state ?? (approval.deferred === true ? 'orphaned' : 'pending'),
+      deferred: (approval.state ?? (approval.deferred === true ? 'orphaned' : 'pending')) === 'orphaned',
       at: Date.now(),
     };
     pendingApprovals.set(approval.approvalId, { ...payload, token: aToken, userId: userId || undefined });
@@ -3340,7 +3352,7 @@ if %errorlevel% neq 0 (
   // 桥接轮询通道的审批事件入口（WS 通道见 agent hub 的 approval_requested 分支）
   app.post("/api/agent/approval-event", (req, res) => {
     try {
-      const { token, type, approvalId, sessionId, tool, reason, deferred } = req.body || {};
+      const { token, type, approvalId, sessionId, tool, reason, deferred, state } = req.body || {};
       const aid = (approvalId || "").toString().trim();
       if (!aid) return res.status(400).json({ error: "缺少 approvalId" });
       const aToken = (token || "").toString().trim();
@@ -3350,7 +3362,7 @@ if %errorlevel% neq 0 (
         io.emit("agent_approval_resolved", { approvalId: aid, outcome: "resolved" });
         return res.json({ success: true });
       }
-      void deliverApprovalToUser(aToken, { approvalId: aid, sessionId, tool, reason, deferred: deferred === true });
+      void deliverApprovalToUser(aToken, { approvalId: aid, sessionId, tool, reason, state, deferred: deferred === true });
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -4283,11 +4295,12 @@ if %errorlevel% neq 0 (
             // 注意这里**不依赖 taskId**：用户在电脑网页里发起的一轮同样可能有提问。
             // deferred=true 表示那一轮已结束（超过阻塞窗口），答复要走续跑。
             const qToken = (msg.token || token || "").trim();
-            console.log(`[Agent Hub] Agent waiting user question ${msg.questionId} (session ${msg.sessionId || '-'}, deferred=${msg.deferred === true})`);
+            console.log(`[Agent Hub] Agent waiting user question ${msg.questionId} (session ${msg.sessionId || '-'}, state=${msg.state || (msg.deferred === true ? 'orphaned' : 'pending')})`);
             void deliverQuestionToUser(qToken, {
               questionId: String(msg.questionId || ""),
               sessionId: msg.sessionId,
               questions: Array.isArray(msg.questions) ? msg.questions : [],
+              state: msg.state,
               deferred: msg.deferred === true,
             });
           } else if (msg.type === "question_resolved") {
@@ -4300,12 +4313,13 @@ if %errorlevel% neq 0 (
             // DSH 挂起了授权请求（工具审批 / 文件沙箱越权升级）→ 转给 App 卡片。
             // 同样**不依赖 taskId**：网页端发起的一轮、或后台升级产生的审批都会走到这里。
             const aToken = (msg.token || token || "").trim();
-            console.log(`[Agent Hub] Agent waiting approval ${msg.approvalId} (tool ${msg.tool || '-'}, deferred=${msg.deferred === true})`);
+            console.log(`[Agent Hub] Agent waiting approval ${msg.approvalId} (tool ${msg.tool || '-'}, state=${msg.state || (msg.deferred === true ? 'orphaned' : 'pending')})`);
             void deliverApprovalToUser(aToken, {
               approvalId: String(msg.approvalId || ""),
               sessionId: msg.sessionId,
               tool: msg.tool,
               reason: msg.reason,
+              state: msg.state,
               deferred: msg.deferred === true,
             });
           } else if (msg.type === "approval_closed") {

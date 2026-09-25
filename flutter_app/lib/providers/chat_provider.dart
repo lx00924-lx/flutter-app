@@ -222,7 +222,8 @@ class ChatProvider extends ChangeNotifier {
             'questionId': questionId,
             'sessionId': data['sessionId'],
             'questions': rawQuestions,
-            // true = 那一轮已结束，答复要走续跑（见 _resumeDeferredQuestion）
+            // pending / waiting（仍在等，本轮不会交给模型）/ orphaned（本轮已中止 → 续跑）
+            'state': data['state']?.toString() ?? (data['deferred'] == true ? 'orphaned' : 'pending'),
             'deferred': data['deferred'] == true,
           });
         }
@@ -434,8 +435,8 @@ class ChatProvider extends ChangeNotifier {
   Future<bool> resolveApproval(String action) async {
     final pending = _pendingApproval;
     if (pending == null) return false;
-    // 延后项：那一轮早已结束，投回去没人接收 —— 走续跑（发一条消息让 Agent 重试/换方案）
-    if (pending['deferred'] == true) {
+    // 延后项（本轮已中止）：投回去没人接收 —— 走续跑（发一条消息让 Agent 重试/换方案）
+    if (pending['state']?.toString() == 'orphaned' || pending['deferred'] == true) {
       return _resumeDeferredApproval(pending, action);
     }
     final approvalId = pending['approvalId']?.toString() ?? '';
@@ -474,12 +475,25 @@ class ChatProvider extends ChangeNotifier {
   Map<String, dynamic>? _pendingQuestion;
   Map<String, dynamic>? get pendingQuestion => _pendingQuestion;
 
-  /// 当前挂起的选择框是否已经"延后"：那一轮早已结束（人走开超过阻塞窗口 5 分钟），
-  /// 答复不能再投回原轮次，必须走**续跑**。
-  bool get pendingQuestionDeferred => _pendingQuestion?['deferred'] == true;
+  /// 当前挂起的选择框状态：`pending`（刚问不久）/ `waiting`（等超过 5 分钟但
+  /// **仍在等** —— DSH 那一轮没有被交给模型，所以不会出现"AI 自己答了"）/
+  /// `orphaned`（挂满 24h 已中止本轮，答复必须走续跑）。
+  String get pendingQuestionState => _pendingQuestion?['state']?.toString() ?? 'pending';
 
-  /// 当前挂起的审批是否已经"延后"（同上）。
-  bool get pendingApprovalDeferred => _pendingApproval?['deferred'] == true;
+  /// 当前挂起的审批状态（同上）。
+  String get pendingApprovalState => _pendingApproval?['state']?.toString() ?? 'pending';
+
+  /// 本轮已经中止：答复不能再投回原轮次，只能走**续跑**。
+  bool get pendingQuestionOrphaned => pendingQuestionState == 'orphaned';
+
+  /// 同上（审批）。
+  bool get pendingApprovalOrphaned => pendingApprovalState == 'orphaned';
+
+  /// 兼容旧字段名（deferred == orphaned）。
+  bool get pendingQuestionDeferred => pendingQuestionOrphaned;
+
+  /// 兼容旧字段名。
+  bool get pendingApprovalDeferred => pendingApprovalOrphaned;
 
   /// 延后项的答复：先服务端销账，再发一条**续跑**消息回同一会话。
   ///
@@ -599,16 +613,23 @@ class ChatProvider extends ChangeNotifier {
   bool get pendingQuestionNeedsSubmit =>
       _pendingQuestionItems.any((item) => !isInstantAnswerQuestion(item));
 
-  /// 卡片里勾选/取消一个选项（多选可多勾，单选互斥）
+  /// 卡片里勾选/取消一个选项（多选可多勾，单选互斥）。
+  ///
+  /// 单选时**再点一次同一项就是取消勾选**：用户点了错的选项需要能撤回，
+  /// 旧实现里单选只能改选、无法回到"没选"，被用户点名过。
   void toggleQuestionPick(String questionItemId, String label, {required bool multiSelect}) {
     if (questionItemId.isEmpty || label.isEmpty) return;
     final picks = _questionPicks.putIfAbsent(questionItemId, () => <String>{});
     if (multiSelect) {
       if (!picks.remove(label)) picks.add(label);
     } else {
-      picks
-        ..clear()
-        ..add(label);
+      if (picks.contains(label)) {
+        picks.clear();
+      } else {
+        picks
+          ..clear()
+          ..add(label);
+      }
     }
     notifyListeners();
   }
@@ -681,8 +702,8 @@ class ChatProvider extends ChangeNotifier {
   Future<bool> answerQuestion(List<Map<String, dynamic>> answers) async {
     final pending = _pendingQuestion;
     if (pending == null) return false;
-    // 延后项：那一轮早已结束，投答案没人接收 —— 走续跑（把问题与答复作为一条新消息发回去）
-    if (pending['deferred'] == true) {
+    // 延后项（本轮已中止）：投答案没人接收 —— 走续跑（把问题与答复作为一条新消息发回去）
+    if (pending['state']?.toString() == 'orphaned' || pending['deferred'] == true) {
       return _resumeDeferredQuestion(pending, answers);
     }
     final questionId = pending['questionId']?.toString() ?? '';
@@ -748,6 +769,7 @@ class ChatProvider extends ChangeNotifier {
         'sessionId': first['sessionId']?.toString() ?? '',
         'tool': first['tool']?.toString() ?? '敏感操作',
         'reason': first['reason']?.toString() ?? '',
+        'state': first['state']?.toString() ?? (first['deferred'] == true ? 'orphaned' : 'pending'),
         'deferred': first['deferred'] == true,
       });
     } catch (e) {
@@ -771,6 +793,7 @@ class ChatProvider extends ChangeNotifier {
         'questionId': first['questionId']?.toString() ?? '',
         'sessionId': first['sessionId'],
         'questions': rawQuestions is List ? rawQuestions : const [],
+        'state': first['state']?.toString() ?? (first['deferred'] == true ? 'orphaned' : 'pending'),
         'deferred': first['deferred'] == true,
       });
     } catch (e) {
