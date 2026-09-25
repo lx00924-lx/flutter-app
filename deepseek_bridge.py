@@ -1150,6 +1150,10 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
 
 ACTIVE_SESSION_REGISTRY = {}
 
+# 最近一次 WebSocket 失败的时间戳：轮询通道据此决定"是否可以立刻尝试切回长连接"。
+# 冷却 60 秒，避免在 WS 真的不可用时（代理封 WS 等）在两条通道之间来回弹。
+_last_ws_failure_at = 0.0
+
 # WS 通道里跑着的任务协程引用。
 # 为什么要留着：asyncio 只对任务持弱引用，光 create_task 不保存引用的话，
 # 任务可能跑到一半被 GC 回收（官方文档明确提醒过）。任务结束后由回调移除。
@@ -2731,6 +2735,17 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             if isinstance(boot_id, str) and boot_id:
                 if seen_boot_id is None:
                     seen_boot_id = boot_id
+                    # 刚从 WebSocket 掉下来（不是用户显式用 --transport polling）：
+                    # 轮询一旦通了就尝试切回长连接 —— 否则中继重启一次，桥接就会一直
+                    # 停在轮询模式（会话不再同步、能力降级）。带 60s 冷却，避免 WS 真的
+                    # 不可用时来回弹。
+                    if args.transport != "polling" and time.time() - _last_ws_failure_at > 60:
+                        print("\033[92m[↻ 恢复] 中继已恢复响应，尝试切回 WebSocket 长连接...\033[0m")
+                        if question_task:
+                            question_task.cancel()
+                        if approval_task:
+                            approval_task.cancel()
+                        return True
                 elif boot_id != seen_boot_id:
                     print("\033[92m[↻ 恢复] 中继已重启（bootId 变化），切回 WebSocket 长连接...\033[0m")
                     if question_task:
@@ -3255,6 +3270,8 @@ async def run_bridge_client(args):
 
         except Exception as ws_err:
             ws_fail_count += 1
+            global _last_ws_failure_at
+            _last_ws_failure_at = time.time()
             print(f"\033[93m[WS 握手受阻 ({ws_err})]\033[0m 正在自动无缝切换至 HTTP 智能长轮询通道...")
             # 轮询通道返回 True = 中继重启过、可以切回长连接。
             # 旧实现在这里直接 return，于是中继一重启，桥接就永久停在轮询模式
