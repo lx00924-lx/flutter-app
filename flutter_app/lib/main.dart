@@ -79,7 +79,7 @@ void main() async {
         ),
       ],
       child: const TrayStatusBinder(
-        child: DeepSeekNativeApp(),
+        child: LxaiApp(),
       ),
     ),
   );
@@ -149,8 +149,8 @@ class _TrayStatusBinderState extends State<TrayStatusBinder>
   }
 }
 
-class DeepSeekNativeApp extends StatelessWidget {
-  const DeepSeekNativeApp({super.key});
+class LxaiApp extends StatelessWidget {
+  const LxaiApp({super.key});
 
   @override
   Widget build(BuildContext context) {

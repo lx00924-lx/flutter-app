@@ -3440,8 +3440,8 @@ if %errorlevel% neq 0 (
       // Return fallback models if not populated yet
       res.json({
         models: [
-          { id: "deepseek-v4-flash", name: "DeepSeek-V4-Flash", reasoningEfforts: ["off", "low", "high", "max"], defaultEffort: "high" },
-          { id: "deepseek-v4-pro", name: "DeepSeek-V4-Pro", reasoningEfforts: ["off", "low", "high", "max"], defaultEffort: "high" },
+          { id: "deepseek-v4-flash", name: "V4-Flash", reasoningEfforts: ["off", "low", "high", "max"], defaultEffort: "high" },
+          { id: "deepseek-v4-pro", name: "V4-Pro", reasoningEfforts: ["off", "low", "high", "max"], defaultEffort: "high" },
           { id: "deepseek-v4-flash-vision-exp", name: "视觉实验版 (Flash Vision)", reasoningEfforts: ["off", "low", "high", "max"], defaultEffort: "high" },
           { id: "ep-20260824185630-nkdc7", name: "Doubao (豆包)", reasoningEfforts: [] }
         ]

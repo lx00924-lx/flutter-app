@@ -1,5 +1,5 @@
-name: deepseek_chat_app
-description: "A cross-platform native AI assistant powered by Flutter, supporting DeepSeek, multiple LLMs, reasoning chains, and local bridge."
+name: lxai_app
+description: "LxAI - a cross-platform native AI assistant powered by Flutter: multi-provider LLMs, reasoning chains, and a local agent bridge."
 publish_to: 'none'
 version: 1.0.1+101
 
