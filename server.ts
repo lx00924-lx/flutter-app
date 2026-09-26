@@ -1901,7 +1901,29 @@ async function startServer() {
       }
 
       if (active && active.clientSessionId === clientSessionId) {
-        active.lastActive = Date.now();
+        // 命中即刷新活跃时间，并且**必须落盘**：早先这里只改了内存副本就返回，
+        // lastActive 永远停在登录时间，于是"槽位是否已过期"（canTakeover 的判据）
+        // 会把正在使用的设备也判成过期 —— 真被顶的那台就会静默重登，两台机器互相抢号。
+        //
+        // 落盘节流：本接口每 4~30 秒被轮询一次，没必要每次写文件；但节流上限（60 秒）
+        // 远小于判定过期用的 3 分钟，所以活跃设备在任何时刻看都是"新鲜"的。
+        const now = Date.now();
+        const last = Number(active.lastActive || active.loginTime || 0);
+        if (now - last > 60_000) {
+          try {
+            await withFileLock(ACTIVE_SESSIONS_FILE, async () => {
+              const fresh = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
+              const slot = fresh[userId]?.[deviceType];
+              // 锁内重新读一次再写：期间可能刚发生过登录换号，不能拿旧副本覆盖
+              if (slot && slot.clientSessionId === clientSessionId) {
+                slot.lastActive = now;
+                await safeWriteJSON(ACTIVE_SESSIONS_FILE, fresh);
+              }
+            });
+          } catch (writeErr) {
+            console.error("[Session] lastActive 落盘失败:", writeErr);
+          }
+        }
       }
       res.json({
         valid: true,
