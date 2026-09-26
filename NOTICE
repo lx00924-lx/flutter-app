@@ -1,25 +1,39 @@
-LxAI — 本地 Agent 远程桥接（App + 中继 + Bridge）
+LxAI — 本地 Agent 远程桥接（App + 中继服务 + Bridge）
 Copyright (C) 2026 lx00924-lx
 https://github.com/lx00924-lx/flutter-app
 
-本产品以 GNU Affero General Public License v3.0（AGPL-3.0-only）发布，
-完整条款见同目录 LICENSE 文件。
+本项目以 Apache License 2.0 发布，完整条款见同目录 LICENSE。
 
-依据 AGPL-3.0 第 7(b) 条，任何分发或以网络服务方式对外提供本项目的衍生版本，
-均须在产品界面的「关于 / 法律声明 / 开源许可」页或随附文档的显著位置保留以下署名：
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
 
-    项目：LxAI — 本地 Agent 远程桥接
-    作者：lx00924-lx
-    源码：https://github.com/lx00924-lx/flutter-app
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+
+------------------------------------------------------------------------------
+免责声明（重要）
+
+* 本软件按“现状”提供，不附带任何明示或默示的担保，包括但不限于对适销性、
+  特定用途适用性以及不侵权的担保。作者不对任何直接、间接、附带、特殊、
+  惩罚性或后果性损害承担责任。
+* 使用者须自行确认：**只对自己拥有所有权或已获得合法授权的设备**使用本软件
+  的远程控制能力。任何未经授权控制他人设备的行为由使用者自行承担全部责任。
+* 本项目不承诺任何安全性、可用性或数据不丢失；请勿将本地服务端口直接暴露到
+  公网。对外提供中继服务时，请同时阅读 TERMS.md 与 PRIVACY.md。
 
 ------------------------------------------------------------------------------
 第三方名称与商标
 
-* 本项目为第三方独立开发，与 DeepSeek（杭州深度求索人工智能基础技术研究
-  有限公司）及其关联方**无任何隶属、合作、赞助或背书关系**。
-* “DeepSeek”“DeepSeek Harness”及相关名称与标识归其各自权利人所有。本项目
-  仅在说明**兼容性与互操作性**的范围内提及这些名称（指称性合理使用），
-  不表示任何官方认证、授权或合作。
-* 其余第三方组件（Flutter / Dart pub 生态、Node npm 生态等）的版权与许可
-  归各自作者所有，完整清单见 App 内「关于 → 开源许可」页（由 Flutter
-  LicenseRegistry 自动汇总）。
+* 本项目为第三方独立开发，与任何被兼容或被提及的产品、服务提供方**无任何
+  隶属、合作、赞助或背书关系**。
+* 相关产品名称与标识归其各自权利人所有；本项目仅在说明**兼容性与互操作性**
+  的范围内提及（指称性合理使用），不表示任何官方认证或授权。Apache License
+  2.0 第 6 条亦明确：本许可不授予任何商标权。
+* 其余第三方组件（Flutter / Dart pub 生态、Node npm 生态等）的版权与许可归
+  各自作者所有，完整清单见 App 内「关于 → 开源许可」页。

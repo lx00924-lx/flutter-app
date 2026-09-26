@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/chat_provider.dart';
+import '../widgets/legal_documents.dart';
 import 'chat_screen.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -13,6 +14,9 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   int _tabIndex = 0; // 0: 登录, 1: 注册
+
+  /// 用户协议 / 隐私政策是否已勾选（未勾选不允许登录/注册）。
+  bool _agreedToTerms = false;
 
   // 登录表单
   final TextEditingController _loginAccountCtrl = TextEditingController();
@@ -48,6 +52,13 @@ class _LoginScreenState extends State<LoginScreen> {
     final account = _loginAccountCtrl.text.trim();
     final password = _loginPasswordCtrl.text;
 
+    // 兜底：按钮虽已置灰，键盘回车仍可能走到这里
+    if (!_agreedToTerms) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请先阅读并同意《用户协议》和《隐私政策》')),
+      );
+      return;
+    }
     if (account.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('请输入登录账号')),
@@ -92,6 +103,12 @@ class _LoginScreenState extends State<LoginScreen> {
     final password = _regPasswordCtrl.text;
     final confirmPassword = _regConfirmPasswordCtrl.text;
 
+    if (!_agreedToTerms) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请先阅读并同意《用户协议》和《隐私政策》')),
+      );
+      return;
+    }
     if (account.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('请输入登录账号')),
@@ -348,7 +365,60 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
           onSubmitted: (_) => _handleLogin(),
         ),
-        const SizedBox(height: 28),
+        const SizedBox(height: 12),
+        // 用户协议 / 隐私政策确认：不勾选不能登录。
+        // 目的很直接——把"只能控制自己拥有或已获授权的设备"这条明确告知使用者，
+        // 出事时这份"已告知并同意"的记录比事后辩解有用得多。
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 26,
+              height: 26,
+              child: Checkbox(
+                value: _agreedToTerms,
+                onChanged: (v) => setState(() => _agreedToTerms = v ?? false),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 3),
+                child: Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      '我已阅读并同意',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                    ),
+                    InkWell(
+                      onTap: () => showLegalDocument(context, LegalDocument.terms),
+                      child: Text(
+                        '《用户协议》',
+                        style: TextStyle(fontSize: 12, color: primaryColor, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    Text('和', style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+                    InkWell(
+                      onTap: () => showLegalDocument(context, LegalDocument.privacy),
+                      child: Text(
+                        '《隐私政策》',
+                        style: TextStyle(fontSize: 12, color: primaryColor, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    Text(
+                      '，并确认只对自己拥有或已获授权的设备使用远程控制。',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
         ElevatedButton(
           style: ElevatedButton.styleFrom(
             backgroundColor: primaryColor,
@@ -359,7 +429,7 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
             elevation: 2,
           ),
-          onPressed: _isLoading ? null : _handleLogin,
+          onPressed: (_isLoading || !_agreedToTerms) ? null : _handleLogin,
           child: _isLoading
               ? const SizedBox(
                   width: 22,
@@ -471,7 +541,51 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
           onSubmitted: (_) => _handleRegister(),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 12),
+        // 注册同样需要确认条款（与登录页同一份勾选状态）
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 26,
+              height: 26,
+              child: Checkbox(
+                value: _agreedToTerms,
+                onChanged: (v) => setState(() => _agreedToTerms = v ?? false),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 3),
+                child: Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text('我已阅读并同意', style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+                    InkWell(
+                      onTap: () => showLegalDocument(context, LegalDocument.terms),
+                      child: Text('《用户协议》',
+                          style: TextStyle(fontSize: 12, color: primaryColor, fontWeight: FontWeight.w600)),
+                    ),
+                    Text('和', style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+                    InkWell(
+                      onTap: () => showLegalDocument(context, LegalDocument.privacy),
+                      child: Text('《隐私政策》',
+                          style: TextStyle(fontSize: 12, color: primaryColor, fontWeight: FontWeight.w600)),
+                    ),
+                    Text(
+                      '，并确认只对自己拥有或已获授权的设备使用远程控制。',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
         ElevatedButton(
           style: ElevatedButton.styleFrom(
             backgroundColor: primaryColor,
@@ -482,7 +596,7 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
             elevation: 2,
           ),
-          onPressed: _isLoading ? null : _handleRegister,
+          onPressed: (_isLoading || !_agreedToTerms) ? null : _handleRegister,
           child: _isLoading
               ? const SizedBox(
                   width: 22,

@@ -9,6 +9,7 @@ import '../services/update_service.dart';
 import '../services/keep_alive_service.dart';
 import '../services/notification_service.dart';
 import '../utils/url_launcher_helper.dart';
+import '../widgets/legal_documents.dart';
 import 'account_settings_screen.dart';
 import 'personalization_settings_screen.dart';
 import 'api_settings_screen.dart';
@@ -608,14 +609,28 @@ class _GithubReleaseCardState extends State<_GithubReleaseCard> {
               ],
             ),
             const SizedBox(height: 6),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: TextButton.icon(
-                onPressed: () => _showOpenSourceLicenses(context),
-                icon: const Icon(Icons.gavel_outlined, size: 16),
-                label: const Text('开源许可与署名', style: TextStyle(fontSize: 12.5)),
-                style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6)),
-              ),
+            Wrap(
+              spacing: 4,
+              children: [
+                TextButton.icon(
+                  onPressed: () => _showOpenSourceLicenses(context),
+                  icon: const Icon(Icons.gavel_outlined, size: 16),
+                  label: const Text('开源许可与署名', style: TextStyle(fontSize: 12.5)),
+                  style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6)),
+                ),
+                TextButton.icon(
+                  onPressed: () => showLegalDocument(context, LegalDocument.terms),
+                  icon: const Icon(Icons.description_outlined, size: 16),
+                  label: const Text('用户协议', style: TextStyle(fontSize: 12.5)),
+                  style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6)),
+                ),
+                TextButton.icon(
+                  onPressed: () => showLegalDocument(context, LegalDocument.privacy),
+                  icon: const Icon(Icons.privacy_tip_outlined, size: 16),
+                  label: const Text('隐私政策', style: TextStyle(fontSize: 12.5)),
+                  style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6)),
+                ),
+              ],
             ),
           ],
         ),
