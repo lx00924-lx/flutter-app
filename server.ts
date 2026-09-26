@@ -41,6 +41,27 @@ function toCrlf(text: string): string {
   return text.replace(/\r?\n/g, "\r\n");
 }
 
+/**
+ * 单点互斥的"槽位是否已经没人用"判据。
+ *
+ * 背景：1 手机 + 1 电脑互斥是按 clientSessionId **严格相等**比对的。一旦本机 id 与
+ * 服务端 active_sessions 里那份分叉（最典型的来源：服务器不可达时 App 走了
+ * "离线登录"兜底，本地换了一个服务端从没见过的新 id），这台设备每次连上来都会被
+ * 判成"已在另一台设备上登录"，用户看到的是**假顶号**，而且点重新登录也可能再分叉。
+ *
+ * 判据取该槽位的最后活跃时间：真在用的设备每 4~30 秒会刷一次（check-session 里
+ * 命中就更新 lastActive），超过 SLOT_STALE_MS 没人刷，才允许持有账号密码的客户端
+ * 静默重登接管。真在用的另一台设备槽位始终是"新鲜"的，所以不会出现两台机器互抢。
+ */
+const SLOT_STALE_MS = 3 * 60 * 1000;
+
+function isSlotStale(active?: { lastActive?: number; loginTime?: number } | null): boolean {
+  if (!active) return true;
+  const last = Number(active.lastActive || active.loginTime || 0);
+  if (!last) return true;
+  return Date.now() - last > SLOT_STALE_MS;
+}
+
 /** 生成本地时间前缀，形如 `2026-02-14 18:27:03.123 +08:00`。 */
 function logTimestamp(date: Date = new Date()): string {
   const pad = (n: number, width = 2) => String(n).padStart(width, "0");
@@ -1771,11 +1792,10 @@ async function startServer() {
             deviceType: cleanDeviceType,
             kickedSessionId: existingSession.clientSessionId,
           });
-          io.to(`user_${username}`).emit("force_logout", {
-            reason,
-            deviceType: cleanDeviceType,
-            kickedSessionId: existingSession.clientSessionId,
-          });
+          // 刻意不再广播到 `user_${username}`（该用户全部设备）：
+          // 电脑端登录会把手机端也通知成"你被顶下线了"（实测手机确实收到过）。
+          // 互斥本来就是按设备类型分槽的（1 手机 + 1 电脑可并存），
+          // 顶号通知只能发给被顶的那一类设备。
         }
 
         sessions[username][cleanDeviceType] = {
@@ -1862,11 +1882,21 @@ async function startServer() {
       const active = sessions[userId]?.[deviceType];
 
       if (active && active.clientSessionId && active.clientSessionId !== clientSessionId) {
+        // canTakeover：该槽位早已没人刷活跃（对方设备关掉/本地与服务端 id 分叉）时置位。
+        // 客户端凭这个标记做一次"带账号密码的静默重登"来自愈，而不是弹假顶号弹窗；
+        // 真在用的设备槽位是新鲜的，拿不到这个标记，所以不会两台机器互抢。
+        const canTakeover = isSlotStale(active);
+        if (canTakeover) {
+          console.log(
+            `[Session] ${deviceType} 槽位已过期（${Math.round((Date.now() - Number(active.lastActive || active.loginTime || 0)) / 1000)}s 无活跃），允许客户端静默重登接管`
+          );
+        }
         return res.status(401).json({
           valid: false,
           error: "FORCE_LOGOUT",
           reason: `您的账号已在另一台${deviceType === 'mobile' ? '手机' : '电脑'}上登录，当前设备已被下线。`,
           kickedSessionId: clientSessionId,
+          canTakeover,
         });
       }
 
@@ -4467,10 +4497,14 @@ if %errorlevel% neq 0 (
   }
   const appSockets = new Map<string, AppSocket>();
 
-  const pushToUser = (userId: string, event: string, payload: any) => {
+  const pushToUser = (userId: string, event: string, payload: any, deviceType?: string) => {
     if (!userId) return;
     for (const conn of appSockets.values()) {
       if (conn.userId !== userId) continue;
+      // 指定设备类型时只推该类型：socket.io 房间名区分 user_<id> 与
+      // user_<id>_<device>，而 App 推送通道此前只按 userId 过滤，
+      // 于是"发给电脑端"的事件（如顶号通知）也会落到手机上。
+      if (deviceType && conn.deviceType !== deviceType) continue;
       if (conn.ws.readyState !== WSWebSocket.OPEN) continue;
       try {
         conn.ws.send(JSON.stringify({ event, data: payload ?? null, at: Date.now() }));
@@ -4502,9 +4536,10 @@ if %errorlevel% neq 0 (
     const originalTargetEmit = target.emit.bind(target);
     target.emit = (event: string, ...args: any[]) => {
       try {
-        // room 形如 user_<userId>：只推给该用户自己的设备
-        const userId = typeof room === "string" && room.startsWith("user_") ? room.slice(5) : "";
-        if (userId) pushToUser(userId, event, args[0]);
+        // room 形如 user_<userId> 或 user_<userId>_<deviceType>：
+        // 前者推给该用户全部设备，后者只推给对应设备类型。
+        const m = typeof room === "string" ? /^user_(.+?)(?:_(mobile|desktop))?$/.exec(room) : null;
+        if (m && m[1]) pushToUser(m[1], event, args[0], m[2]);
         else pushToAll(event, args[0]);
       } catch {}
       return originalTargetEmit(event, ...args);
@@ -4530,9 +4565,18 @@ if %errorlevel% neq 0 (
       const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
       const active = sessions[userId]?.[deviceType === "mobile" ? "mobile" : "desktop"];
       if (active && active.clientSessionId && active.clientSessionId !== clientSessionId) {
+        // 载荷里必须带上 kickedSessionId：少了它，客户端只能退化成"按设备类型判断"，
+        // 于是同类型的每个实例（包括刚启动的这个）都会把自己当成被顶下线的那一个，
+        // 表现就是"每次重启 App 都弹一次账号已下线"。
+        const canTakeover = isSlotStale(active);
         clientWs.send(JSON.stringify({
           event: "force_logout",
-          data: { reason: `您的账号已在另一台${deviceType === "mobile" ? "手机" : "电脑"}上登录，当前设备已被下线。` },
+          data: {
+            reason: `您的账号已在另一台${deviceType === "mobile" ? "手机" : "电脑"}上登录，当前设备已被下线。`,
+            deviceType: deviceType === "mobile" ? "mobile" : "desktop",
+            kickedSessionId: active.clientSessionId,
+            canTakeover,
+          },
         }));
         clientWs.close(4002, "kicked");
         return;

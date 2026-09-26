@@ -150,7 +150,15 @@ class SettingsProvider extends ChangeNotifier {
       userId: _settings.loginAccount,
       clientSessionId: _settings.clientSessionId,
       deviceType: AppSettings.currentDeviceType,
-      onKicked: (reason) {
+      onKicked: (reason, canTakeover) {
+        // 服务端说这个设备槽位早已没人活跃 → 是本地与服务端 id 分叉造成的假顶号，
+        // 用本地账号密码静默重登一次即可自愈；接管失败再按真实顶号弹窗。
+        if (canTakeover) {
+          unawaited(_trySilentTakeover().then((ok) {
+            if (!ok) handleForceLogout(reason);
+          }));
+          return;
+        }
         handleForceLogout(reason);
       },
       onTokenSynced: _applyServerAgentToken,
@@ -237,12 +245,23 @@ class SettingsProvider extends ChangeNotifier {
       case 'force_logout':
         final targetDevice = data['deviceType']?.toString() ?? '';
         final kickedSession = data['kickedSessionId']?.toString() ?? '';
+        final canTakeover = data['canTakeover'] == true;
+        // kickedSessionId 缺失时只能退化成按设备类型判断（服务端早期版本就没带这个字段，
+        // 那会让同类型的每个实例都把自己当成被顶的那个）。现在服务端已带上，
+        // 且推送目标也按设备类型过滤，不再误伤。
         final isMine = kickedSession.isNotEmpty
             ? kickedSession == _settings.clientSessionId
             : targetDevice == AppSettings.currentDeviceType;
         if (isMine) {
           final reason = data['reason']?.toString() ?? '您的账号已在另一台设备上登录，当前设备已被下线。';
-          handleForceLogout(reason);
+          if (canTakeover) {
+            // 对方槽位早已过期 → 静默重登接管，不打扰用户
+            unawaited(_trySilentTakeover().then((ok) {
+              if (!ok) handleForceLogout(reason);
+            }));
+          } else {
+            handleForceLogout(reason);
+          }
         }
         return;
       default:
@@ -417,9 +436,14 @@ class SettingsProvider extends ChangeNotifier {
       return {'success': false, 'message': '请输入账号与密码'};
     }
 
-    // 登录时生成全新唯一的 clientSessionId
+    // 登录时生成全新唯一的 clientSessionId。
+    //
+    // 注意：这里只生成，**不落盘**，要等服务端真的登记成功（见下方 success 分支）才写。
+    // 曾经的写法是"先生成本地 id，再发登录请求"，于是请求失败（中继重启/断网）时
+    // 会走下面的"离线登录"兜底并把新 id 持久化 —— 这个 id 服务端从没见过，
+    // 之后每次 check-session / 推送握手都被判成"已在另一台设备登录"，用户看到的是
+    // 每次启动都弹「账号已下线」的假顶号（本地 ef7da695… vs 中继 33da7e49… 即此例）。
     final newSessionId = const Uuid().v4();
-    _settings.clientSessionId = newSessionId;
 
     final res = await SyncService.instance.loginWithServer(
       username: cleanAccount,
@@ -429,6 +453,8 @@ class SettingsProvider extends ChangeNotifier {
     );
 
     if (res['success'] == true) {
+      // 服务端已把本次会话写进 active_sessions，本地才跟着换 id，两边始终一致
+      _settings.clientSessionId = newSessionId;
       _settings.loginAccount = cleanAccount;
       _settings.accountPassword = password;
       _settings.isLoggedIn = true;
@@ -444,8 +470,11 @@ class SettingsProvider extends ChangeNotifier {
 
       return {'success': true};
     } else {
-      // 若服务器不可达，且本地已保存过同账号密码，允许本地离线登录
+      // 若服务器不可达，且本地已保存过同账号密码，允许本地离线登录。
+      // 离线登录**沿用本地已有的 clientSessionId**（不换成服务端没见过的新 id），
+      // 否则一旦分叉，用户会反复看到假顶号。
       if (_settings.loginAccount == cleanAccount && _settings.accountPassword == password) {
+        debugPrint('[Settings] 服务端不可达，走本地离线登录（沿用原 clientSessionId，避免与服务端记录分叉）');
         _settings.isLoggedIn = true;
         _save(pushToCloud: false);
         _startSessionMonitoring();
@@ -456,6 +485,32 @@ class SettingsProvider extends ChangeNotifier {
         'message': res['message'] ?? '登录失败，请检查账号与密码',
       };
     }
+  }
+
+  /// 记录上一次静默接管的时间，避免与"真在用的另一台设备"来回抢号
+  DateTime? _lastTakeoverAt;
+
+  /// 被判定"已在另一台设备登录"时的自愈：服务端若带了 canTakeover（该设备槽位
+  /// 早已没人刷活跃），就用本地保存的账号密码静默重登一次，把服务端记录重新对齐到
+  /// 本机 id，然后照常继续，不弹「账号已下线」。
+  ///
+  /// 这是**认证过的接管**：真在用的另一台设备每 4~30 秒就会刷新槽位活跃时间，
+  /// 服务端不会给出 canTakeover，所以不会出现两台机器互相把对方顶下线。
+  /// 60 秒内最多尝试一次，防止异常情况下打转。
+  Future<bool> _trySilentTakeover() async {
+    final last = _lastTakeoverAt;
+    if (last != null && DateTime.now().difference(last) < const Duration(seconds: 60)) {
+      return false;
+    }
+    final account = _settings.loginAccount.trim();
+    final password = _settings.accountPassword;
+    if (account.isEmpty || password.isEmpty) return false;
+    _lastTakeoverAt = DateTime.now();
+    debugPrint('[Settings] 检测到本机会话与服务端记录分叉，尝试静默重登接管');
+    final res = await loginWithServer(account, password);
+    final ok = res['success'] == true;
+    debugPrint('[Settings] 静默接管${ok ? "成功，已恢复连接" : "失败，按真实顶号处理"}');
+    return ok;
   }
 
   /// 远程服务端注册

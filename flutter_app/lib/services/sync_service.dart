@@ -72,7 +72,7 @@ class SyncService {
 
   bool _isSyncing = false;
   Timer? _sessionWatcherTimer;
-  void Function(String reason)? onForceLogout;
+  void Function(String reason, bool canTakeover)? onForceLogout;
   /// 服务端换发 Agent Token 时回调（用于刷新本地设置与界面显示）
   void Function(String token)? onAgentTokenSynced;
   /// 收到手机端下发的桥接控制指令时回调（电脑端据此启停本机脚本）
@@ -268,8 +268,11 @@ class SyncService {
       final data = error.response?.data;
       if (data is Map && data['error'] == 'FORCE_LOGOUT') {
         final reason = data['reason']?.toString() ?? '您的账号已在另一台设备上登录，当前设备已被下线。';
+        // canTakeover：服务端判定该设备槽位早已没人活跃（对方关掉了 / 本地与服务端
+        // 的 clientSessionId 分叉），客户端可凭账号密码静默重登接管，无需弹假顶号。
+        final canTakeover = data['canTakeover'] == true;
         stopSessionWatcher();
-        onForceLogout?.call(reason);
+        onForceLogout?.call(reason, canTakeover);
       }
     }
   }
@@ -279,7 +282,7 @@ class SyncService {
     required String userId,
     required String clientSessionId,
     required String deviceType,
-    required void Function(String reason) onKicked,
+    required void Function(String reason, bool canTakeover) onKicked,
     void Function(String token)? onTokenSynced,
     void Function(String command)? onCommand,
     void Function(bool online)? onOnlineChanged,
@@ -357,7 +360,7 @@ class SyncService {
         if (data is Map && data['valid'] == false) {
           final reason = data['reason']?.toString() ?? '您的账号已在另一台设备上登录，当前设备已被下线。';
           stopSessionWatcher();
-          onForceLogout?.call(reason);
+          onForceLogout?.call(reason, data['canTakeover'] == true);
         } else if (data is Map) {
           // 服务端在此接口顺带下发当前 Agent Token：换发后各端无需重登即可收敛，
           // 修复"点重置 token 后界面仍显示旧值、两端 token 不一致"的问题。
