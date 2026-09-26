@@ -3,6 +3,12 @@
   "private": true,
   "version": "1.0.1",
   "type": "module",
+  "license": "AGPL-3.0-only",
+  "author": "lx00924-lx",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lx00924-lx/flutter-app.git"
+  },
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",

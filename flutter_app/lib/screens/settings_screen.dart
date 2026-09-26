@@ -607,9 +607,42 @@ class _GithubReleaseCardState extends State<_GithubReleaseCard> {
                 ),
               ],
             ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () => _showOpenSourceLicenses(context),
+                icon: const Icon(Icons.gavel_outlined, size: 16),
+                label: const Text('开源许可与署名', style: TextStyle(fontSize: 12.5)),
+                style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6)),
+              ),
+            ),
           ],
         ),
       ),
+    );
+  }
+
+  /// 开源许可与署名页。
+  ///
+  /// 两件事一起满足：
+  /// 1) AGPL-3.0 第 7(b) 条要求衍生版本在「关于 / 法律声明」里保留作者署名
+  ///    —— 本页就是那个界面；
+  /// 2) Flutter 的 LicenseRegistry 会把**全部第三方依赖**的许可证自动汇总进来
+  ///    （pub 包 / 插件），合规又省事。
+  void _showOpenSourceLicenses(BuildContext context) {
+    showLicensePage(
+      context: context,
+      applicationName: 'LxAI',
+      applicationVersion: 'v${AppSettings.currentVersion}',
+      applicationLegalese: 'Copyright (C) 2026 lx00924-lx\n'
+          '本项目以 AGPL-3.0-only 发布（含中继服务端、Bridge 与 App）：\n'
+          'https://github.com/${AppSettings.officialGithubOwner}/${AppSettings.officialGithubRepo}\n\n'
+          '第三方独立项目，与 DeepSeek 官方无隶属、合作或背书关系；\n'
+          '“DeepSeek”“DeepSeek Harness”等名称与标识归其各自权利人所有，\n'
+          '本项目仅在说明兼容性与互操作性的范围内提及。\n\n'
+          '任何分发或以网络服务方式对外提供本项目的衍生版本，\n'
+          '均须在显著位置保留上述署名与源码地址。',
     );
   }
 }
