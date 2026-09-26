@@ -32,9 +32,12 @@ class BridgeScriptHelper {
     final cleanHarness = harnessUrl.isNotEmpty ? harnessUrl : 'http://127.0.0.1:3080';
     final cleanToken = token.isNotEmpty ? token : 'agent_default';
 
+    // 行尾必须显式写成 CRLF 后再落盘：Windows 的 cmd.exe 按 CRLF 定位批处理行边界，
+    // LF-only 的 .bat 会被逐字符吃掉（echo → cho、title → t），双击直接报
+    // "xxx 不是内部或外部命令"。这里的模板字符串换行天生是 LF，故统一转换一次。
     return '''@echo off
 chcp 65001 >nul
-title LxAI 本地 Agent 桥接 本地智能体桥接服务
+title LxAI Bridge 本地智能体桥接服务
 echo ======================================================================
 echo    LxAI 本地 Agent 桥接 一键启动脚本 (会话自动管理增强版)
 echo    服务器地址: $cleanServer
@@ -67,7 +70,7 @@ if %errorlevel% neq 0 (
     echo 桥接服务异常退出，请检查上方日志。
     pause
 )
-''';
+'''.replaceAll('\n', '\r\n');
   }
 
   /// 获取标准 Python 桥接守护脚本 (lxai_bridge.py)

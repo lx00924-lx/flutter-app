@@ -29,6 +29,18 @@ const LOG_TZ_LABEL = (() => {
   return `UTC${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
 })();
 
+/**
+ * 把文本行尾统一成 CRLF。
+ *
+ * 为什么必须做：Windows 的 cmd.exe 解析 .bat 时按 CRLF 定位行边界，LF-only 的文件
+ * 会被逐字符误吃掉（`echo` 变 `cho`、`title` 变 `t`），脚本一开头就报
+ * "xxx 不是内部或外部命令" 而彻底跑不起来。Node 的模板字符串里换行天生是 LF，
+ * 所以凡是把脚本内容直接发给用户下载的路由，都必须过一遍这个函数。
+ */
+function toCrlf(text: string): string {
+  return text.replace(/\r?\n/g, "\r\n");
+}
+
 /** 生成本地时间前缀，形如 `2026-02-14 18:27:03.123 +08:00`。 */
 function logTimestamp(date: Date = new Date()): string {
   const pad = (n: number, width = 2) => String(n).padStart(width, "0");
@@ -3037,7 +3049,7 @@ if %errorlevel% neq 0 (
     res.setHeader("Content-Type", "application/octet-stream");
     res.setHeader("Content-Disposition", 'attachment; filename="run_bridge.bat"');
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.send(batContent);
+    res.send(toCrlf(batContent));
   });
 
   app.get("/api/agent/status", async (req, res) => {
@@ -4185,7 +4197,7 @@ if %errorlevel% neq 0 (
 `;
       res.setHeader("Content-Type", "application/x-bat; charset=utf-8");
       res.setHeader("Content-Disposition", 'attachment; filename="start_bridge.bat"');
-      res.send(batContent);
+      res.send(toCrlf(batContent));
     } catch (err: any) {
       res.status(500).json({ error: "Failed to generate bat script" });
     }
