@@ -34,9 +34,9 @@ class BridgeScriptHelper {
 
     return '''@echo off
 chcp 65001 >nul
-title DeepSeek Bridge 本地智能体桥接服务
+title LxAI 本地 Agent 桥接 本地智能体桥接服务
 echo ======================================================================
-echo    DeepSeek Bridge 一键启动脚本 (会话自动管理增强版)
+echo    LxAI 本地 Agent 桥接 一键启动脚本 (会话自动管理增强版)
 echo    服务器地址: $cleanServer
 echo    本地 Harness: $cleanHarness
 echo ======================================================================
@@ -80,7 +80,7 @@ if %errorlevel% neq 0 (
         : AppConfig.normalizedServerBaseUrl;
     return '''#!/usr/bin/env python3
 """
-DeepSeek Harness 本地安全反向桥接客户端 (DeepSeek Bridge v3.6 - 工业增强/双模高可用版)
+本地 Agent 安全反向桥接客户端 (LxAI 本地 Agent 桥接 v3.6 - 工业增强/双模高可用版)
 ======================================================================
 核心特性：
 1. 本地主动向上发起连接至 App 调度服务器（免公网 IP，免端口映射）。
@@ -109,7 +109,7 @@ logging.basicConfig(
 logger = logging.getLogger("Bridge")
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="DeepSeek Harness 本地反向桥接")
+    parser = argparse.ArgumentParser(description="本地 Agent 反向桥接")
     parser.add_argument("--token", type=str, required=True, help="配对通信 Token")
     parser.add_argument("--server", type=str, default="$resolvedServerUrl", help="中继服务器地址")
     parser.add_argument("--harness-url", type=str, default="$defaultHarnessUrl", help="本地 Harness API 地址")
@@ -129,7 +129,7 @@ def test_harness_connection(harness_url):
 def main():
     args = parse_args()
     logger.info("=" * 60)
-    logger.info(f"🚀 DeepSeek Bridge 启动中...")
+    logger.info(f"🚀 LxAI 本地 Agent 桥接 启动中...")
     logger.info(f"• 调度服务器: {args.server}")
     logger.info(f"• 本地 Harness: {args.harness_url}")
     logger.info(f"• 配对 Token: {args.token}")

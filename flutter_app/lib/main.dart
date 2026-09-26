@@ -158,7 +158,7 @@ class DeepSeekNativeApp extends StatelessWidget {
 
     return MaterialApp(
       navigatorKey: rootNavigatorKey,
-      title: 'DeepSeek Native AI',
+      title: 'LxAI · 本地 Agent',
       debugShowCheckedModeBanner: false,
       locale: const Locale('zh', 'CN'),
       supportedLocales: const [

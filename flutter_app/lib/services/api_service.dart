@@ -18,7 +18,7 @@ class ApiService {
     HttpClientHelper.configureProxy(_dio);
   }
 
-  /// 智能解析并构建标准聊天请求地址（全自动适配 Gemini、DeepSeek、OpenAI、火山方舟、Ollama 等）
+  /// 智能解析并构建标准聊天请求地址（全自动适配 Gemini、本地宿主、OpenAI、火山方舟、Ollama 等）
   static String buildChatCompletionsUrl(String endpoint) {
     String cleanUrl = endpoint.trim();
     while (cleanUrl.endsWith('/')) {
@@ -77,7 +77,7 @@ class ApiService {
     return name;
   }
 
-  /// 智能从指定端点获取可用模型列表（兼容 OpenAI、Gemini、DeepSeek、火山方舟、Ollama、LM Studio 等）
+  /// 智能从指定端点获取可用模型列表（兼容 OpenAI、Gemini、本地宿主、火山方舟、Ollama、LM Studio 等）
   Future<List<String>> fetchModelList({
     required String endpoint,
     required String apiKey,
@@ -265,7 +265,7 @@ class ApiService {
             'content': multiContent.isNotEmpty ? multiContent : content,
           });
         } else {
-          // 无图片：纯文本大模型（DeepSeek等）使用平铺字符串 content，避免多模态结构导致报错
+          // 无图片：纯文本大模型（本地宿主等）使用平铺字符串 content，避免多模态结构导致报错
           String textPayload = content;
           if (textPayload.trim().isEmpty) {
             final hasAudio = attachments.any((att) => att.startsWith('data:audio/'));

@@ -1,11 +1,11 @@
 /**
- * dsh-app-bridge —— 手机 App 桥接脚本（deepseek_bridge.py）所需的本地 HTTP 接口
+ * lxai-app-bridge —— 本地 Agent 宿主的 HTTP 接口插件（LxAI App 远程桥接专用）
  *
- * 背景：`deepseek_bridge.py` 是一个「云端调度 ⇄ 本地 DSH」的反向桥接客户端。
- * 它对本地 DSH（默认 http://127.0.0.1:3080）会按顺序探测一组 REST 端点，
- * 官方 dsh 并没有这些端点 —— 本插件把它们补齐，且**不修改任何 @deepseek-ai 官方文件**。
+ * 背景：LxAI 的电脑端桥接脚本是一个「云端调度 ⇄ 本地 Agent 宿主」的反向桥接客户端，
+ * 它会按顺序探测一组 REST 端点；宿主官方并没有这些端点 —— 本插件把它们补齐，
+ * 且**不修改宿主的任何官方文件**（只在运行时注册路由、读取宿主对外暴露的服务）。
  *
- * 提供的接口（全部相对 harness 根地址，例如 http://127.0.0.1:3080）：
+ * 提供的接口（全部相对宿主 web 服务根地址，例如 http://127.0.0.1:3080）：
  *
  *   GET    /health                          存活 + 端点清单
  *   GET    /v1/models                       模型列表（含推理档位）
@@ -26,15 +26,17 @@
  *   POST   /v1/user-questions/answer        答复选择框（`{questionId, answers}`）
  *   POST   /v1/user-questions/decline       放弃在 App 上回答（`{questionId}`）→ 交回电脑端界面
  *
- * SSE 事件名与字段按 deepseek_bridge.py 的解析实现对齐：
+ * SSE 事件名与字段按 LxAI 桥接脚本的解析实现对齐：
  *   reasoning{content} / content{content} / tool_start{id,tool,input} / tool_end{id,tool,output,status}
  *   waiting_approval{approvalId,tool} / approval_resolved{approvalId,outcome} / done{sessionId,status,title?} / error{message}
  *
  * ⚠️ 这些路由与官方 /api 通道一样位于浏览器信任栅栏之下（Host 必须回环），
  * 但它们**没有额外的鉴权**：任何能访问 3080 的本机进程都能驱动智能体。
- * 不要把 dsh web 绑定到 0.0.0.0 或加入 --trusted-host 后暴露到局域网。
+ * 不要把宿主 web 服务绑定到 0.0.0.0 或加入 --trusted-host 后暴露到局域网。
  *
- * @module dsh-app-bridge
+ * License: AGPL-3.0-only（见 LICENSE / NOTICE）
+ *
+ * @module lxai-app-bridge
  */
 
 import { randomUUID } from 'node:crypto'
@@ -58,7 +60,7 @@ const TURN_TIMEOUT_MS = 600_000
  * `state: 'waiting'`（卡片上提示"已等待较久"）。
  *
  * ⚠️ 注意这里**不再结束本轮、也不返回空答复**。
- * 上一版在到期时返回空答复，等于告诉 DSH"用户没答，你继续" —— 主模型于是接着
+ * 上一版在到期时返回空答复，等于告诉 宿主"用户没答，你继续" —— 主模型于是接着
  * 说话（用户实测看到"超时后主聊天 API 也回复了"）。现在改为：继续挂着等，
  * 只有到 PARK_MAX_MS 才真正中止这一轮，期间模型不会说话。
  */
@@ -69,7 +71,7 @@ const APPROVAL_WAIT_NOTICE_MS = 300_000
  * 挂起硬上限（24 小时）：到点强制中止这一轮（**不交给模型**），并把待办转成
  * `state: 'orphaned'`——卡片继续留在 App/电脑端，用户答复时走「续跑」。
  *
- * 为什么不无限等：没人答的问题会把那个会话一直占住（DSH 一轮对话一次），
+ * 为什么不无限等：没人答的问题会把那个会话一直占住（宿主一轮对话一次），
  * 24 小时足够覆盖"隔天才想起来"，再久就该收场了。用户也可以随时在 App 上
  * 点「停止」立刻结束这一轮。
  */
@@ -87,7 +89,7 @@ const QUESTION_ARM_MS = 15_000
  * 才超时，电脑前的人以为死机了）。只有 App 通路真的在轮询时才接管。
  */
 const APPROVAL_ARM_MS = 15_000
-/** 会话读写用的共享取消信号：dsh 的服务要求显式传入 signal。 */
+/** 会话读写用的共享取消信号：宿主的服务要求显式传入 signal。 */
 const turnSignal = () => AbortSignal.timeout(TURN_TIMEOUT_MS)
 
 const CORS_HEADERS = {
@@ -246,10 +248,10 @@ export function apply(ctx) {
   }
 
   /**
-   * 真正切换某个会话的权限预设（= DSH 内置 `/permission` 命令的同一条路径）。
+   * 真正切换某个会话的权限预设（= 宿主内置 `/permission` 命令的同一条路径）。
    *
    * 为什么抽成一个函数：**两处**调用点以前都靠"排一条 `/permission <preset>` 文本"，
-   * 以为 DSH 会把它当命令执行 —— 实际只是一条普通用户消息。表现就是：用户每次从
+   * 以为 宿主会把它当命令执行 —— 实际只是一条普通用户消息。表现就是：用户每次从
    * 手机发消息，会话里都会多一条 `/permission xxx` 垃圾（和正文同一秒进同一个 turn，
    * 在 GUI 队列里看着像"成对消息"），而权限预设从未真正改变。现在两处统一走这里。
    *
@@ -258,7 +260,7 @@ export function apply(ctx) {
   async function switchSessionPermission(sessionId, preset) {
     const service = ctx.get('permissionPresets')
     if (typeof service?.apply !== 'function') {
-      return { ok: false, reason: 'permissionPresets.apply 不可用：DSH 版本过旧或插件未加载' }
+      return { ok: false, reason: 'permissionPresets.apply 不可用：宿主版本过旧或插件未加载' }
     }
     const names = Array.isArray(service.names) ? service.names : []
     if (names.length > 0 && !names.includes(preset)) {
@@ -337,7 +339,7 @@ export function apply(ctx) {
   }
 
   /**
-   * 取会话标题。dsh 的标题是**投影值**（`session.list` 的
+   * 取会话标题。宿主的标题是**投影值**（`session.list` 的
    * `projections.values.title`），所以先直接吃投影；投影缺失时才退回翻日志里的
    * `session/title` 事件或第一条用户消息。
    */
@@ -404,7 +406,7 @@ export function apply(ctx) {
   /**
    * 工作区列表。
    *
-   * 此前 workspaceController.list() 取不到时直接编一个名为 'deepseek-agent' 的
+   * 此前 workspaceController.list() 取不到时直接编一个名为 'agent-host' 的
    * 假工作区，用户会看到一个并不存在的目录名。改为：拿不到就**从会话的真实 cwd
    * 归纳**（会话列表本身是可用的），仍然拿不到才返回空数组，让 App 明确显示
    * "未取到目录"而不是展示假值。
@@ -428,10 +430,10 @@ export function apply(ctx) {
    * 从会话投影里读**真实生效**的模型档位与权限预设。
    *
    * 为什么需要：App 的 `agentModel / agentReasoningEffort / agentPermission` 此前
-   * 只写不读 —— 首次启动时界面显示的是 App 自己存的旧值，和 DSH 会话里实际生效的
-   * 档位对不上，而且下一条消息还会把旧值**推回** DSH，把电脑端的设置覆盖掉。
+   * 只写不读 —— 首次启动时界面显示的是 App 自己存的旧值，和 宿主会话里实际生效的
+   * 档位对不上，而且下一条消息还会把旧值**推回** 宿主，把电脑端的设置覆盖掉。
    *
-   * 这两个投影本来就随会话列表一起下发（DSH 自己的 Web 端就是这么读的：
+   * 这两个投影本来就随会话列表一起下发（宿主自己的 Web 端就是这么读的：
    * `modelSelection` 的视图是 `{lastUsed, next}`，`permissions` 的视图是
    * `{options, currentValue}`），直接透出去即可，不需要新接口。
    *
@@ -526,7 +528,7 @@ export function apply(ctx) {
     // 3) 权限预设：调真接口即时切换
     //
     // ⚠️ 这里以前是 sessions().prompt({ mode:'queue', content:[{text:`/permission ${permission}`}] })，，
-    // 以为 DSH 会把排队的文本当命令执行。实测不是：它只是一条普通用户消息，于是
+    // 以为 宿主会把排队的文本当命令执行。实测不是：它只是一条普通用户消息，于是
     // **用户每从手机发一条消息，会话里就多一条 /permission 垃圾**（和正文同一秒进
     // 同一个 turn，在 GUI 队列里看着就是"成对消息"），而权限预设从未真正改变。
     if (typeof permission === 'string' && permission.length > 0) {
@@ -711,13 +713,13 @@ export function apply(ctx) {
     }
   }
 
-  // 挂上 answerer：App 没答复就一直挂着（dsh 侧等待），答复后返回结果。
+  // 挂上 answerer：App 没答复就一直挂着（宿主侧等待），答复后返回结果。
   //
   // 只在桥接最近 APPROVAL_ARM_MS 内来轮询过时才接管（App 通路在线）；否则原样
   // next() 交给电脑端网页弹窗 —— 与选择框同一套"谁在线谁接手"的规矩。
   //
   // 为什么以前"文件沙箱审批到不了 App"：审批原先只走任务 SSE 流（waiting_approval），
-  // 也就是只有"手机发起、且流还连着"的那一轮才可能被看到；DSH 网页端自己跑的任务、
+  // 也就是只有"手机发起、且流还连着"的那一轮才可能被看到；宿主网页端自己跑的任务、
   // 或沙箱越权升级（sandbox_permissions）产生的审批，手机侧永远收不到。现在审批和
   // 选择框一样由桥接 1 秒轮询取走，跟具体哪一轮、哪个流都无关。
   ctx.on('approval/request', (request, next) => {
@@ -780,7 +782,7 @@ export function apply(ctx) {
   //#region 选择框桥（ask_user_question）
 
   /**
-   * 把 DSH 的 `ask_user_question` 接到 App 上。
+   * 把 宿主的 `ask_user_question` 接到 App 上。
    *
    * 背景：`ask_user_question` 走 `ctx.userQuestions`（waterfall 事件
    * `user-questions/request`），官方只有浏览器界面会应答；而桥接脚本吃的是
@@ -811,7 +813,7 @@ export function apply(ctx) {
     ctx.logger?.info?.(`[app-bridge] 选择框 ${questionId} 已排给 App（${questions.length} 个问题）`)
     entry.timer = setTimeout(() => {
       // 「等久了」：只打标记，**不结束本轮、不返回空答复** ——
-      // 一旦返回空答复，DSH 会认为"用户没答，继续"，主模型就会接着说话。
+      // 一旦返回空答复，宿主会认为"用户没答，继续"，主模型就会接着说话。
       const live = pendingQuestions.get(questionId)
       if (live === undefined) return
       live.stale = true
@@ -833,7 +835,7 @@ export function apply(ctx) {
     //
     // 为什么改：两边同时弹框时，若 App 先答，插件这边就返回了、工具调用结束，
     // 但网页端那个 answerer 仍在等用户点 —— 它的弹窗会**一直挂在界面上**，
-    // 用户以为"手机答了但 DSH 没反应"（截图确认过：手机已答、网页弹窗还在）。
+    // 用户以为"手机答了但 宿主没反应"（截图确认过：手机已答、网页弹窗还在）。
     //
     // 现在 App 在线（桥接在轮询）时由 App 独占：问题只推给 App，网页端不弹框；
     // 只有 App 超时/主动放弃时才调用 next() 把问题交回网页端 —— 那一刻弹窗
@@ -856,7 +858,7 @@ export function apply(ctx) {
     }
   }, { prepend: true })
 
-  /** 取提问所属会话：DSH 不同版本给的字段位置不完全一样，都兜一下。 */
+  /** 取提问所属会话：宿主不同版本给的字段位置不完全一样，都兜一下。 */
   function readQuestionSessionId(request) {
     const candidates = [request?.agent?.session?.id, request?.agent?.sessionId, request?.sessionId]
     for (const value of candidates) {
@@ -1078,8 +1080,8 @@ export function apply(ctx) {
 
   page('exact', '/health', async () => json(200, {
     status: 'ok',
-    service: 'dsh-app-bridge',
-    harness: 'deepseek-harness',
+    service: 'lxai-app-bridge',
+    harness: 'local-agent-host',
     version: '0.1.0',
     endpoints: [
       'GET /health',
@@ -1144,7 +1146,7 @@ export function apply(ctx) {
 
     // 审批待办清单：与选择框完全对称的一条链路，桥接 1s 轮询一次。
     // 有了它，审批不再依赖"手机发起的那一轮 SSE 流还连着" ——
-    // DSH 网页端跑的任务、文件沙箱越权升级产生的审批都能推到 App 卡片上。
+    // 宿主网页端跑的任务、文件沙箱越权升级产生的审批都能推到 App 卡片上。
     if (pathname === '/v1/agent/approvals/pending' && method === 'GET') {
       lastApprovalPollAt = Date.now()
       return json(200, approvalsPayload())
@@ -1194,7 +1196,7 @@ export function apply(ctx) {
     // ── 权限预设：列出 + 立即切换 ───────────────────────────────
     //
     // 为什么需要专门的接口：原先"切权限"只是把 /permission <值> 塞进下一轮对话，
-    // 而且值一旦不是真实预设，DSH 会回 unknown preset 并被静默吞掉 ——
+    // 而且值一旦不是真实预设，宿主会回 unknown preset 并被静默吞掉 ——
     // App 上改了看着像生效，其实什么都没发生（旧版 App 填的 ask/auto_allow/
     // read_only 全都不是合法预设名）。这里把可用预设列出来，并在切换时**立即**
     // 下发、把失败原因如实带回 App。
@@ -1280,10 +1282,10 @@ export function apply(ctx) {
       if (typeof service?.apply !== 'function') {
         return json(503, {
           status: 'error',
-          error: { code: 'unsupported', message: 'permissionPresets.apply 不可用：DSH 版本过旧或插件未加载' },
+          error: { code: 'unsupported', message: 'permissionPresets.apply 不可用：宿主版本过旧或插件未加载' },
         })
       }
-      // 真正的切换：与 DSH 内置 /permission 命令完全同一条路径（写 permission/preset
+      // 真正的切换：与 宿主内置 /permission 命令完全同一条路径（写 permission/preset
       // 会话事实 + 改沙箱模式 + 改审批策略）。具体实现见 switchSessionPermission，
       // 它与"每轮任务开头下发权限"共用同一段逻辑，避免两处再分叉。
       const switched = await switchSessionPermission(sessionId, preset)
@@ -1293,7 +1295,7 @@ export function apply(ctx) {
           status: 'error',
           error: {
             code: notFound ? 'session-not-found' : 'apply-failed',
-            message: switched.reason ?? `DSH 未应用该预设（当前 ${switched.current ?? '未知'}）`,
+            message: switched.reason ?? `宿主未应用该预设（当前 ${switched.current ?? '未知'}）`,
           },
         })
       }
@@ -1315,15 +1317,15 @@ export function apply(ctx) {
       if (sessions() === undefined) return json(503, { status: 'error', error: { code: 'unavailable', message: 'sessions() 缺失' } })
       const effort = input.reasoningEffort ?? input.reasoning_effort
       const model = typeof input.model === 'string' && input.model.length > 0 ? input.model : undefined
-      // DSH 的 selectModel 必须知道具体模型：只给档位会报
+      // 宿主的 selectModel 必须知道具体模型：只给档位会报
       // "invalid exact model metadata for provider ... model undefined"。
       if (model === undefined) {
         return json(400, {
           status: 'error',
-          error: { code: 'model-required', message: '必须同时指定 model（DSH 的 selectModel 不接受只给档位）' },
+          error: { code: 'model-required', message: '必须同时指定 model（宿主的 selectModel 不接受只给档位）' },
         })
       }
-      // 档位必须是该模型声明的档位之一，否则 DSH 侧会抛错并被静默忽略
+      // 档位必须是该模型声明的档位之一，否则 宿主侧会抛错并被静默忽略
       if (typeof effort === 'string' && effort.length > 0 && effort !== 'default') {
         const catalogValue = await catalog().catch(() => undefined)
         const declared = []

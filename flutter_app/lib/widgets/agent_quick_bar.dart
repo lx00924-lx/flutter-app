@@ -12,8 +12,8 @@ import '../services/sync_service.dart';
 ///   工作区 / 目标会话 / 思考深度 / 执行权限
 /// 关闭 Agent 模式后整条自动隐藏（由调用方判断，见 chat_input_bar）。
 ///
-/// 工作区与会话列表与「设置 → DeepSeek Harness」共用 `SettingsProvider` 里的
-/// 同一份缓存：都是电脑端 DSH 的真实目录，取不到就显示"暂无"，不编假选项。
+/// 工作区与会话列表与「设置 → 本地 Agent 宿主」共用 `SettingsProvider` 里的
+/// 同一份缓存：都是电脑端 宿主的真实目录，取不到就显示"暂无"，不编假选项。
 class AgentQuickBar extends StatefulWidget {
   const AgentQuickBar({super.key});
 
@@ -60,7 +60,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
   };
 
   static const Map<String, String> _permissionLabels = {
-    // 本机 DSH 真实存在的三个权限预设（由插件 /v1/permission-presets 确认）
+    // 本机 宿主真实存在的三个权限预设（由插件 /v1/permission-presets 确认）
     'read-only': '只读',
     'workspace-write': '工作区可写',
     'danger-full-access': '完全访问',
@@ -69,7 +69,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
   /// 工作区下拉里的哨兵项：点了打开「手输路径」对话框（不可能是真实目录名）
   static const String _customWorkspaceKey = '__custom_workspace__';
 
-  /// 模型下拉项：id → 展示名（只列电脑端 DSH 真实目录里的模型）。
+  /// 模型下拉项：id → 展示名（只列电脑端 宿主真实目录里的模型）。
   Map<String, String> _modelChoices(SettingsProvider sp, String current) {
     final items = <String, String>{};
     for (final m in sp.agentModels) {
@@ -359,12 +359,12 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                     onTap: _createSession,
                   ),
                   const SizedBox(width: 6),
-                  // 智能体模型：设置页那张「DSH 智能体执行选项」卡已删除，
+                  // 智能体模型：设置页那张「宿主智能体执行选项」卡已删除，
                   // 模型选择收敛到这里（换模型后档位集合可能变化，顺手对齐一次）
                   _chip(
                     icon: Icons.memory_outlined,
                     label: _modelLabel(sp, s.agentModel),
-                    tooltip: '智能体模型（电脑端 DSH 真实模型目录）',
+                    tooltip: '智能体模型（电脑端真实模型目录）',
                     isDark: isDark,
                     onSelected: (v) {
                       if (v.isEmpty) return;
@@ -399,7 +399,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                   _chip(
                     icon: Icons.shield_outlined,
                     label: _permissionLabels[s.agentPermission] ?? s.agentPermission,
-                    tooltip: '本地执行权限（DSH 权限预设）',
+                    tooltip: '本地执行权限（宿主权限预设）',
                     isDark: isDark,
                     onSelected: (v) {
                       s.agentPermission = v;
@@ -437,7 +437,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                       final why = sp.lastCatalogError.isNotEmpty
                           ? sp.lastCatalogError
                           : (sp.lastCatalogOnline
-                              ? '电脑端在线，但这次没取到目录（本地 DSH 可能正忙），稍后再试'
+                              ? '电脑端在线，但这次没取到目录（本地 Agent 宿主可能正忙），稍后再试'
                               : '电脑端桥接不在线：请先在电脑上启动桥接');
                       _toast('没取到目录：$why', isError: true);
                     }

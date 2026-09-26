@@ -762,16 +762,16 @@ interface ActiveGeneration {
   abortController: AbortController;
   /** 用户主动插话/停止：收尾时保留已生成的部分并标记"已打断"，不当成错误 */
   cancelledByUser?: boolean;
-  /** 当前处于哪个阶段：DSH 执行中 / 思考 API 润色中 */
+  /** 当前处于哪个阶段：宿主执行中 / 思考 API 润色中 */
   phase?: 'executing' | 'polishing';
 }
 
 const activeGenerations = new Map<string, ActiveGeneration>();
 
 /**
- * 挂起中的「选择框」（DSH 的 ask_user_question）。
+ * 挂起中的「选择框」（宿主的 ask_user_question）。
  *
- * 为什么中继也要存一份：选择框是**没有任务归属**的 —— DSH 侧插件排队等答复，
+ * 为什么中继也要存一份：选择框是**没有任务归属**的 —— 宿主侧插件排队等答复，
  * 桥接脚本轮询取走再推上来，此刻可能压根没有正在跑的任务（比如用户在电脑网页
  * 里发起的一轮）。App 断线重连后也要能补拉，所以按 questionId 落在这里。
  */
@@ -783,7 +783,7 @@ const pendingQuestions = new Map<string, {
   userId?: string;
   at: number;
   /**
-   * `pending` 刚问不久 ｜ `waiting` 等超过 5 分钟但**仍在等**（DSH 那一轮没有交给
+   * `pending` 刚问不久 ｜ `waiting` 等超过 5 分钟但**仍在等**（宿主那一轮没有交给
    * 模型，所以不会出现"AI 自己把问题答了"）｜ `orphaned` 挂满 24h 已中止本轮，
    * 用户答复时 App 走「续跑」。
    */
@@ -796,7 +796,7 @@ const pendingQuestions = new Map<string, {
  * 待办保留时长：24 小时。
  *
  * 为什么从 10 分钟提到 24 小时（用户场景：发完指令人就走了，隔天才回来）：
- * DSH 的提问自己没有任何超时，人不在时那一轮会一直挂着（插件到 24h 才中止本轮）；
+ * 宿主的提问自己没有任何超时，人不在时那一轮会一直挂着（插件到 24h 才中止本轮）；
  * 卡片必须还在，否则用户回来什么都没有，只能重新发一遍指令。
  */
 const QUESTION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -1001,7 +1001,7 @@ async function runServerSideGeneration({
 
       if (!isAgentOnline) {
         // Agent is offline
-        const offlineNotice = `> ⚠️ **【本地 Agent 模式提示】**\n> 检测到您已开启 **Agent 模式**，但未检测到本地 DeepSeek Harness 桥接连接。\n>\n> **快速解决**：\n> 1. 打开应用右上角 **设置 ➔ 🤖 本地 Agent**；\n> 2. 复制启动命令并在本地终端运行：\`python deepseek_bridge.py --token "${agentToken}" --server "${SERVER_BASE_URL}" --harness-url "http://127.0.0.1:3080"\`；\n> 3. 或在聊天输入框左侧一键切换回 **「💬 普通模式」**。`;
+        const offlineNotice = `> ⚠️ **【本地 Agent 模式提示】**\n> 检测到您已开启 **Agent 模式**，但未检测到本地 Agent 桥接连接。\n>\n> **快速解决**：\n> 1. 打开应用右上角 **设置 ➔ 🤖 本地 Agent**；\n> 2. 复制启动命令并在本地终端运行：\`python deepseek_bridge.py --token "${agentToken}" --server "${SERVER_BASE_URL}" --harness-url "http://127.0.0.1:3080"\`；\n> 3. 或在聊天输入框左侧一键切换回 **「💬 普通模式」**。`;
         
         onChunk(offlineNotice);
         genState.status = 'completed';
@@ -1039,12 +1039,12 @@ async function runServerSideGeneration({
       io.to(`user_${userId}`).emit("agent_task_started", {
         messageId: assistantMessageId,
         taskId,
-        initialStep: "已将需求派发至本地 DeepSeek Harness 智能体..."
+        initialStep: "已将需求派发至本地 Agent..."
       });
       generationEvents.emit(`task_started_${assistantMessageId}`, {
         messageId: assistantMessageId,
         taskId,
-        initialStep: "已将需求派发至本地 DeepSeek Harness 智能体..."
+        initialStep: "已将需求派发至本地 Agent..."
       });
 
       try {
@@ -1070,7 +1070,7 @@ async function runServerSideGeneration({
                 return;
               }
               pendingAgentTasks.delete(taskId);
-              reject(new Error(`本地 DeepSeek 智能体执行超时 (${graceForPendingDecision ? '等待用户确认超时' : '300秒'})`));
+              reject(new Error(`本地 Agent 执行超时 (${graceForPendingDecision ? '等待用户确认超时' : '300秒'})`));
             }, graceForPendingDecision ? AGENT_TASK_PENDING_GRACE_MS : AGENT_TASK_TIMEOUT_MS);
           };
           armTimeout(false);
@@ -1087,7 +1087,7 @@ async function runServerSideGeneration({
 
         const selectedSessionId = (settings?.agentSessionId || "").trim();
         // 不再回退到 'deepseek-agent'：本地没有这个工作区，回退过去只会让
-        // 本地 DSH 找不到目录、任务卡住直到超时。留空 = 用电脑端默认工作区。
+        // 本地 Agent 宿主找不到目录、任务卡住直到超时。留空 = 用电脑端默认工作区。
         const selectedWorkspace = (settings?.agentWorkspace || "").trim();
         
         // 自动绑定对话会话：若设置未指定特定会话，按用户维度维持一个稳定的活跃会话标识
@@ -1151,7 +1151,7 @@ async function runServerSideGeneration({
         });
 
         // Construct Stage 2 augmented prompt for the App's target model
-        const augmentedPrompt = `用户提出的需求：\n${rawUserPrompt}\n\n====================\n【本地 DeepSeek Harness 智能体执行产出的真实数据与环境结果】：\n${taskResult.output}\n====================\n\n【任务要求】：\n本地智能体已在用户本地环境执行完毕并返回了上述数据。请你结合用户的原始问题与上述本地执行结果，进行条理清晰、严谨专业的总结与深度回答。`;
+        const augmentedPrompt = `用户提出的需求：\n${rawUserPrompt}\n\n====================\n【本地 Agent 执行产出的真实数据与环境结果】：\n${taskResult.output}\n====================\n\n【任务要求】：\n本地智能体已在用户本地环境执行完毕并返回了上述数据。请你结合用户的原始问题与上述本地执行结果，进行条理清晰、严谨专业的总结与深度回答。`;
         
         workingMessages = [
           ...workingMessages.slice(0, -1),
@@ -2124,8 +2124,8 @@ async function startServer() {
    *
    * 插话发送与"停止生成"都走这里。要点：
    * · 掐断思考 API 的流（abortController）；
-   * · 若这一轮还在等本地 Agent 执行，同时把 DSH 那一轮也中止 ——
-   *   此前 App 的"停止"只断开了自己的 SSE，电脑上的 DSH 还在继续跑，
+   * · 若这一轮还在等本地 Agent 执行，同时把 Agent 宿主那一轮也中止 ——
+   *   此前 App 的"停止"只断开了自己的 SSE，电脑上的 宿主还在继续跑，
    *   跑完的结果过一会儿又同步回来（"诈尸"）；
    * · 标记 cancelledByUser，让收尾逻辑保留已生成的部分并标成"已打断"。
    */
@@ -2170,7 +2170,7 @@ async function startServer() {
 
       console.log(
         `[Chat] 用户打断生成 ${gen.assistantMessageId}（阶段 ${gen.phase ?? "unknown"}）` +
-          (agentCancelled ? "，并已通知本地 DSH 中止执行" : ""),
+          (agentCancelled ? "，并已通知本地 Agent 宿主中止执行" : ""),
       );
       io.to(`user_${userId}`).emit("chat_cancelled", { messageId: gen.assistantMessageId });
       res.json({ success: true, cancelled: true, agentCancelled, phase: gen.phase ?? null });
@@ -2238,9 +2238,9 @@ async function startServer() {
       sendEvent("phase", { phase: data.phase });
     };
 
-    // DSH 在本地执行时可能要用户拍板（越权操作确认等）。服务端把它通过 SSE
+    // 宿主在本地执行时可能要用户拍板（越权操作确认等）。服务端把它通过 SSE
     // 送到 App，用户在 App 上点了之后走 /api/agent/approve 回传 —— 之前这条
-    // 通知只走 socket.io，而 App 没有 socket.io 客户端，所以只有 DSH 自己弹窗。
+    // 通知只走 socket.io，而 App 没有 socket.io 客户端，所以只有 宿主自己弹窗。
     const approvalHandler = (data: any) => {
       sendEvent("approval", {
         taskId: data.taskId,
@@ -2784,7 +2784,7 @@ async function startServer() {
         return res.status(401).json({ error: "无效的 Agent Token，请在 App 中生成配对口令后重试" });
       }
       const clientInfo = req.body?.clientInfo || {};
-      const clientName = clientInfo.name || "DeepSeek-Harness-Local";
+      const clientName = clientInfo.name || "LxAI-Bridge-Local";
 
       console.log(`\x1b[32m[Agent Hub] Agent registered via HTTP [${token}] (${clientName}, mode: ${clientInfo.mode || 'polling'})\x1b[0m`);
 
@@ -2844,7 +2844,7 @@ async function startServer() {
       if (!agent) {
         agent = {
           token,
-          clientName: "DeepSeek-Harness-Local",
+          clientName: "LxAI-Bridge-Local",
           connectedAt: Date.now(),
           lastPing: Date.now(),
           mode: 'polling',
@@ -2953,7 +2953,7 @@ async function startServer() {
     } else {
       agent = {
         token,
-        clientName: "DeepSeek-Harness-Local",
+        clientName: "LxAI-Bridge-Local",
         connectedAt: Date.now(),
         lastPing: Date.now(),
         mode: 'polling',
@@ -3008,9 +3008,9 @@ async function startServer() {
 
     const batContent = `@echo off
 chcp 65001 >nul
-title DeepSeek Bridge 本地智能体桥接服务
+title LxAI 本地 Agent 桥接服务
 echo ======================================================================
-echo    DeepSeek Bridge 一键启动脚本 (会话自动管理增强版)
+echo    LxAI 本地 Agent 桥接一键启动脚本 (会话自动管理增强版)
 echo    服务器地址: ${serverUrl}
 echo    本地 Harness: ${harnessUrl}
 echo ======================================================================
@@ -3129,10 +3129,10 @@ if %errorlevel% neq 0 (
         workspaces: agent?.workspaces || [],
         sessions: agent?.sessions || [],
         // 模型也一并下发：App 的「智能体调度模型」下拉此前列的是 deepseek-chat /
-        // deepseek-reasoner 这类本地 DSH 根本不存在的模型，选中后 selectModel
+        // deepseek-reasoner 这类本地 Agent 宿主根本不存在的模型，选中后 selectModel
         // 必然失败。以电脑端目录为准，App 才有真选项可选。
         models: agent?.models || [],
-        clientName: agent?.clientName || "DeepSeek-Harness-Local"
+        clientName: agent?.clientName || "LxAI-Bridge-Local"
       });
     } catch (err: any) {
       res.json({
@@ -3141,7 +3141,7 @@ if %errorlevel% neq 0 (
         workspaces: [],
         sessions: [],
         models: [],
-        clientName: "DeepSeek-Harness-Local",
+        clientName: "LxAI-Bridge-Local",
         error: err.message
       });
     }
@@ -3164,7 +3164,7 @@ if %errorlevel% neq 0 (
   /**
    * 通过中继把「立即切换权限预设 / 思考深度」转发给本地桥接，并把结果原样带回。
    *
-   * 为什么要单独做：以前这两项只在"下一轮对话开始时"由桥接顺手带给 DSH，
+   * 为什么要单独做：以前这两项只在"下一轮对话开始时"由桥接顺手带给 宿主，
    * 而且失败会被静默吞掉 —— App 上点了看着像生效，实际没变。现在按需即时下发，
    * 成功/失败都能回到界面。
    */
@@ -3238,7 +3238,7 @@ if %errorlevel% neq 0 (
         `[Agent Hub] 即时切换 ${kind}（会话 ${sid}）→ ${result.success ? "成功" : "失败"}：${result.message ?? ""}`,
       );
       if (!result.success) {
-        return res.status(502).json({ success: false, error: result.message || "本地 DSH 未接受该设置" });
+        return res.status(502).json({ success: false, error: result.message || "本地 Agent 宿主未接受该设置" });
       }
       return res.json({ success: true, kind, sessionId: sid, message: result.message ?? "" });
     } catch (err: any) {
@@ -3247,8 +3247,8 @@ if %errorlevel% neq 0 (
   });
 
   /**
-   * 读取电脑端真实可用的权限预设列表（由本地 DSH 的 permissionPresets 提供）。
-   * App 据此显示真实可选项，避免再出现"填了一个 DSH 不认识的值"。
+   * 读取电脑端真实可用的权限预设列表（由本地 Agent 宿主的 permissionPresets 提供）。
+   * App 据此显示真实可选项，避免再出现"填了一个 宿主不认识的值"。
    */
   app.get("/api/agent/permission-presets", async (req, res) => {
     try {
@@ -3299,7 +3299,7 @@ if %errorlevel% neq 0 (
     }
   });
 
-  // Create new session in local DeepSeek Harness via bridge
+  // Create new session in the local agent host via bridge
   app.post("/api/agent/create-session", async (req, res) => {
     try {
       const { token, workspace, title, model } = req.body || {};
@@ -3309,7 +3309,7 @@ if %errorlevel% neq 0 (
       }
       const agent = connectedAgents.get(targetToken);
       // 不再回退到 'deepseek-agent' 这个并不存在的预设工作区：
-      // 传空表示"用电脑端 DSH 的默认工作区"，由桥接决定。
+      // 传空表示"用电脑端 宿主的默认工作区"，由桥接决定。
       const targetWs = (workspace || "").trim();
       const sessionTitle = (title || "").trim() || `新对话 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
 
@@ -3363,7 +3363,7 @@ if %errorlevel% neq 0 (
           );
           return res.status(502).json({
             success: false,
-            error: result?.error || "电脑端未能创建会话，请确认本地 DSH 正常",
+            error: result?.error || "电脑端未能创建会话，请确认本地 Agent 宿主正常",
           });
         }
         if (result.workspaces && Array.isArray(result.workspaces)) agent.workspaces = result.workspaces;
@@ -3479,11 +3479,11 @@ if %errorlevel% neq 0 (
     }
   });
 
-  // ── 选择框（DSH 的 ask_user_question）→ App ─────────────────────
+  // ── 选择框（宿主的 ask_user_question）→ App ─────────────────────
   //
-  // 背景：ask_user_question 走的是 DSH 的「客户端 UI」能力（ctx.userQuestions），
-  // 只有连到 DSH 的界面能应答；桥接脚本吃的是任务事件流，里面没有 question 事件，
-  // 所以 App 在结构上永远收不到选择框。现在由 DSH 侧插件排队 + 桥接轮询转发，
+  // 背景：ask_user_question 走的是 宿主的「客户端 UI」能力（ctx.userQuestions），
+  // 只有连到 宿主的界面能应答；桥接脚本吃的是任务事件流，里面没有 question 事件，
+  // 所以 App 在结构上永远收不到选择框。现在由 宿主侧插件排队 + 桥接轮询转发，
   // 中继这里负责转投给 App 并把答复送回去。
 
   /**
@@ -3567,7 +3567,7 @@ if %errorlevel% neq 0 (
     }
   });
 
-  // App 上的答复 / 「在电脑上回答」→ 送回桥接 → 本地 DSH 插件
+  // App 上的答复 / 「在电脑上回答」→ 送回桥接 → 本地 Agent 宿主插件
   app.post("/api/agent/answer-question", (req, res) => {
     try {
       const { token, questionId, answers, decline } = req.body || {};
@@ -3614,10 +3614,10 @@ if %errorlevel% neq 0 (
 
   // ── 审批（含文件沙箱升级）→ App ────────────────────────────────
   //
-  // 与选择框完全对称的一条链路：DSH 插件排队 → 桥接 1s 轮询 → 中继转投 App。
+  // 与选择框完全对称的一条链路：宿主插件排队 → 桥接 1s 轮询 → 中继转投 App。
   //
   // 为什么必须补这条：审批原先只出现在"手机发起那一轮的 SSE 流"里，于是
-  // DSH 网页端自己跑的任务、以及文件沙箱越权升级（sandbox_permissions）产生的
+  // 宿主网页端自己跑的任务、以及文件沙箱越权升级（sandbox_permissions）产生的
   // 审批，手机侧永远收不到 —— 而插件侧会一直挂着等，电脑前的人只看到卡死。
 
   /** 挂起中的审批：approvalId → 载荷（重连补拉用，带 TTL 清理）。 */
@@ -4145,9 +4145,9 @@ if %errorlevel% neq 0 (
       const batContent = `@echo off
 chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
-title DeepSeek Harness 本地安全桥接 (v3.5 高可用版)
+title LxAI 本地 Agent 安全桥接 (v3.5 高可用版)
 echo ========================================================
-echo   DeepSeek Harness 本地安全反向桥接启动器 (v3.5)
+echo   LxAI 本地 Agent 安全反向桥接启动器 (v3.5)
 echo ========================================================
 echo.
 echo [1/3] 正在探测 Python 执行环境...
@@ -4417,7 +4417,7 @@ if %errorlevel% neq 0 (
 
   // WebSocket Proxy for Real-time Streaming FunASR
   const wss = new WebSocketServer({ noServer: true });
-  // WebSocket Server for Local DeepSeek Agent Hub
+  // WebSocket Server for the Local Agent Hub
   const agentWss = new WebSocketServer({ noServer: true });
   // App 端推送通道（手机/电脑客户端）：把服务端已经在广播的事件真正送到端上，
   // 而不是让客户端靠 4 秒 / 12 秒轮询去"猜"有没有变化。
@@ -4594,7 +4594,7 @@ if %errorlevel% neq 0 (
   agentWss.on("connection", (clientWs, request) => {    try {
       const requestUrl = new URL(request.url || "", `http://${request.headers.host || "localhost"}`);
       let token = requestUrl.searchParams.get("token")?.trim() || "";
-      let clientName = requestUrl.searchParams.get("clientName")?.trim() || "DeepSeek-Harness-Local";
+      let clientName = requestUrl.searchParams.get("clientName")?.trim() || "LxAI-Bridge-Local";
 
       if (!token || token === "YOUR_AGENT_TOKEN_HERE" || token === "<YOUR_AGENT_TOKEN>") {
         console.warn(`[Agent Hub] Rejected agent connection: missing or placeholder token`);
@@ -4667,7 +4667,7 @@ if %errorlevel% neq 0 (
                 approval: msg.approval
               });
               // App 没有 socket.io 客户端，只有 SSE 通道 —— 必须在这里也推一份，
-              // 否则"DSH 弹选项等用户点"这件事 App 永远看不到。
+              // 否则"宿主弹选项等用户点"这件事 App 永远看不到。
               generationEvents.emit(`approval_${pending.assistantMessageId}`, {
                 messageId: pending.assistantMessageId,
                 taskId: msg.taskId,
@@ -4680,12 +4680,12 @@ if %errorlevel% neq 0 (
               });
             }
           } else if (msg.type === "approval_resolved") {
-            // DSH 侧已给出结论（用户点了/超时），同步给所有在等的界面
+            // 宿主侧已给出结论（用户点了/超时），同步给所有在等的界面
             const resolved = msg.approvalId ? { approvalId: msg.approvalId, outcome: msg.outcome } : msg;
             io.emit("agent_approval_resolved", resolved);
             generationEvents.emit('approval_resolved_broadcast', resolved);
           } else if (msg.type === "waiting_question") {
-            // DSH 的 ask_user_question 挂起了：桥接轮询到就推上来，转给 App 弹卡片。
+            // 宿主的 ask_user_question 挂起了：桥接轮询到就推上来，转给 App 弹卡片。
             // 注意这里**不依赖 taskId**：用户在电脑网页里发起的一轮同样可能有提问。
             // deferred=true 表示那一轮已结束（超过阻塞窗口），答复要走续跑。
             const qToken = (msg.token || token || "").trim();
@@ -4704,7 +4704,7 @@ if %errorlevel% neq 0 (
             savePendingDecisions();
             io.emit("agent_question_resolved", { questionId: qid, reason: msg.reason || "closed" });
           } else if (msg.type === "approval_requested") {
-            // DSH 挂起了授权请求（工具审批 / 文件沙箱越权升级）→ 转给 App 卡片。
+            // 宿主挂起了授权请求（工具审批 / 文件沙箱越权升级）→ 转给 App 卡片。
             // 同样**不依赖 taskId**：网页端发起的一轮、或后台升级产生的审批都会走到这里。
             const aToken = (msg.token || token || "").trim();
             console.log(`[Agent Hub] Agent waiting approval ${msg.approvalId} (tool ${msg.tool || '-'}, state=${msg.state || (msg.deferred === true ? 'orphaned' : 'pending')})`);
@@ -4753,7 +4753,7 @@ if %errorlevel% neq 0 (
           if (taskInfo.token === token) {
             clearTimeout(taskInfo.timeoutId);
             pendingAgentTasks.delete(taskId);
-            taskInfo.reject(new Error("本地 DeepSeek Agent 桥接连接已中断，任务已中止。"));
+            taskInfo.reject(new Error("本地 Agent 桥接连接已中断，任务已中止。"));
             io.to(`user_${taskInfo.userId}`).emit("agent_task_finished", {
               messageId: taskInfo.assistantMessageId,
               taskId,

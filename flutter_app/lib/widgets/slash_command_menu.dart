@@ -53,8 +53,8 @@ class SlashCommandOption {
 
 /// App 侧支持的斜杠命令表（**静态部分**）。
 ///
-/// 这些命令全部由 App 本地执行，不再"发一条文本让桥接/DSH 当命令处理"——
-/// 那条路走过一次弯路：DSH 不会把排队进会话的 `/xxx` 文本当命令执行，
+/// 这些命令全部由 App 本地执行，不再"发一条文本让桥接/宿主当命令处理"——
+/// 那条路走过一次弯路：宿主不会把排队进会话的 `/xxx` 文本当命令执行，
 /// 结果是会话里堆了一串命令消息而权限从未真正改变（见 bridge/plugin 的修复）。
 /// 带动态候选的命令（/model、/workspace、/session）由调用方用真实目录拼出来。
 const List<SlashCommand> kSlashCommands = [
@@ -64,7 +64,7 @@ const List<SlashCommand> kSlashCommands = [
   ),
   SlashCommand(
     name: 'permission',
-    description: '切换 DSH 权限预设（沙箱范围 / 越界是否弹审批）',
+    description: '切换宿主权限预设（沙箱范围 / 越界是否弹审批）',
     options: [
       SlashCommandOption('read-only', '只读：仅允许读取，禁止写入'),
       SlashCommandOption('workspace-write', '工作区可写：越界操作会弹审批'),

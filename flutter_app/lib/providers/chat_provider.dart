@@ -17,7 +17,7 @@ import 'settings_provider.dart';
 
 /// 一轮对话当前处在哪个阶段。
 ///
-/// Agent 模式下这一轮分两段：先在电脑上执行（DSH），再把结果交给思考 API 润色。
+/// Agent 模式下这一轮分两段：先在电脑上执行（宿主），再把结果交给思考 API 润色。
 /// 两段的"插话代价"完全不同 —— 执行阶段插话会丢掉正在跑的任务，润色阶段插话
 /// 只是掐断一段便宜的文本生成，所以界面要按阶段决定"插话"能不能点。
 enum TurnPhase { idle, executing, polishing }
@@ -95,7 +95,7 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 正在等待用户拍板的审批请求（DSH 执行敏感操作前）
+  /// 正在等待用户拍板的审批请求（宿主执行敏感操作前）
   Map<String, dynamic>? _pendingApproval;
   Map<String, dynamic>? get pendingApproval => _pendingApproval;
 
@@ -322,7 +322,7 @@ class ChatProvider extends ChangeNotifier {
   /// 当前轮次阶段
   TurnPhase get turnPhase => _turnPhase;
 
-  /// 是否正在电脑上执行（DSH）。此时插话会打断正在跑的本地任务。
+  /// 是否正在电脑上执行（宿主）。此时插话会打断正在跑的本地任务。
   bool get isAgentExecuting => _turnPhase == TurnPhase.executing;
 
   /// 现在插话是否安全：非执行阶段都可以（纯 API 对话、或已经在润色）。
@@ -378,7 +378,7 @@ class ChatProvider extends ChangeNotifier {
   /// 插话发送：打断当前轮次并立刻把这条发出去。
   ///
   /// 设计取舍（按实测调整）：
-  /// · 只断开本地 SSE 是不够的 —— 服务端那次生成、电脑上正在跑的 DSH 任务都还在
+  /// · 只断开本地 SSE 是不够的 —— 服务端那次生成、电脑上正在跑的 宿主任务都还在
   ///   继续，结果过一会儿又同步回来，所以先调 `/api/chat/cancel` 真打断；
   /// · 打断后的半截气泡**只留在本地、不推云端**：另一端拉到一半的内容再被服务端
   ///   的收尾版本覆盖，就会出现"这端有内容、那端是空气泡"。**完整消息才同步**；
@@ -395,7 +395,7 @@ class ChatProvider extends ChangeNotifier {
     final streaming = (_messages.isNotEmpty && _messages.last.isStreaming) ? _messages.last : null;
 
     try {
-      // 1) 通知服务端真正中止（含本地 DSH 任务）
+      // 1) 通知服务端真正中止（含本地 宿主任务）
       await SyncService.instance.cancelServerGeneration(
         userId: settingsProvider.syncUserId,
         assistantMessageId: streaming?.id ?? '',
@@ -469,14 +469,14 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  //#region 选择框（DSH 的 ask_user_question）
+  //#region 选择框（宿主的 ask_user_question）
 
-  /// 正在等待用户选择的「选择框」（DSH 里 Agent 提问后卡住等答案）
+  /// 正在等待用户选择的「选择框」（宿主里 Agent 提问后卡住等答案）
   Map<String, dynamic>? _pendingQuestion;
   Map<String, dynamic>? get pendingQuestion => _pendingQuestion;
 
   /// 当前挂起的选择框状态：`pending`（刚问不久）/ `waiting`（等超过 5 分钟但
-  /// **仍在等** —— DSH 那一轮没有被交给模型，所以不会出现"AI 自己答了"）/
+  /// **仍在等** —— 宿主那一轮没有被交给模型，所以不会出现"AI 自己答了"）/
   /// `orphaned`（挂满 24h 已中止本轮，答复必须走续跑）。
   String get pendingQuestionState => _pendingQuestion?['state']?.toString() ?? 'pending';
 
@@ -497,7 +497,7 @@ class ChatProvider extends ChangeNotifier {
 
   /// 延后项的答复：先服务端销账，再发一条**续跑**消息回同一会话。
   ///
-  /// 为什么不能直接投答案：DSH 的提问/审批只在某一轮对话里有效，人走开超过阻塞窗口
+  /// 为什么不能直接投答案：宿主的提问/审批只在某一轮对话里有效，人走开超过阻塞窗口
   /// 后那一轮就结束了 —— 把答案投回去是投给空气（会话那边没有任何人在等）。
   /// 改成发一条结构化消息，把原始问题/申请和用户的决定一起带进去，Agent 接着做；
   /// 消息对用户可见，不是偷偷代替用户说话。
@@ -576,7 +576,7 @@ class ChatProvider extends ChangeNotifier {
   /// 每个问题的自定义输入（也可以直接打字回答）
   final Map<String, TextEditingController> _questionCustoms = {};
 
-  /// 当前挂起的问题列表（服务端原样透传 DSH 的 questions 数组）
+  /// 当前挂起的问题列表（服务端原样透传 宿主的 questions 数组）
   List<Map<String, dynamic>> get _pendingQuestionItems {
     final raw = _pendingQuestion?['questions'];
     if (raw is List) {
@@ -597,7 +597,7 @@ class ChatProvider extends ChangeNotifier {
   /// 只有这种情况才允许"点选项即提交"；多选、没有选项（纯自由回答）都要走
   /// 卡片底部的输入框 + 提交按钮，否则用户没机会补第二个选择。
   ///
-  /// 为什么必须限制"只有一道题"：DSH 的 user-questions 一次可以问多件事
+  /// 为什么必须限制"只有一道题"：宿主的 user-questions 一次可以问多件事
   /// （例如同时问「重启桌面端吗」和「现在打包吗」）。这个判断是**按单个问题**
   /// 算的，若第一题点一下就整包提交，后面几题等于被跳过 —— 用户根本没机会选，
   /// 卡片却已经收起（实测踩到过）。
@@ -675,7 +675,7 @@ class ChatProvider extends ChangeNotifier {
   }
 
 
-  /// 把当前选择收成 DSH 要的答案格式：`[{id, selected:[...], custom?}]`
+  /// 把当前选择收成 宿主要的答案格式：`[{id, selected:[...], custom?}]`
   List<Map<String, dynamic>> _collectQuestionAnswers() {
     final result = <Map<String, dynamic>>[];
     for (final item in _pendingQuestionItems) {
@@ -721,7 +721,7 @@ class ChatProvider extends ChangeNotifier {
     return ok;
   }
 
-  /// 放弃在 App 上回答：交回电脑端网页弹窗（DSH 侧行为与装这个功能前一致）
+  /// 放弃在 App 上回答：交回电脑端网页弹窗（宿主侧行为与装这个功能前一致）
   Future<bool> declineQuestion() async {
     final pending = _pendingQuestion;
     if (pending == null) return false;
@@ -752,7 +752,7 @@ class ChatProvider extends ChangeNotifier {
 
   /// 补拉服务端挂起的审批：与选择框同一套对账逻辑。
   ///
-  /// 审批以前只靠"手机发起那一轮的 SSE 流"推送，DSH 网页端跑的任务、文件沙箱
+  /// 审批以前只靠"手机发起那一轮的 SSE 流"推送，宿主网页端跑的任务、文件沙箱
   /// 越权升级产生的审批在 App 上永远看不到。现在服务端存了一份，App 启动、
   /// 重连、回到前台都补拉一次。
   Future<void> refreshPendingApprovals() async {
@@ -1099,7 +1099,7 @@ class ChatProvider extends ChangeNotifier {
       sessionId: _currentSession!.id,
       role: MessageRole.assistant,
       content: '',
-      reasoningContent: isAgentMode ? '> 🤖 正在连接本地 DeepSeek Harness 智能体调度管道...\n' : '',
+      reasoningContent: isAgentMode ? '> 🤖 正在连接本地 Agent 调度管道...\n' : '',
       isStreaming: true,
       isAgentMode: isAgentMode,
     );
@@ -1172,7 +1172,7 @@ class ChatProvider extends ChangeNotifier {
               return;
             }
 
-            // DSH 请求用户拍板：输入框上方出卡片，同时弹窗 + 发系统通知
+            // 宿主请求用户拍板：输入框上方出卡片，同时弹窗 + 发系统通知
             // （App 不在前台时只能靠通知提醒）
             if (chunk['approval'] is Map) {
               _setPendingApproval({
@@ -1583,7 +1583,7 @@ class ChatProvider extends ChangeNotifier {
       sessionId: _currentSession!.id,
       role: MessageRole.assistant,
       content: '',
-      reasoningContent: isAgentMode ? '> 🤖 正在连接本地 DeepSeek Harness 智能体调度管道...\n' : '',
+      reasoningContent: isAgentMode ? '> 🤖 正在连接本地 Agent 调度管道...\n' : '',
       isStreaming: true,
       isAgentMode: isAgentMode,
     );
@@ -1654,7 +1654,7 @@ class ChatProvider extends ChangeNotifier {
               return;
             }
 
-            // DSH 请求用户拍板：输入框上方出卡片，同时弹窗 + 发系统通知
+            // 宿主请求用户拍板：输入框上方出卡片，同时弹窗 + 发系统通知
             // （App 不在前台时只能靠通知提醒）
             if (chunk['approval'] is Map) {
               _setPendingApproval({
@@ -1894,8 +1894,8 @@ class ChatProvider extends ChangeNotifier {
   }
 
   void stopGeneration() {
-    // 通知服务端真正中止这一轮（含正在电脑上跑的 DSH 任务）。
-    // 以前只断开本地 SSE：服务端那次生成照跑，本地 DSH 也继续执行，
+    // 通知服务端真正中止这一轮（含正在电脑上跑的 宿主任务）。
+    // 以前只断开本地 SSE：服务端那次生成照跑，本地 宿主也继续执行，
     // 结果过一会儿又同步回来 —— 表现为"点了停止，答案还诈尸"。
     final streamingId = (_messages.isNotEmpty && _messages.last.isStreaming) ? _messages.last.id : '';
     if (streamingId.isNotEmpty || (_currentSession?.id.isNotEmpty ?? false)) {

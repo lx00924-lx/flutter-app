@@ -445,7 +445,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                               const SizedBox(height: 16),
                               Text(
-                                '随时向 ${settings.aiName.isNotEmpty ? settings.aiName : 'DeepSeek'} 提问',
+                                '随时向 ${settings.aiName.isNotEmpty ? settings.aiName : 'AI'} 提问',
                                 style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                               ),
                               const SizedBox(height: 8),

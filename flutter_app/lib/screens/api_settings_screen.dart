@@ -51,7 +51,7 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
                       controller: cardNameCtrl,
                       decoration: const InputDecoration(
                         labelText: '卡片显示名称',
-                        hintText: '如 DeepSeek-V3 (主界面显示)',
+                        hintText: '如 模型 V3 (主界面显示)',
                         border: OutlineInputBorder(),
                         isDense: true,
                       ),

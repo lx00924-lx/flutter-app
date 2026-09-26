@@ -61,7 +61,7 @@ class SyncService {
   final Dio _dio = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 10),
-      // 15 秒太短：Agent 任务要等本地 DSH 跑完（服务端上限 300 秒），
+      // 15 秒太短：Agent 任务要等本地 宿主跑完（服务端上限 300 秒），
       // 请求发出后十几秒没有任何事件就会被 Dio 判成 receive timeout，
       // 手机上表现为"发消息必失败：The request took longer than 0:00:15"。
       // 这里放宽到 2 分钟，SSE 长连接另外单独设更长的超时。
@@ -1027,7 +1027,7 @@ class SyncService {
       if (resp.statusCode == 200 && resp.data is Map && resp.data['success'] == true) {
         final raw = resp.data['message']?.toString() ?? '';
         // 关键：不能只看 HTTP 成功。插件历史上出现过"排了一条命令就回 applied:true"
-        // 的假成功（DSH 根本不把排队文本当命令），所以这里解析真实回执，
+        // 的假成功（宿主根本不把排队文本当命令），所以这里解析真实回执，
         // applied:false 一律按失败报给用户，并把"当前实际值"带出来。
         if (kind == 'permission' && raw.contains('"applied"')) {
           try {
@@ -1037,7 +1037,7 @@ class SyncService {
               return (
                 ok: false,
                 message: current.isEmpty
-                    ? '电脑端没有应用这个权限预设（DSH 回执 applied:false）'
+                    ? '电脑端没有应用这个权限预设（宿主回执 applied:false）'
                     : '电脑端没有应用：它当前实际是「$current」',
               );
             }
@@ -1084,7 +1084,7 @@ class SyncService {
 
   /// 回报一次本地操作的审批决定（allow / deny）。
   ///
-  /// DSH 在本地执行敏感操作前会挂起等用户拍板；App 通过 SSE 收到请求，
+  /// 宿主在本地执行敏感操作前会挂起等用户拍板；App 通过 SSE 收到请求，
   /// 用户点完按钮后走这里把决定送回去。
   Future<bool> approveAgentTask({
     required String token,
@@ -1113,7 +1113,7 @@ class SyncService {
     }
   }
 
-  /// 补拉挂起中的选择框（DSH 的 ask_user_question）。
+  /// 补拉挂起中的选择框（宿主的 ask_user_question）。
   ///
   /// 推送通道断线期间挂起的选择框不会丢：App 启动、重连、推送通道刚连上时
   /// 都调一次，把还没答的补出来（服务端按 questionId 存了一份，10 分钟过期）。
@@ -1201,7 +1201,7 @@ class SyncService {
   /// 打断/停止服务端正在进行的这一轮生成。
   ///
   /// 插话发送与「停止生成」都调用它。以前 App 只断开自己的 SSE，服务端那一轮
-  /// 照跑不误（本地 DSH 也继续执行），跑完的结果过一会儿又同步回来 ——
+  /// 照跑不误（本地 宿主也继续执行），跑完的结果过一会儿又同步回来 ——
   /// 这就是"点了停止，答案还诈尸"的原因。
   Future<bool> cancelServerGeneration({
     required String userId,
@@ -1278,7 +1278,7 @@ class SyncService {
           'workspaces': List<String>.from(resp.data['workspaces'] ?? const []),
           'sessions': resp.data['sessions'] as List? ?? [],
           'models': resp.data['models'] as List? ?? [],
-          'clientName': resp.data['clientName']?.toString() ?? 'DeepSeek-Harness-Local',
+          'clientName': resp.data['clientName']?.toString() ?? 'LxAI-Bridge-Local',
         };
       }
       return {
@@ -1288,7 +1288,7 @@ class SyncService {
         'workspaces': <String>[],
         'sessions': <dynamic>[],
         'models': <dynamic>[],
-        'clientName': 'DeepSeek-Harness-Local',
+        'clientName': 'LxAI-Bridge-Local',
       };
     } catch (e) {
       debugPrint('[SyncService] getAgentSessions error: $e');
@@ -1301,14 +1301,14 @@ class SyncService {
       'workspaces': <String>[],
       'sessions': <dynamic>[],
       'models': <dynamic>[],
-      'clientName': 'DeepSeek-Harness-Local',
+      'clientName': 'LxAI-Bridge-Local',
     };
   }
 
-  /// 请求电脑端在本地 DSH 中新建一个会话，成功返回新会话 id。
+  /// 请求电脑端在本地 宿主中新建一个会话，成功返回新会话 id。
   ///
-  /// 服务端经中继把 create_session 转发给桥接脚本，桥接再调用本地 DSH 创建；
-  /// 失败（电脑端离线、DSH 不可达）返回 null —— 调用方据此保留原选择并提示，
+  /// 服务端经中继把 create_session 转发给桥接脚本，桥接再调用本地 宿主创建；
+  /// 失败（电脑端离线、宿主不可达）返回 null —— 调用方据此保留原选择并提示，
   /// 而不是伪造一个本地 id 发出去（那正是"发消息必然失败"的根源之一）。
   Future<String?> createAgentSession({
     required String token,
@@ -1492,15 +1492,15 @@ class SyncService {
                 'done': false,
               };
             } else if (eventName == 'approval') {
-              // DSH 在本地执行时请求用户拍板（越权操作确认）。以前这条通知只走
-              // socket.io，而 App 没有 socket.io 客户端 —— 所以只有 DSH 自己弹窗。
+              // 宿主在本地执行时请求用户拍板（越权操作确认）。以前这条通知只走
+              // socket.io，而 App 没有 socket.io 客户端 —— 所以只有 宿主自己弹窗。
               yield {
                 'approval': parsed['approval'],
                 'taskId': parsed['taskId'],
                 'done': false,
               };
             } else if (eventName == 'question') {
-              // DSH 的 ask_user_question 挂起了：走插件 → 桥接 → 中继这条链路推上来。
+              // 宿主的 ask_user_question 挂起了：走插件 → 桥接 → 中继这条链路推上来。
               // 和审批一样，不能只依赖推送通道（SSE 在流就顺手带一份）。
               yield {
                 'question': parsed['questions'],

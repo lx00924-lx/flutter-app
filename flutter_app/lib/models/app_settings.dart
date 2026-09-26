@@ -155,7 +155,7 @@ class AppSettings {
   bool ttsAutoPlayInCall; // 语音通话中自动朗读
   bool autoSpeakResponse; // 开启时 AI 回复自动朗读，关闭时不启用
 
-  // --- 5. DeepSeek Harness (本地电脑 Agent 桥接) ---
+  // --- 5. 本地 Agent 宿主 (本地电脑 Agent 桥接) ---
   bool defaultAgentMode;
   String harnessToken;
   String harnessServiceUrl; // 默认 http://127.0.0.1:3080
@@ -194,7 +194,7 @@ class AppSettings {
   AppSettings({
     this.isDarkMode = false,
     this.activeEndpointId = '',
-    this.activeModelDisplayName = 'DeepSeek-V3',
+    this.activeModelDisplayName = '模型 V3',
     // 账户
     this.isLoggedIn = false,
     this.loginAccount = '',
@@ -242,7 +242,7 @@ class AppSettings {
     this.localBridgeWsUrl = 'http://127.0.0.1:3080',
     this.localAgentToken = '',
     // 不再预设 'deepseek-agent' 这类并不存在的假工作区：默认留空，
-    // 由「刷新列表」从电脑端 DSH 取真实目录；没取到就显示空白框。
+    // 由「刷新列表」从电脑端 宿主取真实目录；没取到就显示空白框。
     this.targetWorkspace = '',
     this.targetSessionId = '',
     this.isHarnessOnline = false,
@@ -258,7 +258,7 @@ class AppSettings {
   }) : apiEndpoints = apiEndpoints ?? [
           ApiModelEndpoint(
             id: 'default-deepseek-v3',
-            cardName: 'DeepSeek-V3',
+            cardName: '模型 V3',
             endpoint: 'https://api.deepseek.com',
             apiKey: '',
             modelName: 'deepseek-chat',
@@ -266,7 +266,7 @@ class AppSettings {
           ),
           ApiModelEndpoint(
             id: 'default-deepseek-r1',
-            cardName: 'DeepSeek-R1',
+            cardName: '推理 R1',
             endpoint: 'https://api.deepseek.com',
             apiKey: '',
             modelName: 'deepseek-reasoner',
@@ -378,7 +378,7 @@ class AppSettings {
       endpoints = [
         ApiModelEndpoint(
           id: 'default-deepseek-v3',
-          cardName: 'DeepSeek-V3',
+          cardName: '模型 V3',
           endpoint: 'https://api.deepseek.com',
           apiKey: '',
           modelName: 'deepseek-chat',
@@ -386,7 +386,7 @@ class AppSettings {
         ),
         ApiModelEndpoint(
           id: 'default-deepseek-r1',
-          cardName: 'DeepSeek-R1',
+          cardName: '推理 R1',
           endpoint: 'https://api.deepseek.com',
           apiKey: '',
           modelName: 'deepseek-reasoner',

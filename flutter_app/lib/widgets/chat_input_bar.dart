@@ -63,7 +63,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
 
   // ==================== 选择框卡片：分页 + 收起 ====================
   //
-  // 电脑端 Agent 可以一次问好几件事（DSH 的 user-questions 是数组）。一屏全摊开
+  // 电脑端 Agent 可以一次问好几件事（宿主的 user-questions 是数组）。一屏全摊开
   // 会把输入框顶没，所以多题时**一次只显示一题**，用「上一题 / 下一题」翻页，
   // 全部答完再点「提交答案」；不想看时可以把整张卡片收成一行。
 
@@ -266,7 +266,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
 
   /// 本地执行一条斜杠命令（**不再把命令当消息发给模型**）。
   ///
-  /// 为什么改成本地执行：DSH 不会把"排队进会话的 /xxx 文本"当命令执行 ——
+  /// 为什么改成本地执行：宿主不会把"排队进会话的 /xxx 文本"当命令执行 ——
   /// /permission 那次踩过坑（排了 13 条全成了聊天消息、预设从未改变）。这些能力
   /// App 本来就有对应的真接口（会话选项 / 建会话 / 取消生成），本地执行最可靠，
   /// 也不会污染会话记录。
@@ -472,7 +472,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
         attachments.add(_recordedPendingAudioUri!);
       }
 
-      // 生成中发送 → 先弹「插话 / 排队」让用户选，和官方 DSH 一致
+      // 生成中发送 → 先弹「插话 / 排队」让用户选，和官方 宿主一致
       if (widget.isGenerating) {
         _showSendModeSheet(finalText, attachments.isNotEmpty ? attachments : null);
         return;
@@ -1177,9 +1177,9 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   );
                 },
               ),
-              // 0.4 DSH 审批卡片：本地执行敏感操作前挂起等用户拍板。
+              // 0.4 宿主审批卡片：本地执行敏感操作前挂起等用户拍板。
               //     以前这条通知只走 socket.io，而 App 没有 socket.io 客户端，
-              //     所以只有 DSH 自己弹窗；现在经 SSE 同步到这里。
+              //     所以只有 宿主自己弹窗；现在经 SSE 同步到这里。
               Consumer<ChatProvider>(
                 builder: (context, chat, _) {
                   final approval = chat.pendingApproval;
@@ -1261,7 +1261,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   );
                 },
               ),
-              // 0.5 选择框卡片：DSH 的 ask_user_question 挂起时，App 直接在这里答。
+              // 0.5 选择框卡片：宿主的 ask_user_question 挂起时，App 直接在这里答。
               //
               // 刻意不做成模态弹窗（用户要求）：弹窗会盖住聊天、还得先关掉；选择框
               // 本来就该"贴在输入框上方"。别的设备或电脑网页端先答了 → 服务端广播
@@ -1754,8 +1754,8 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                               ),
                               decoration: InputDecoration(
                                 hintText: isAgentMode
-                                    ? '向本地 DeepSeek Agent 发送需求...'
-                                    : '输入消息向 DeepSeek 提问...',
+                                    ? '向本地 Agent 发送需求...'
+                                    : '输入消息向 AI 提问...',
                                 hintStyle: TextStyle(
                                   color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
                                   fontSize: 13,
@@ -1861,7 +1861,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   const SizedBox(width: 8),
 
                   // 3. 右侧按钮：生成中同时给「发送」和「停止」——
-                  //    点发送会弹出「插话 / 排队」选择（和官方 DSH 的交互一致）
+                  //    点发送会弹出「插话 / 排队」选择（和官方 宿主的交互一致）
                   if (widget.isGenerating && canSend)
                     IconButton.filled(
                       onPressed: _handleSend,

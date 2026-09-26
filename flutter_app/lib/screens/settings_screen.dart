@@ -107,7 +107,7 @@ class SettingsScreen extends StatelessWidget {
             context,
             icon: Icons.terminal_outlined,
             iconColor: Colors.indigo,
-            title: 'DeepSeek Harness 设置',
+            title: '本地 Agent 设置',
             subtitle: '电脑本地 Agent 桥接、免公网 IP 反向长连接、工作区会话刷新',
             trailingBadge: s.isHarnessOnline ? '在线' : '离线',
             badgeColor: s.isHarnessOnline ? Colors.green : Colors.grey,

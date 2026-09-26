@@ -1,62 +1,48 @@
-# dsh-app-bridge 用户插件的本地修复（勿删）
+# lxai-app-bridge（用户插件副本，勿删）
 
-DSH 里那个给手机 App / `deepseek_bridge.py` 提供 REST 接口的**用户插件**，
-位于 `~/.dsh/user-plugins-group/plugins/dsh-app-bridge/`。
-本目录保存的是它的**已修复副本**，用于版本管理，以及 **DSH 升级或重装把插件覆盖后恢复**。
+> 本目录保存的是本机正在使用的那份**用户插件源码副本**，对应安装位置：
+> `~/.dsh/user-plugins-group/plugins/dsh-app-bridge/lib/index.js`。
+> 保留它的作用：版本管理 + **宿主升级/重装把插件覆盖后可以一键恢复**。
+>
+> 对外发布的独立包在同一份代码上只差"包名与路径"：<https://github.com/lx00924-lx/lxai-app-bridge>
 
-## 修复内容（两处）
+## 它做什么
 
-### 1. 失效的 AbortSignal 导致所有会话读写必挂
+给本地 Agent 宿主补一组 REST 接口，让 LxAI App 及其电脑端桥接脚本能够：
 
-原代码在模块加载时创建一个信号并永久复用：
+- 读模型目录、会话列表（每行带**真实生效**的模型 / 思考档位 / 权限预设）；
+- 跑一轮 Agent 并把 reasoning / 正文 / 工具卡片以 **SSE** 流式回传；
+- 转发宿主的**选择框**（ask_user_question）与**审批**请求到 App，并把答复送回宿主；
+- 中止轮次、重命名/归档会话、读取已装插件清单。
 
-```js
-const TURN_TIMEOUT_MS = 600_000
-const TURN_SIGNAL = AbortSignal.timeout(TURN_TIMEOUT_MS)   // ← 只创建一次
-```
+## 三态设计（为什么不会"AI 自己把问题答了"）
 
-该信号 10 分钟后永久进入 aborted 状态，而插件被 DSH 热加载后模块不会重新求值，
-于是此后**所有** `session.list` / `page` 调用都会立刻抛出
-`The operation was aborted due to timeout`（实测 `GET /v1/sessions` 稳定在 0.05 秒内返回 500）。
+选择框 / 审批会依次上报为：
 
-修复：改为按需创建
+| 状态 | 含义 | 行为 |
+| --- | --- | --- |
+| `pending` | 刚提出 | 正常等待 |
+| `waiting` | 等超过 5 分钟 | **仍然挂起**，这一轮不交给模型（不会出现"超时后主模型自己回答了"） |
+| `orphaned` | 挂满 24 小时 | 主动中止本轮，待办转为"可补答"；用户之后答复会以「续跑」重新起一轮 |
 
-```js
-const turnSignal = () => AbortSignal.timeout(TURN_TIMEOUT_MS)
-// 原本 8 处 TURN_SIGNAL 引用统一改为 turnSignal()
-```
-
-### 2. 取不到工作区时编造 `deepseek-agent`
-
-原 `workspacesPayload()` 在 `workspaceController.list()` 拿不到数据时，返回一个
-硬编码的假工作区 `[{ id: 'deepseek-agent', name: 'deepseek-agent', ... }]`。
-用户磁盘上并不存在这个目录，App 里却会显示它。
-
-修复：
-- `declaredWorkspaces()`：只负责取声明式工作区，取不到返回空数组
-- `workspacesPayload(sessionItems)`：声明式取不到时，**从会话的真实 `cwd` 归纳**；
-  仍然没有就返回空数组，让 App 明确显示"未取到目录"而不是展示假值
-- 会话行缺少 `cwd` 时 `workspace` 留空字符串，不再回退到假名称
-
-## 何时需要这个副本
-
-| 情况 | 处理 |
-| :--- | :--- |
-| DSH 升级后 `/v1/sessions` 又返回 500 或 0 会话 | 把本目录 `index.js` 覆盖回插件目录，然后重启 `dsh web` |
-| DSH 升级后 App 显示 `deepseek-agent` 这种不存在的目录 | 同上 |
-| 想确认线上插件是否有修复 | 在插件目录执行 `Select-String -Pattern "const turnSignal = \(\) =>" lib\index.js` |
-
-## 恢复方法
+## 安装 / 恢复
 
 ```powershell
-$dst = "$env:USERPROFILE\.dsh\user-plugins-group\plugins\dsh-app-bridge\lib\index.js"
-Copy-Item "F:\ai\flutter\123\docs\user-plugin-dsh-app-bridge\index.js" $dst -Force
-node --check $dst          # 语法自检
-# 然后重启 dsh web（插件模块常驻内存，不重启不生效）
+$dst = "$env:USERPROFILE\.dsh\user-plugins-group\plugins\dsh-app-bridge\lib"
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+Copy-Item "F:\ai\flutter\123\docs\user-plugin-dsh-app-bridge\index.js" "$dst\index.js" -Force
+# 然后重启宿主的 web 服务（插件模块只在启动时加载，没有热重载）
 ```
 
-## 重要提醒
+## 注意事项
 
-- **插件改动只在重启 `dsh web` 后生效**（无热重载机制，`dsh` 仅有 `web` / `plugin` 两个子命令）
-- 重启 `dsh web` 会**终止正在运行的 DSH 会话**
-- 本目录的 `index.js` 是**副本**，DSH 实际加载的是 `~/.dsh/...` 下那一份；改完需同步过去
+- **插件改动只在重启宿主 web 服务后生效**（模块常驻内存）。
+- 重启宿主 web 服务会**终止正在运行的会话**，请在空闲时操作。
+- 本目录的 `index.js` 是**副本**，宿主实际加载的是安装目录那一份；改完记得同步过去。
+- 安全边界：这些路由与官方 `/api` 一样处于浏览器信任栅栏之下（Host 必须回环），但**没有额外鉴权** ——
+  任何能访问宿主端口的本机进程都能驱动智能体。不要把宿主 web 服务绑定到 `0.0.0.0`。
+
+## 许可
+
+与本仓库一致：Apache License 2.0（见仓库根目录 `LICENSE` / `NOTICE`）。
+本插件为独立第三方项目，不含宿主项目源码，仅在运行时调用宿主对外暴露的服务。

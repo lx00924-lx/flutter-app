@@ -5,7 +5,7 @@ import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
 /// 系统通知（本地通知）服务。
 ///
-/// 用途：DSH 在电脑上请求授权时，App 可能不在前台 —— 光靠应用内弹窗看不到。
+/// 用途：宿主在电脑上请求授权时，App 可能不在前台 —— 光靠应用内弹窗看不到。
 /// 这里发一条高优先级通知，点一下就能回到 App 处理。
 ///
 /// 权限：Android 13+ 需要 POST_NOTIFICATIONS 运行时授权（清单里已声明），

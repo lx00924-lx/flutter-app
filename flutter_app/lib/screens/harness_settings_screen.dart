@@ -292,7 +292,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       if (!mounted) return;
 
       // 这里不再"顺手清掉已失效的工作区"：快捷栏支持手输自定义路径，
-      // 手输的路径本来就不在 DSH 的目录列表里，清掉会误伤用户刚填的值。
+      // 手输的路径本来就不在 宿主的目录列表里，清掉会误伤用户刚填的值。
       // 真填错了，发消息时电脑端会明确报错，比这里静默清空好。
       final wsList = sp.agentWorkspaces;
 
@@ -300,7 +300,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         _snack('✅ 已同步电脑端目录（${wsList.length} 个工作区 / ${sp.agentSessions.length} 个会话）',
             isError: false);
       } else if (sp.settings.isHarnessOnline) {
-        _snack('⚠️ 桥接已在线，但没取到目录：请确认电脑端 DSH 正常工作', isError: true);
+        _snack('⚠️ 桥接已在线，但没取到目录：请确认电脑端 Agent 宿主正常工作', isError: true);
       } else {
         _snack('⚠️ 电脑端桥接未在线，暂无可用目录（启动桥接后会自动获取）', isError: true);
       }
@@ -679,7 +679,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('DeepSeek Harness 设置'),
+        title: const Text('本地 Agent 设置'),
         actions: [
           // 与聊天界面工具栏里的「扫一扫」是同一个页面（ScannerScreen），
           // 这里只是多一个入口：扫码配对后不用再退回聊天页去扫。
@@ -710,7 +710,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         const Icon(Icons.computer, color: Color(0xFF0284C7)),
                         const SizedBox(width: 8),
                         const Text(
-                          '本地 Agent 桥接设置 (DeepSeek Harness)',
+                          '本地 Agent 桥接设置',
                           style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
                         ),
                         const Spacer(),
