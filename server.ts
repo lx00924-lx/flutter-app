@@ -1,7 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import bcrypt from "bcryptjs";
-import { randomBytes } from "crypto";
+import { randomBytes, createCipheriv, createDecipheriv } from "crypto";
 import FormData from "form-data";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -90,6 +90,255 @@ const ACTIVE_SESSIONS_FILE = path.join(DATA_DIR, "active_sessions.json");
 const MODEL_LIMITS_FILE = path.join(DATA_DIR, "model_limits.json");
 const MODEL_LIMITS_EXAMPLE = path.join(process.cwd(), "model_limits.example.json");
 const UPLOADS_DIR = path.join(process.cwd(), "messages_media");
+
+// ==================== 密钥加密（settings.json 里的敏感字段） ====================
+//
+// 背景：settings.json 里存着用户填写的模型 API Key、ASR Key、Agent 配对 Token，
+// 以前是**明文落盘**。谁拷走这个文件（备份、误发、被拖库）谁就拿到全部密钥，
+// 而"重大过失"在中国法下是不受免责条款保护的 —— 所以这一层是必要的。
+//
+// 设计要点：
+//   1) AES-256-GCM，随机 IV，存成 `enc:v1:<iv>:<tag>:<ct>`；读取时若无该前缀则
+//      按历史明文处理，保证平滑迁移；
+//   2) 主密钥**故意放在 messages_data 之外**（`<cwd>/.secrets/master.key`，也可用
+//      环境变量 SETTINGS_ENC_KEY 覆盖）：这样"只拷走数据目录/备份"拿不到明文；
+//   3) 主密钥丢失 = 已加密的密钥无法恢复（App 重新填写即可），不会导致服务不可用；
+//   4) STORE_API_KEYS=0 时**根本不落盘**（换机需重新填 Key，安全性最高）。
+const SECRETS_DIR = path.join(process.cwd(), ".secrets");
+const MASTER_KEY_FILE = path.join(SECRETS_DIR, "master.key");
+const SECRET_PREFIX = "enc:v1:";
+const STORE_API_KEYS = (process.env.STORE_API_KEYS ?? "1").trim() !== "0";
+/** 设置里需要加密的顶层字段。 */
+const SECRET_FIELDS = ["apiKey", "asrApiKey", "harnessToken"] as const;
+
+let cachedMasterKey: Buffer | null = null;
+
+const loadMasterKey = (): Buffer | null => {
+  if (cachedMasterKey !== null) return cachedMasterKey;
+  const fromEnv = (process.env.SETTINGS_ENC_KEY || "").trim();
+  if (fromEnv) {
+    try {
+      const buf = Buffer.from(fromEnv, "base64");
+      if (buf.length === 32) {
+        cachedMasterKey = buf;
+        return buf;
+      }
+      console.warn("[Secrets] SETTINGS_ENC_KEY 必须是 base64 编码的 32 字节，已忽略该变量");
+    } catch {
+      console.warn("[Secrets] SETTINGS_ENC_KEY 解析失败，已忽略");
+    }
+  }
+  try {
+    if (fsSync.existsSync(MASTER_KEY_FILE)) {
+      const buf = Buffer.from(fsSync.readFileSync(MASTER_KEY_FILE, "utf-8").trim(), "base64");
+      if (buf.length === 32) {
+        cachedMasterKey = buf;
+        return buf;
+      }
+      console.error("[Secrets] master.key 内容非法（需 base64 的 32 字节），密钥字段将不会加密");
+      return null;
+    }
+    fsSync.mkdirSync(SECRETS_DIR, { recursive: true });
+    const buf = randomBytes(32);
+    fsSync.writeFileSync(MASTER_KEY_FILE, buf.toString("base64"), { encoding: "utf-8", mode: 0o600 });
+    console.log(`[Secrets] 已生成主密钥：${MASTER_KEY_FILE}（请备份它；丢失后已加密的密钥只能重新填写）`);
+    cachedMasterKey = buf;
+    return buf;
+  } catch (err: any) {
+    console.error("[Secrets] 主密钥准备失败:", err?.message ?? err);
+    return null;
+  }
+};
+
+const isEncryptedSecret = (value: unknown): boolean =>
+  typeof value === "string" && value.startsWith(SECRET_PREFIX);
+
+const encryptSecret = (plain: string): string => {
+  if (!plain || isEncryptedSecret(plain)) return plain;
+  const key = loadMasterKey();
+  if (key === null) return plain; // 拿不到主密钥就保持原样，绝不因此让服务不可用
+  try {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    const ct = Buffer.concat([cipher.update(plain, "utf-8"), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return SECRET_PREFIX + [iv.toString("base64"), tag.toString("base64"), ct.toString("base64")].join(":");
+  } catch (err: any) {
+    console.error("[Secrets] 加密失败（保持明文）:", err?.message ?? err);
+    return plain;
+  }
+};
+
+const decryptSecret = (value: unknown): string => {
+  if (typeof value !== "string" || value.length === 0) return "";
+  if (!isEncryptedSecret(value)) return value; // 历史明文：直接返回
+  const key = loadMasterKey();
+  if (key === null) return "";
+  try {
+    const parts = value.slice(SECRET_PREFIX.length).split(":");
+    if (parts.length !== 3) return "";
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(parts[0], "base64"));
+    decipher.setAuthTag(Buffer.from(parts[1], "base64"));
+    return Buffer.concat([decipher.update(Buffer.from(parts[2], "base64")), decipher.final()]).toString("utf-8");
+  } catch {
+    console.error("[Secrets] 解密失败（主密钥是否更换过？）—— 该字段按空处理");
+    return "";
+  }
+};
+
+/** 就地处理一条设置记录里的密钥字段（"enc" 写入前 / "dec" 读出后）。 */
+const mapSettingsSecrets = (record: any, mode: "enc" | "dec"): any => {
+  if (record === null || typeof record !== "object") return record;
+  const out: any = { ...record };
+  for (const field of SECRET_FIELDS) {
+    const current = out[field];
+    if (typeof current !== "string" || current.length === 0) continue;
+    out[field] = mode === "enc"
+      ? (STORE_API_KEYS ? encryptSecret(current) : "")
+      : decryptSecret(current);
+  }
+  if (Array.isArray(out.apiEndpoints)) {
+    out.apiEndpoints = out.apiEndpoints.map((ep: any) => {
+      if (ep === null || typeof ep !== "object") return ep;
+      const current = ep.apiKey;
+      if (typeof current !== "string" || current.length === 0) return ep;
+      return {
+        ...ep,
+        apiKey: mode === "enc"
+          ? (STORE_API_KEYS ? encryptSecret(current) : "")
+          : decryptSecret(current),
+      };
+    });
+  }
+  return out;
+};
+
+/** 读全量设置（自动解密密钥字段）。所有读 SETTINGS_FILE 的地方都应走这里。 */
+const loadSettingsFile = async (): Promise<Record<string, any>> => {
+  const raw = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+  const out: Record<string, any> = {};
+  for (const [uid, record] of Object.entries(raw || {})) out[uid] = mapSettingsSecrets(record, "dec");
+  return out;
+};
+
+/** 写全量设置（自动加密密钥字段）。所有写 SETTINGS_FILE 的地方都应走这里。 */
+const saveSettingsFile = async (allSettings: Record<string, any>): Promise<void> => {
+  const out: Record<string, any> = {};
+  for (const [uid, record] of Object.entries(allSettings || {})) out[uid] = mapSettingsSecrets(record, "enc");
+  await safeWriteJSON(SETTINGS_FILE, out);
+};
+
+/**
+ * 一次性迁移：把历史遗留的明文密钥原地加密。
+ * 返回加密了几条，供启动日志显示；失败不影响启动。
+ */
+const migratePlaintextSecrets = async (): Promise<number> => {
+  if (!STORE_API_KEYS) return 0;
+  try {
+    const raw = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+    let changed = 0;
+    const next: Record<string, any> = {};
+    for (const [uid, record] of Object.entries(raw || {})) {
+      const encrypted = mapSettingsSecrets(record, "enc");
+      if (JSON.stringify(encrypted) !== JSON.stringify(record)) changed++;
+      next[uid] = encrypted;
+    }
+    if (changed > 0) {
+      await safeWriteJSON(SETTINGS_FILE, next);
+      console.log(`[Secrets] 已把 ${changed} 个账号的明文密钥迁移为密文（AES-256-GCM）`);
+    }
+    return changed;
+  } catch (err: any) {
+    console.error("[Secrets] 明文密钥迁移失败:", err?.message ?? err);
+    return 0;
+  }
+};
+
+// ==================== 数据保留期（自动清理） ====================
+//
+// 为什么要有：中国《个人信息保护法》第 19 条要求"保存期限应当为实现处理目的所
+// 必要的最短时间"；永久保存是最容易被质疑的一档，而且泄露时"能翻出三年前的聊天
+// 记录"和"只有最近半年"完全不是一个量级（关系到"重大过失"的认定，而重大过失
+// 不受免责条款保护）。默认值可用环境变量调整，设 0 = 永久保存、不做清理。
+const MESSAGE_RETENTION_DAYS = Number((process.env.MESSAGE_RETENTION_DAYS ?? "180").trim());
+const MEDIA_RETENTION_DAYS = Number((process.env.MEDIA_RETENTION_DAYS ?? "90").trim());
+/** 清理巡检间隔（6 小时）；首次在启动 60 秒后跑，避免和启动流程抢 IO。 */
+const RETENTION_SWEEP_MS = 6 * 60 * 60 * 1000;
+
+const retentionSweep = async (): Promise<void> => {
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  // 1) 聊天消息：按每条消息自带的时间戳过滤（解析不出来的保留，宁可不删）
+  if (Number.isFinite(MESSAGE_RETENTION_DAYS) && MESSAGE_RETENTION_DAYS > 0) {
+    const cutoff = Date.now() - MESSAGE_RETENTION_DAYS * dayMs;
+    let removed = 0;
+    try {
+      await withFileLock(MESSAGES_FILE, async () => {
+        const all = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+        for (const uid of Object.keys(all)) {
+          const list = Array.isArray(all[uid]) ? all[uid] : [];
+          const kept = list.filter((msg) => {
+            const raw = String(msg?.timestamp ?? msg?.createdAt ?? "");
+            const t = Date.parse(raw);
+            return !Number.isFinite(t) || t >= cutoff;
+          });
+          removed += list.length - kept.length;
+          all[uid] = kept;
+        }
+        await safeWriteJSON(MESSAGES_FILE, all);
+      });
+      if (removed > 0) {
+        console.log(`[Retention] 已清理 ${removed} 条超过 ${MESSAGE_RETENTION_DAYS} 天的消息`);
+      }
+    } catch (err: any) {
+      console.error("[Retention] 消息清理失败:", err?.message ?? err);
+    }
+  }
+
+  // 2) 媒体文件：按文件修改时间清理（图片 / 文件 / 语音）
+  if (Number.isFinite(MEDIA_RETENTION_DAYS) && MEDIA_RETENTION_DAYS > 0) {
+    const cutoff = Date.now() - MEDIA_RETENTION_DAYS * dayMs;
+    let removedFiles = 0;
+    try {
+      const entries = await fs.readdir(UPLOADS_DIR).catch(() => [] as string[]);
+      for (const name of entries) {
+        const full = path.join(UPLOADS_DIR, name);
+        try {
+          const stat = await fs.stat(full);
+          if (!stat.isFile()) continue;
+          if (stat.mtimeMs < cutoff) {
+            await fs.unlink(full);
+            removedFiles++;
+          }
+        } catch {
+          /* 单个文件失败不影响整体 */
+        }
+      }
+      if (removedFiles > 0) {
+        console.log(`[Retention] 已清理 ${removedFiles} 个超过 ${MEDIA_RETENTION_DAYS} 天的媒体文件`);
+      }
+    } catch (err: any) {
+      console.error("[Retention] 媒体清理失败:", err?.message ?? err);
+    }
+  }
+};
+
+/** 启动保留期巡检：60 秒后跑一次，之后每 6 小时一次。 */
+const startRetentionSweeper = (): void => {
+  const msgDays = Number.isFinite(MESSAGE_RETENTION_DAYS) ? MESSAGE_RETENTION_DAYS : 180;
+  const mediaDays = Number.isFinite(MEDIA_RETENTION_DAYS) ? MEDIA_RETENTION_DAYS : 90;
+  console.log(
+    `[Retention] 数据保留期：消息 ${msgDays > 0 ? `${msgDays} 天` : "永久"} / ` +
+      `媒体 ${mediaDays > 0 ? `${mediaDays} 天` : "永久"}` +
+      `（可用 MESSAGE_RETENTION_DAYS / MEDIA_RETENTION_DAYS 调整，0 = 永久）`,
+  );
+  setTimeout(() => {
+    void retentionSweep();
+  }, 60_000);
+  setInterval(() => {
+    void retentionSweep();
+  }, RETENTION_SWEEP_MS);
+};
 
 // 中继服务器对外地址（用于生成 Bridge 启动命令 / 一键 bat 脚本）。
 // 自建部署无需改代码：设置环境变量 SERVER_BASE_URL，或写入 .env 文件。
@@ -1350,6 +1599,10 @@ async function ensureDirs() {
     await checkFile(USERS_FILE, []); // Simple user list
     await checkFile(SETTINGS_FILE, {}); // Map of userId -> settings
 
+    // 启动时把历史遗留的明文密钥迁移为密文（AES-256-GCM），并启动保留期巡检
+    await migratePlaintextSecrets();
+    startRetentionSweeper();
+
     // Clean any orphan messages (messages with empty or missing sessionId)
     await withFileLock(MESSAGES_FILE, async () => {
       const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
@@ -1551,7 +1804,7 @@ async function startServer() {
     // 是最合适的"token 变更通知"通道（服务端换发后各端无需重登即可收敛）。
     const currentAgentToken = await (async () => {
       try {
-        const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+        const allSettings = await loadSettingsFile();
         return readUserAgentToken(allSettings[userId]);
       } catch {
         return "";
@@ -2107,7 +2360,7 @@ async function startServer() {
     if (existing?.ownerUserId) return existing.ownerUserId;
 
     try {
-      const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+      const allSettings = await loadSettingsFile();
       for (const [userId, record] of Object.entries(allSettings || {})) {
         if (readUserAgentToken(record) === clean) {
           const agent = connectedAgents.get(clean);
@@ -2176,7 +2429,7 @@ async function startServer() {
 
   app.get("/api/settings/:userId", async (req, res) => {
     try {
-      const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+      const allSettings = await loadSettingsFile();
       res.json(sanitizeSettings(allSettings[req.params.userId] || {}));
     } catch (error) {
       res.status(500).json({ error: "Failed to load settings" });
@@ -2191,9 +2444,9 @@ async function startServer() {
     const newSettings = sanitizeSettings(req.body || {});
     try {
       await withFileLock(SETTINGS_FILE, async () => {
-        const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+        const allSettings = await loadSettingsFile();
         allSettings[userId] = { ...(allSettings[userId] || {}), ...newSettings };
-        await safeWriteJSON(SETTINGS_FILE, allSettings);
+        await saveSettingsFile(allSettings);
       });
       io.to(`user_${userId}`).emit("settings_updated", newSettings);
       // 记下版本：其他设备的会话轮询拿到后会主动拉一次，实现运行中的双端同步
@@ -2214,9 +2467,9 @@ async function startServer() {
     const cleanSettings = sanitizeSettings(settings || {});
     try {
       await withFileLock(SETTINGS_FILE, async () => {
-        const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+        const allSettings = await loadSettingsFile();
         allSettings[cleanUserId] = { ...(allSettings[cleanUserId] || {}), ...cleanSettings };
-        await safeWriteJSON(SETTINGS_FILE, allSettings);
+        await saveSettingsFile(allSettings);
       });
 
       // 确保该用户有一条服务端签发的 Agent Token（token 唯一真源）。
@@ -3738,7 +3991,7 @@ if %errorlevel% neq 0 (
 
       // 重置前先看桥接是否在线：在线的话换发后必然要被踢掉再拉回来，
       // 期间两端都该置灰；本来就不在线则无需锁定。
-      const settingsBefore = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+      const settingsBefore = await loadSettingsFile();
       const wasOnline = isAgentOnlineByToken(readUserAgentToken(settingsBefore[ownerUserId]));
 
       // 先断开旧 token 上的 Agent 连接
@@ -3758,9 +4011,9 @@ if %errorlevel% neq 0 (
 
       const newToken = generateServerAgentToken();
       await withFileLock(SETTINGS_FILE, async () => {
-        const current = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+        const current = await loadSettingsFile();
         current[ownerUserId] = { ...(current[ownerUserId] || {}), harnessToken: newToken };
-        await safeWriteJSON(SETTINGS_FILE, current);
+        await saveSettingsFile(current);
       });
 
       // 广播给该用户所有设备，使手机与电脑立刻收敛到同一枚 token
@@ -3855,7 +4108,7 @@ if %errorlevel% neq 0 (
         return res.status(401).json({ error: "设备凭证无效或已被撤销" });
       }
 
-      const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+      const allSettings = await loadSettingsFile();
       let currentToken = readUserAgentToken(allSettings[record.userId]);
       if (!currentToken) {
         currentToken = await resolveOrCreateUserAgentToken(record.userId);
@@ -3977,7 +4230,7 @@ if %errorlevel% neq 0 (
     const cleanUserId = (userId || "").trim();
     if (!cleanUserId || cleanUserId === "guest") return undefined;
 
-    const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+    const allSettings = await loadSettingsFile();
     const record = allSettings[cleanUserId] || {};
     const existing = readUserAgentToken(record);
     if (existing) return existing;
@@ -3986,12 +4239,12 @@ if %errorlevel% neq 0 (
     const token = isPlausibleAgentToken(adopted) ? adopted : generateServerAgentToken();
 
     await withFileLock(SETTINGS_FILE, async () => {
-      const current = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+      const current = await loadSettingsFile();
       const currentRecord = current[cleanUserId] || {};
       // 双检：避免并发下覆盖别人刚写入的值
       if (!readUserAgentToken(currentRecord)) {
         current[cleanUserId] = { ...currentRecord, harnessToken: token };
-        await safeWriteJSON(SETTINGS_FILE, current);
+        await saveSettingsFile(current);
       }
     });
 
@@ -4772,9 +5025,9 @@ if %errorlevel% neq 0 (
     socket.on("update_settings", async ({ userId, settings }) => {
       try {
         await withFileLock(SETTINGS_FILE, async () => {
-          const allSettings = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+          const allSettings = await loadSettingsFile();
           allSettings[userId] = settings;
-          await safeWriteJSON(SETTINGS_FILE, allSettings);
+          await saveSettingsFile(allSettings);
         });
         io.to(`user_${userId}`).emit("settings_updated", settings);
       } catch (error) {
