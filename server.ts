@@ -67,6 +67,13 @@ generationEvents.setMaxListeners(500);
 
 // 监听端口：默认 3000，可用环境变量 PORT 覆盖（便于本地起隔离实例做安全回归测试）
 const PORT = Number(process.env.PORT) || 3000;
+/** Agent 任务正常超时（300 秒）：这段时间内本地没回结果就认为它不行了。 */
+const AGENT_TASK_TIMEOUT_MS = 300000;
+/**
+ * 若该用户此刻有挂起的选择框/审批（= Agent 正在等用户拍板），超时不是"失败"而是
+ * "在等人"，顺延到这段时间再判死。顺延期间**不会**拿主模型替用户作答。
+ */
+const AGENT_TASK_PENDING_GRACE_MS = 30 * 60 * 1000;
 /**
  * 本次中继进程的启动标识。
  *
@@ -551,6 +558,24 @@ const prunePendingQuestions = () => {
   }
 };
 
+/**
+ * 该用户此刻是否正卡在"等用户答复"的选择框上。
+ *
+ * 用途：Agent 任务超时判定要区分"它挂了"和"它在等人" —— 正在等答复的那一轮
+ * 绝不能判失败并转去让主模型回答（用户实测抱怨的"超时后主聊天模型还是回答了"
+ * 就是这么来的：Agent Execution Failed (300s) → Server Background Gen）。
+ */
+const pendingQuestionCountForUser = (userId: string): number => {
+  const now = Date.now();
+  let count = 0;
+  for (const item of pendingQuestions.values()) {
+    if (item.userId && userId && item.userId !== userId) continue;
+    if (now - item.at > QUESTION_TTL_MS) continue;
+    count++;
+  }
+  return count;
+};
+
 /** 按「用户+会话」找到当前在跑的那一轮（插话时需要）。 */
 const findActiveGenerationBySession = (userId: string, sessionId: string): ActiveGeneration | undefined => {
   if (!userId || !sessionId) return undefined;
@@ -685,6 +710,8 @@ async function runServerSideGeneration({
   // （保留已生成的内容与执行结果），放在 try 内会取不到作用域。
   const isAgentMode = settings?.agentMode === true;
   let agentExecutionResult: { status: 'completed' | 'failed'; steps: string[]; rawOutput?: string; timestamp?: string } | null = null;
+  /** Agent 阶段是否失败：失败时**不进入润色阶段**（绝不能拿主模型替 Agent 作答）。 */
+  let agentStageFailed = false;
   let accumulatedContent = "";
   let accumulatedReasoning = "";
 
@@ -773,19 +800,40 @@ async function runServerSideGeneration({
 
       try {
         const taskPromise = new Promise<{ success: boolean; output: string; steps: string[] }>((resolve, reject) => {
-          const timeoutId = setTimeout(() => {
-            pendingAgentTasks.delete(taskId);
-            reject(new Error("本地 DeepSeek 智能体执行超时 (300秒)"));
-          }, 300000);
+          /**
+           * 任务超时：**正在等用户确认时不算超时**。
+           *
+           * 为什么必须这样：Agent 那一轮可能正卡在 `ask_user_question`（或审批）上等用户
+           * 答复，这是"正常在工作"，不是"死了"。旧逻辑 300 秒一到就判失败，接着进入润色
+           * 阶段拿**主模型**把这轮"回答"了 —— 用户实测看到的就是
+           * 「超时后主聊天模型还是回答了」（中继日志：Agent Execution Failed (300s) →
+           * Server Background Gen Calling ... completions）。
+           */
+          let timeoutId: NodeJS.Timeout;
+          const armTimeout = (graceForPendingDecision: boolean) => {
+            timeoutId = setTimeout(() => {
+              const waiting = pendingQuestionCountForUser(userId);
+              if (!graceForPendingDecision && waiting > 0) {
+                console.log(
+                  `[Agent Hub] 任务 ${taskId} 仍在等待用户处理（${waiting} 条待答），超时顺延 ${Math.round(AGENT_TASK_PENDING_GRACE_MS / 60000)} 分钟`,
+                );
+                armTimeout(true);
+                return;
+              }
+              pendingAgentTasks.delete(taskId);
+              reject(new Error(`本地 DeepSeek 智能体执行超时 (${graceForPendingDecision ? '等待用户确认超时' : '300秒'})`));
+            }, graceForPendingDecision ? AGENT_TASK_PENDING_GRACE_MS : AGENT_TASK_TIMEOUT_MS);
+          };
+          armTimeout(false);
 
           pendingAgentTasks.set(taskId, {
             resolve,
             reject,
-            timeoutId,
+            get timeoutId() { return timeoutId; },
             token: agentToken,
             userId,
             assistantMessageId,
-          });
+          } as any);
         });
 
         const selectedSessionId = (settings?.agentSessionId || "").trim();
@@ -863,6 +911,7 @@ async function runServerSideGeneration({
 
       } catch (agentErr: any) {
         console.error("[Agent Execution Failed]:", agentErr);
+        agentStageFailed = true;
         agentExecutionResult = {
           status: 'failed',
           steps: [`执行出错: ${agentErr.message || '本地响应超时'}`],
@@ -875,6 +924,46 @@ async function runServerSideGeneration({
           result: agentExecutionResult
         });
       }
+    }
+
+    // Agent 阶段失败时**不进入润色阶段**（也就是不拿主模型来"回答"）。
+    //
+    // 为什么：润色阶段的意义是"把本地执行结果总结给用户"。执行都失败了，再调主模型
+    // 只会让它凭空编一段回答 —— 用户实测看到的现象就是「超时后主聊天模型还是回答了」
+    // （中继日志：Agent Execution Failed (300s) → Server Background Gen Calling completions）。
+    // 这里改为写一条如实的失败说明，用户答复/重试后那一轮会继续。
+    if (isAgentMode && agentStageFailed) {
+      const waiting = pendingQuestionCountForUser(userId);
+      const notice = waiting > 0
+        ? '本地 Agent 正在等你确认（选择框 / 授权卡片），这一轮会一直等你的答复，不会自己继续。'
+        : `本地 Agent 这一轮没有拿到结果（${agentExecutionResult?.steps?.[0] ?? '执行失败'}）。如果你那边还有等待确认的卡片，它就是在等你答复；否则可以重发一次。`;
+      const failedMessage = {
+        id: assistantMessageId,
+        sessionId: resolvedSessionId,
+        role: 'assistant',
+        content: notice,
+        timestamp: new Date().toISOString(),
+        type: 'text',
+        status: 'completed',
+        isAgentMode: true,
+        agentExecution: agentExecutionResult,
+      };
+      await upsertMessage(userId, failedMessage);
+      io.to(`user_${userId}`).emit("chat_completed", {
+        messageId: assistantMessageId,
+        content: notice,
+        isAgentMode: true,
+        agentExecution: agentExecutionResult,
+      });
+      generationEvents.emit(`completed_${assistantMessageId}`, {
+        messageId: assistantMessageId,
+        content: notice,
+        isAgentMode: true,
+        agentExecution: agentExecutionResult,
+      });
+      genState.status = 'completed';
+      genState.content = notice;
+      return;
     }
 
     // 本地执行结束（成功或失败）→ 进入"润色"阶段。
