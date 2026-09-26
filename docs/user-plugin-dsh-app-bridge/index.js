@@ -312,6 +312,22 @@ export function apply(ctx) {
     return value.default?.provider
   }
 
+  /**
+   * 展示名归一化：宿主目录里的模型名带厂商前缀（`DeepSeek-V4-Flash`），
+   * 而 App 下拉只需要「V4-Flash」这种版本标签，和中继内置的回退目录保持一致。
+   *
+   * 只动**展示名**：`model.id`（`deepseek-v4-flash` 之类）是调用宿主时必须原样
+   * 回传的接口真值，一个字都不能改，否则 selectModel 必然失败。
+   * 前缀表只收 DeepSeek：其他厂商的名字（GPT-4o / Claude-3.5）去掉前缀反而语义不明。
+   */
+  const VENDOR_PREFIX = /^deepseek[-_\s]+/i
+  function displayModelName(model) {
+    const raw = typeof model.name === 'string' && model.name.length > 0 ? model.name : model.id
+    if (typeof raw !== 'string') return raw
+    const stripped = raw.replace(VENDOR_PREFIX, '')
+    return stripped.length > 0 ? stripped : raw
+  }
+
   /** /v1/models 的载荷：把 provider 分组拍平成模型数组（bridge 直接透传给 App）。 */
   async function modelsPayload() {
     const value = await catalog()
@@ -320,7 +336,7 @@ export function apply(ctx) {
       for (const model of group.models ?? []) {
         models.push({
           id: model.id,
-          name: model.name ?? model.id,
+          name: displayModelName(model),
           provider: group.id,
           ...(model.description === undefined ? {} : { description: model.description }),
           ...(model.reasoning === undefined ? {} : {
