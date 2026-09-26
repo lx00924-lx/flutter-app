@@ -641,8 +641,8 @@ class _GithubReleaseCardState extends State<_GithubReleaseCard> {
   /// 开源许可与署名页。
   ///
   /// 两件事一起满足：
-  /// 1) AGPL-3.0 第 7(b) 条要求衍生版本在「关于 / 法律声明」里保留作者署名
-  ///    —— 本页就是那个界面；
+  /// 1) 展示本项目自己的许可（Apache-2.0：可闭源商用，只需保留版权与许可声明）
+  ///    以及免责声明（按现状提供、不担保、自担风险）；
   /// 2) Flutter 的 LicenseRegistry 会把**全部第三方依赖**的许可证自动汇总进来
   ///    （pub 包 / 插件），合规又省事。
   void _showOpenSourceLicenses(BuildContext context) {
@@ -651,13 +651,15 @@ class _GithubReleaseCardState extends State<_GithubReleaseCard> {
       applicationName: 'LxAI',
       applicationVersion: 'v${AppSettings.currentVersion}',
       applicationLegalese: 'Copyright (C) 2026 lx00924-lx\n'
-          '本项目以 AGPL-3.0-only 发布（含中继服务端、Bridge 与 App）：\n'
-          'https://github.com/${AppSettings.officialGithubOwner}/${AppSettings.officialGithubRepo}\n\n'
-          '第三方独立项目，与 DeepSeek 官方无隶属、合作或背书关系；\n'
-          '“DeepSeek”“DeepSeek Harness”等名称与标识归其各自权利人所有，\n'
-          '本项目仅在说明兼容性与互操作性的范围内提及。\n\n'
-          '任何分发或以网络服务方式对外提供本项目的衍生版本，\n'
-          '均须在显著位置保留上述署名与源码地址。',
+          '本项目以 Apache License 2.0 发布（含中继服务端、Bridge 与 App）：\n'
+          'https://github.com/${AppSettings.officialGithubOwner}/${AppSettings.officialGithubRepo}\n'
+          '可自由使用、修改、分发（含闭源与商业用途），需保留版权与许可声明；\n'
+          '许可不授予任何商标权。\n\n'
+          '本软件按“现状”提供，不附带任何明示或默示担保；作者不对使用后果承担赔偿责任。\n'
+          '请只对你自己拥有所有权、或已获明确授权的设备使用远程控制能力。\n'
+          '完整条款见仓库 TERMS.md（用户协议）与 PRIVACY.md（隐私政策）。\n\n'
+          '第三方独立项目，与任何被兼容或被提及的产品、服务提供方无隶属、合作或背书关系；\n'
+          '相关名称与标识归其各自权利人所有，仅在说明兼容性时提及。',
     );
   }
 }
