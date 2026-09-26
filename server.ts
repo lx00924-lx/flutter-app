@@ -2137,7 +2137,7 @@ async function startServer() {
    * 插话发送与"停止生成"都走这里。要点：
    * · 掐断思考 API 的流（abortController）；
    * · 若这一轮还在等本地 Agent 执行，同时把 Agent 宿主那一轮也中止 ——
-   *   此前 App 的"停止"只断开了自己的 SSE，电脑上的 宿主还在继续跑，
+   *   此前 App 的"停止"只断开了自己的 SSE，电脑上的宿主还在继续跑，
    *   跑完的结果过一会儿又同步回来（"诈尸"）；
    * · 标记 cancelledByUser，让收尾逻辑保留已生成的部分并标成"已打断"。
    */
@@ -2252,7 +2252,7 @@ async function startServer() {
 
     // 宿主在本地执行时可能要用户拍板（越权操作确认等）。服务端把它通过 SSE
     // 送到 App，用户在 App 上点了之后走 /api/agent/approve 回传 —— 之前这条
-    // 通知只走 socket.io，而 App 没有 socket.io 客户端，所以只有 宿主自己弹窗。
+    // 通知只走 socket.io，而 App 没有 socket.io 客户端，所以只有宿主自己弹窗。
     const approvalHandler = (data: any) => {
       sendEvent("approval", {
         taskId: data.taskId,
@@ -3168,7 +3168,7 @@ if %errorlevel% neq 0 (
   /**
    * 通过中继把「立即切换权限预设 / 思考深度」转发给本地桥接，并把结果原样带回。
    *
-   * 为什么要单独做：以前这两项只在"下一轮对话开始时"由桥接顺手带给 宿主，
+   * 为什么要单独做：以前这两项只在"下一轮对话开始时"由桥接顺手带给宿主，
    * 而且失败会被静默吞掉 —— App 上点了看着像生效，实际没变。现在按需即时下发，
    * 成功/失败都能回到界面。
    */
@@ -3252,7 +3252,7 @@ if %errorlevel% neq 0 (
 
   /**
    * 读取电脑端真实可用的权限预设列表（由本地 Agent 宿主的 permissionPresets 提供）。
-   * App 据此显示真实可选项，避免再出现"填了一个 宿主不认识的值"。
+   * App 据此显示真实可选项，避免再出现"填了一个宿主不认识的值"。
    */
   app.get("/api/agent/permission-presets", async (req, res) => {
     try {
@@ -3313,7 +3313,7 @@ if %errorlevel% neq 0 (
       }
       const agent = connectedAgents.get(targetToken);
       // 不再回退到 'deepseek-agent' 这个并不存在的预设工作区：
-      // 传空表示"用电脑端 宿主的默认工作区"，由桥接决定。
+      // 传空表示"用电脑端宿主的默认工作区"，由桥接决定。
       const targetWs = (workspace || "").trim();
       const sessionTitle = (title || "").trim() || `新对话 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
 
@@ -3485,9 +3485,9 @@ if %errorlevel% neq 0 (
 
   // ── 选择框（宿主的 ask_user_question）→ App ─────────────────────
   //
-  // 背景：ask_user_question 走的是 宿主的「客户端 UI」能力（ctx.userQuestions），
-  // 只有连到 宿主的界面能应答；桥接脚本吃的是任务事件流，里面没有 question 事件，
-  // 所以 App 在结构上永远收不到选择框。现在由 宿主侧插件排队 + 桥接轮询转发，
+  // 背景：ask_user_question 走的是宿主的「客户端 UI」能力（ctx.userQuestions），
+  // 只有连到宿主的界面能应答；桥接脚本吃的是任务事件流，里面没有 question 事件，
+  // 所以 App 在结构上永远收不到选择框。现在由宿主侧插件排队 + 桥接轮询转发，
   // 中继这里负责转投给 App 并把答复送回去。
 
   /**

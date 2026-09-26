@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-本地 Agent 宿主本地安全反向桥接客户端 (本地宿主 Bridge v3.6 - 工业增强/双模高可用版)
+本地 Agent 宿主安全反向桥接客户端 (LxAI Bridge v3.6 - 工业增强/双模高可用版)
 ======================================================================
 核心特性：
 1. 本地主动向上发起连接至 App 调度服务器（免公网 IP，免端口映射）。
@@ -9,7 +9,7 @@
 4. 全程无状态纯内存转发：不持久化任何对话记录、不缓存密钥、不落盘日志。
 5. 并发限制与资源管控（基于信号量控制最大并发任务数，避免显存爆仓）。
 6. 严格任务生命周期与日志隔离（每条日志、步骤均携带唯一 taskId）。
-7. 适配 本地 Agent 宿主 (dsh 3080/v1) 标准服务与权限沙箱隔离。
+7. 适配本地 Agent 宿主 (3080/v1) 的标准服务与权限沙箱隔离。
 
 预填默认参数：
   • 调度服务器: https://www.lx00924ai.top
@@ -52,9 +52,9 @@ import uuid
 #   名称  : "dsh-auth-" + base64url( sha256(authority) )
 #   值    : "v1." + base64url(JSON{v,authority,issuedAt,expiresAt}) + "." + base64url(HMAC-SHA256)
 #   密钥  : ~/.dsh/.credentials.yaml 中 client-connection/browser-session 的
-#           payload.secret（base64url 编码的 32 字节，跨 宿主重启持久）
+#           payload.secret（base64url 编码的 32 字节，跨宿主重启持久）
 #
-# 由于 bridge 与 宿主同机运行，这里直接读取该密钥在本地自签 Cookie，
+# 由于 bridge 与宿主同机运行，这里直接读取该密钥在本地自签 Cookie，
 # 无需浏览器参与、也不会把本机凭证上传到云端中继。
 # ============================================================================
 
@@ -80,7 +80,7 @@ def _b64url_decode(text: str):
 
 
 def _dsh_home() -> str:
-    """定位 宿主主目录（环境变量优先，否则默认 ~/.dsh）。"""
+    """定位宿主主目录（环境变量优先，否则默认 ~/.dsh）。"""
     env_home = (os.getenv("DSH_HOME") or "").strip()
     if env_home and os.path.isdir(env_home):
         return env_home
@@ -161,7 +161,7 @@ def _build_dsh_cookie_header(url: str, explicit_authority: str = ""):
     生成可直接附加到请求上的 Cookie 头。
 
     成功返回 {"Cookie": "..."}；任何环节缺失（无凭据/无法解析 authority）返回 {}，
-    使 bridge 退化为原行为（此时 宿主会返回 401，日志中给出明确指引）。
+    使 bridge 退化为原行为（此时宿主会返回 401，日志中给出明确指引）。
     """
     secret = _read_dsh_browser_session_secret()
     if not secret:
@@ -199,7 +199,7 @@ def _build_dsh_cookie_header(url: str, explicit_authority: str = ""):
 
 def dsh_headers(url: str, extra=None):
     """
-    构造发往 宿主的请求头：在业务头基础上附加会话 Cookie。
+    构造发往宿主的请求头：在业务头基础上附加会话 Cookie。
 
     :param url: 目标地址（用于推导 Cookie 绑定的 authority）
     :param extra: 额外的业务头
@@ -215,7 +215,7 @@ def dsh_headers(url: str, extra=None):
 
 def dsh_ws_connect(ws_url: str, **kwargs):
     """
-    连接本地 宿主的 WebSocket，并带上信任栅栏所需的 Cookie。
+    连接本地宿主的 WebSocket，并带上信任栅栏所需的 Cookie。
 
     宿主的 /v1 通道同时在 HTTP 与 WS 握手两道口子上校验浏览器信任 Cookie，
     少了它 WS 会直接被拒（表现为"握手受阻、退化到长轮询"）。
@@ -237,8 +237,8 @@ def dsh_auth_status():
     """返回 (是否可用, 说明)，供启动自检打印。"""
     secret = _read_dsh_browser_session_secret()
     if not secret:
-        return False, f"未找到 宿主会话密钥（{os.path.join(_dsh_home(), '.credentials.yaml')}）"
-    return True, "已加载 宿主会话密钥，可为请求自签 Cookie"
+        return False, f"未找到宿主会话密钥（{os.path.join(_dsh_home(), '.credentials.yaml')}）"
+    return True, "已加载宿主会话密钥，可为请求自签 Cookie"
 
 
 # ============================================================================
@@ -333,7 +333,7 @@ logging.basicConfig(
     format="\033[90m%(asctime)s\033[0m %(message)s",
     datefmt="%H:%M:%S"
 )
-logger = logging.getLogger("本地宿主Bridge")
+logger = logging.getLogger("LxAI-Bridge")
 
 MAX_CONCURRENT_TASKS = 2
 
@@ -364,7 +364,7 @@ def is_host_safe(url: str) -> bool:
         return False
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="本地 Agent 宿主 Local Reverse Bridge v3.7")
+    parser = argparse.ArgumentParser(description="LxAI Bridge 本地反向桥接 v3.7")
     parser.add_argument("--token", type=str, default=os.getenv("AGENT_TOKEN", ""), help="App 中生成的配对 Token")
     parser.add_argument("--server", type=str, default=os.getenv("SERVER_URL", "https://www.lx00924ai.top"), help="App 调度服务器地址 (默认: https://www.lx00924ai.top)")
     parser.add_argument("--harness-url", type=str, default=os.getenv("HARNESS_URL", "http://127.0.0.1:3080"), help="本地 Agent 宿主 / Agent 服务地址 (默认: http://127.0.0.1:3080)")
@@ -516,7 +516,7 @@ def normalize_ws_url(server_url: str, token: str) -> str:
     else:
         ws_url = "wss://" + url
 
-    return f"{ws_url}/ws/agent?token={token}&clientName=本地宿主-Harness-Local"
+    return f"{ws_url}/ws/agent?token={token}&clientName=LxAI-Bridge-Local"
 
 # ======================================================================
 # 零外部依赖纯 Python 终端二维码 (QR Code) 渲染引擎
@@ -887,7 +887,7 @@ def http_get_json(url: str, timeout: int = 35) -> dict:
 
 LOCAL_SESSION_CACHE = []
 
-# 会话行里**必须原样透传**的真实状态字段（由 宿主插件从会话投影读出）。
+# 会话行里**必须原样透传**的真实状态字段（由宿主插件从会话投影读出）。
 # running/cwd/parentSessionId 是列表本身的信息，provider/model/reasoningEffort/permission
 # 是"电脑端实际生效"的档位与权限 —— App 首启就靠它们对齐界面。
 SESSION_STATE_KEYS = (
@@ -958,7 +958,7 @@ def extract_text_from_obj(obj) -> str:
 
 def extract_dsh_sessions_and_workspaces(obj, default_ws=""):
     """
-    从 宿主的响应里提取工作区与会话。
+    从宿主的响应里提取工作区与会话。
 
     注意 default_ws 默认为空：此前默认填 "deepseek-agent"，而本地根本没有这个
     目录，结果 App 的工作区下拉里永远挂着一个并不存在的选项，用户选中它发消息
@@ -987,10 +987,10 @@ def extract_dsh_sessions_and_workspaces(obj, default_ws=""):
                 "workspace": ws,
                 "updatedAt": updated
             }
-            # 会话的**真实状态**必须原样透传：插件从 宿主会话投影里读出
+            # 会话的**真实状态**必须原样透传：插件从宿主会话投影里读出
             # provider/model/reasoningEffort/permission 放在同一行里，此前这里只保留 5 个
             # 字段，等于把它们全丢了 —— App 因此永远看不到电脑端实际生效的档位，
-            # 首启时显示的是自己存的旧值，还会在下一条消息把旧值推回 宿主覆盖设置。
+            # 首启时显示的是自己存的旧值，还会在下一条消息把旧值推回宿主覆盖设置。
             for key in SESSION_STATE_KEYS:
                 if it.get(key) is not None:
                     row[key] = it.get(key)
@@ -1070,7 +1070,7 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
         "payload": {}
     }
 
-    # 尝试直接通过本地 WebSocket RPC 查询 宿主会话
+    # 尝试直接通过本地 WebSocket RPC 查询宿主会话
     if HAS_WEBSOCKETS and not harness_base.startswith("https://"):
         ws_probe_urls = [
             f"{harness_base.replace('http://', 'ws://')}/v1/agent",
@@ -1160,7 +1160,7 @@ _last_ws_failure_at = 0.0
 RUNNING_WS_TASKS = set()
 
 async def query_dsh_models(harness_url: str):
-    """从本地 宿主 (3080/3081) 获取可用模型列表与各模型的思考深度(推理等级)"""
+    """从本地宿主 (3080/3081) 获取可用模型列表与各模型的思考深度(推理等级)"""
     harness_base = harness_url.rstrip("/")
     loop = asyncio.get_running_loop()
     candidates = [f"{harness_base}/v1/models"]
@@ -1192,7 +1192,7 @@ async def query_dsh_models(harness_url: str):
     return []
 
 async def abort_dsh_session(harness_url: str, session_id: str):
-    """中止本地 宿主正在运行的任务轮次 (POST /v1/sessions/:id/abort)"""
+    """中止本地宿主正在运行的任务轮次 (POST /v1/sessions/:id/abort)"""
     if not session_id:
         return False, "缺少 sessionId"
     harness_base = harness_url.rstrip("/")
@@ -1219,10 +1219,10 @@ async def abort_dsh_session(harness_url: str, session_id: str):
             return True, raw
         except Exception as e:
             continue
-    return False, "未能连接到 宿主中止接口"
+    return False, "未能连接到宿主中止接口"
 
 async def approve_dsh_session(harness_url: str, session_id: str, approval_id: str, action: str = "allow"):
-    """向本地 宿主提交越权操作的审批结果 (POST /v1/sessions/:id/approve)"""
+    """向本地宿主提交越权操作的审批结果 (POST /v1/sessions/:id/approve)"""
     harness_base = harness_url.rstrip("/")
     loop = asyncio.get_running_loop()
     candidates = [
@@ -1251,7 +1251,7 @@ async def approve_dsh_session(harness_url: str, session_id: str, approval_id: st
 
 async def fetch_pending_questions(harness_url: str):
     """
-    读取本地 宿主里挂起的选择框 (GET /v1/user-questions/pending)。
+    读取本地宿主里挂起的选择框 (GET /v1/user-questions/pending)。
 
     返回 list（可能为空）；**返回 None 表示本地插件不支持这个接口或没起来** ——
     调用方据此判断"App 侧能不能接管选择框"，不要把它和"没有待答问题"混为一谈。
@@ -1280,7 +1280,7 @@ async def fetch_pending_questions(harness_url: str):
 
 async def answer_dsh_question(harness_url: str, question_id: str, answers, decline: bool = False):
     """
-    把 App 的答复写回本地 宿主。
+    把 App 的答复写回本地宿主。
 
     decline=True → POST /v1/user-questions/decline（用户在 App 上点"在电脑上回答"，
     宿主侧会把这个选择框交回电脑端网页弹窗），否则 POST /v1/user-questions/answer。
@@ -1318,12 +1318,12 @@ async def answer_dsh_question(harness_url: str, question_id: str, answers, decli
 
 async def poll_dsh_questions_loop(sender, harness_url: str):
     """
-    每 1s 拉一次 宿主里挂起的选择框，经 sender 转发给中继 → App。
+    每 1s 拉一次宿主里挂起的选择框，经 sender 转发给中继 → App。
 
     sender(payload: dict) 是个协程函数：WS 通道下就是 ws.send(json.dumps(...))，
     HTTP 轮询通道下就是 POST /api/agent/waiting-question。
 
-    为什么用轮询而不是让插件主动推：插件跑在 宿主进程里，它没有中继 Token、也
+    为什么用轮询而不是让插件主动推：插件跑在宿主进程里，它没有中继 Token、也
     不知道中继地址；而桥接脚本两样都有。**顺带**，这个轮询本身就是"App 侧在线"
     的心跳 —— 插件只在最近 15s 内被轮询过时才把问题交给 App（见插件里的
     QUESTION_ARM_MS），否则原样走电脑端网页弹窗，行为与装这个功能之前一致。
@@ -1339,7 +1339,7 @@ async def poll_dsh_questions_loop(sender, harness_url: str):
         if items is None:
             # 插件不支持/宿主没起来：慢一点重试，别刷屏（只提示一次）
             if not not_ready_warned:
-                print("\033[93m[选择框] 本地 宿主还没有 /v1/user-questions 接口（重启 宿主让插件生效后即可转发）\033[0m")
+                print("\033[93m[选择框] 本地宿主还没有 /v1/user-questions 接口（重启宿主让插件生效后即可转发）\033[0m")
                 not_ready_warned = True
             await asyncio.sleep(3)
             continue
@@ -1374,7 +1374,7 @@ async def poll_dsh_questions_loop(sender, harness_url: str):
                 elif state == "waiting":
                     print(f"\033[93m[选择框] {qid} 已等待较久，仍在挂起等答复（本轮不会交给模型）\033[0m")
                 else:
-                    print(f"\033[96m[选择框] 已把 宿主的选择框转发给 App: {qid}\033[0m")
+                    print(f"\033[96m[选择框] 已把宿主的选择框转发给 App: {qid}\033[0m")
             except Exception:
                 pass
         for qid in list(known.keys()):
@@ -1394,7 +1394,7 @@ async def poll_dsh_questions_loop(sender, harness_url: str):
 
 async def fetch_pending_approvals(harness_url: str):
     """
-    读取本地 宿主里挂起的审批 (GET /v1/agent/approvals/pending)。
+    读取本地宿主里挂起的审批 (GET /v1/agent/approvals/pending)。
 
     返回 list（可能为空）；**返回 None 表示插件不支持这个接口或没起来** ——
     调用方据此区分"App 侧能不能接管审批"与"当前没有待审批"。
@@ -1460,7 +1460,7 @@ async def approve_dsh_approval(harness_url: str, approval_id: str, action: str =
 
 async def poll_dsh_approvals_loop(sender, harness_url: str):
     """
-    每 1s 拉一次 宿主里挂起的审批，经 sender 转发给中继 → App 卡片。
+    每 1s 拉一次宿主里挂起的审批，经 sender 转发给中继 → App 卡片。
 
     与 poll_dsh_questions_loop 完全对称（sender 的两种形态、心跳语义都相同）。
     存在的意义：审批原先只在"手机发起那一轮的 SSE 流"里出现，换个场景（网页端跑的任务、
@@ -1476,7 +1476,7 @@ async def poll_dsh_approvals_loop(sender, harness_url: str):
             items = None
         if items is None:
             if not not_ready_warned:
-                print("\033[93m[审批] 本地 宿主还没有 /v1/agent/approvals 接口（重启 宿主让插件生效后即可转发）\033[0m")
+                print("\033[93m[审批] 本地宿主还没有 /v1/agent/approvals 接口（重启宿主让插件生效后即可转发）\033[0m")
                 not_ready_warned = True
             await asyncio.sleep(3)
             continue
@@ -1510,7 +1510,7 @@ async def poll_dsh_approvals_loop(sender, harness_url: str):
                 elif state == "waiting":
                     print(f"\033[93m[审批] {aid} 已等待较久，仍在挂起等决定（本轮不会交给模型）\033[0m")
                 else:
-                    print(f"\033[96m[审批] 已把 宿主的授权请求转发给 App: {aid}（{item.get('tool') or 'tool'}）\033[0m")
+                    print(f"\033[96m[审批] 已把宿主的授权请求转发给 App: {aid}（{item.get('tool') or 'tool'}）\033[0m")
             except Exception:
                 pass
         for aid in list(known.keys()):
@@ -1530,7 +1530,7 @@ async def poll_dsh_approvals_loop(sender, harness_url: str):
 
 
 async def rename_dsh_session(harness_url: str, session_id: str, title: str):
-    """重命名本地 宿主会话 (PATCH /v1/sessions/:id)"""
+    """重命名本地宿主会话 (PATCH /v1/sessions/:id)"""
     if not session_id or not title:
         return False, "缺少会话ID或标题"
     harness_base = harness_url.rstrip("/")
@@ -1558,7 +1558,7 @@ async def rename_dsh_session(harness_url: str, session_id: str, title: str):
 
 async def apply_dsh_session_permission(harness_url: str, session_id: str, preset: str):
     """
-    立即切换某个 宿主会话的权限预设 (POST /v1/session/permission)。
+    立即切换某个宿主会话的权限预设 (POST /v1/session/permission)。
 
     为什么要看回执而不是只看 HTTP 200：插件早先那版是"往会话排一条 /permission 文本"
     然后无条件回 applied:true —— 宿主并不把排队文本当命令，于是 App 上"切换成功"
@@ -1597,7 +1597,7 @@ async def apply_dsh_session_permission(harness_url: str, session_id: str, preset
                 )
             return True, raw
         except urllib.error.HTTPError as he:
-            # 4xx 是"预设名不合法"这类业务错误：把 宿主的原话带回去，
+            # 4xx 是"预设名不合法"这类业务错误：把宿主的原话带回去，
             # 别笼统说成"接口不可用"，否则用户不知道错在哪
             try:
                 detail = he.read().decode("utf-8", "replace")
@@ -1606,14 +1606,14 @@ async def apply_dsh_session_permission(harness_url: str, session_id: str, preset
             return False, detail
         except Exception:
             continue
-    return False, "权限切换失败：本地 宿主未响应（可能插件版本过旧，缺少 /v1/session/permission）"
+    return False, "权限切换失败：本地宿主未响应（可能插件版本过旧，缺少 /v1/session/permission）"
 
 async def query_dsh_session_permission(harness_url: str, session_id: str):
     """
     读取会话**真实生效**的权限预设 (GET /v1/session/permission)。
 
     用于对账：App 显示的是本地设置，电脑端可能被别处改过；有了这个接口就能
-    以 宿主为准回写，而不是各说各话。
+    以宿主为准回写，而不是各说各话。
     """
     if not session_id:
         return None
@@ -1642,9 +1642,9 @@ async def query_dsh_session_permission(harness_url: str, session_id: str):
 
 async def apply_dsh_session_model(harness_url: str, session_id: str, model: str, reasoning_effort: str):
     """
-    立即切换某个 宿主会话的模型档位/思考深度 (POST /v1/session/model)。
+    立即切换某个宿主会话的模型档位/思考深度 (POST /v1/session/model)。
 
-    对应 宿主的 sessionController.selectModel —— 官方接口，不需要重启会话即可
+    对应宿主的 sessionController.selectModel —— 官方接口，不需要重启会话即可
     生效；以前只在"下一轮对话开始时"调用一次，所以 App 上切换看着不实时。
     """
     if not session_id:
@@ -1676,10 +1676,10 @@ async def apply_dsh_session_model(harness_url: str, session_id: str, model: str,
             return True, raw
         except Exception:
             continue
-    return False, "思考深度切换失败：本地 宿主未响应（可能插件版本过旧，缺少 /v1/session/model）"
+    return False, "思考深度切换失败：本地宿主未响应（可能插件版本过旧，缺少 /v1/session/model）"
 
 async def query_dsh_permission_presets(harness_url: str):
-    """读取本地 宿主真实可用的权限预设列表 (GET /v1/permission-presets)。"""
+    """读取本地宿主真实可用的权限预设列表 (GET /v1/permission-presets)。"""
     harness_base = harness_url.rstrip("/")
     loop = asyncio.get_running_loop()
     candidates = [f"{harness_base}/v1/permission-presets"]
@@ -1703,7 +1703,7 @@ async def query_dsh_permission_presets(harness_url: str):
 
 async def try_handle_dsh_command(prompt: str, session_id: str, harness_url: str):
     """
-    把 App 里敲的 宿主斜杠命令**当命令执行**，而不是丢给 Agent 当提示词。
+    把 App 里敲的宿主斜杠命令**当命令执行**，而不是丢给 Agent 当提示词。
 
     背景：在 App 聊天框里发 `/permission danger-full-access`，走的是提示词通道，
     宿主只会把它当成一句话交给模型 —— 权限一点没变，用户却以为命令生效了。
@@ -1734,7 +1734,7 @@ async def try_handle_dsh_command(prompt: str, session_id: str, harness_url: str)
     if not arg:
         ok, presets = await query_dsh_permission_presets(harness_url)
         if not ok or not presets:
-            return False, "❌ 读取权限预设失败：请确认本地 宿主与 app-bridge 插件正常"
+            return False, "❌ 读取权限预设失败：请确认本地宿主与 app-bridge 插件正常"
         names = "、".join(str(p.get("id")) for p in presets if p.get("id"))
         return True, f"可用权限预设：{names}\n用法：/permission <预设名>"
 
@@ -1745,7 +1745,7 @@ async def try_handle_dsh_command(prompt: str, session_id: str, harness_url: str)
     return False, f"❌ 切换权限预设失败：{detail}"
 
 async def archive_dsh_session(harness_url: str, session_id: str):
-    """归档本地 宿主会话 (DELETE /v1/sessions/:id)"""
+    """归档本地宿主会话 (DELETE /v1/sessions/:id)"""
     if not session_id:
         return False, "缺少会话ID"
     harness_base = harness_url.rstrip("/")
@@ -1783,7 +1783,7 @@ async def execute_dsh_sse_stream(
     on_approval_callback = None
 ):
     """
-    通过 宿主 3080 SSE 流式端点 (POST /v1/agent/prompt/stream) 执行任务并实时推送思考与工具事件
+    通过宿主 3080 SSE 流式端点 (POST /v1/agent/prompt/stream) 执行任务并实时推送思考与工具事件
     """
     loop = asyncio.get_running_loop()
     endpoints = [
@@ -1812,7 +1812,7 @@ async def execute_dsh_sse_stream(
 
     # 执行权限：**不再**把 permission 塞进 payload。
     #
-    # 以前带上它，插件就会"往会话里排一条 `/permission <preset>` 文本"来生效 —— 而 宿主
+    # 以前带上它，插件就会"往会话里排一条 `/permission <preset>` 文本"来生效 —— 而宿主
     # 不会把排队文本当命令执行：用户每从手机发一条消息，会话里就多一条 /permission 垃圾
     # （和正文同一秒进同一个 turn，在 GUI 队列里看着就是"成对消息"），权限却从未真正改变。
     # 现在改由桥接直接调插件的真接口即时切换（与 WS 通道同一套做法）。
@@ -1829,7 +1829,7 @@ async def execute_dsh_sse_stream(
 
     for target_url in endpoints:
         def stream_request_worker(q: asyncio.Queue):
-            # 必须带 宿主的自签 Cookie：宿主的 /v1 通道在「浏览器信任栅栏」之下，
+            # 必须带宿主的自签 Cookie：宿主的 /v1 通道在「浏览器信任栅栏」之下，
             # 少了它一律 401 —— 主通道会静默失败、然后退化到备用通道也 401，
             # 用户看到的就是"发消息必失败"。这里以前是自己拼 headers，漏了 Cookie。
             headers = dsh_headers(target_url, {
@@ -1976,10 +1976,10 @@ async def create_dsh_session_explicit(harness_url: str, workspace: str = "", tit
     loop = asyncio.get_running_loop()
     from datetime import datetime
     session_title = title or f"对话_{datetime.now().strftime('%m%d_%H%M%S')}"
-    # 不再回退到本地并不存在的 "deepseek-agent"：留空表示用 宿主的默认工作区
+    # 不再回退到本地并不存在的 "deepseek-agent"：留空表示用宿主的默认工作区
     target_ws = (workspace or "").strip()
 
-    # 只有在确实知道工作区时才带上它；留空则让 宿主用默认工作区，
+    # 只有在确实知道工作区时才带上它；留空则让宿主用默认工作区，
     # 避免拿一个空字符串（或以前那个并不存在的 deepseek-agent）去建会话。
     create_payloads = []
     if target_ws:
@@ -2138,7 +2138,7 @@ async def execute_dsh_via_ws(
                                             break
                                 if sid:
                                     cur_session_id = str(sid)
-                                    await on_step_callback(f"✨ 本地 宿主服务端已分配会话 ID ({cur_session_id[:8]}...)，正在下发指令")
+                                    await on_step_callback(f"✨ 本地宿主服务端已分配会话 ID ({cur_session_id[:8]}...)，正在下发指令")
                                     break
                         except Exception:
                             break
@@ -2186,7 +2186,7 @@ async def execute_dsh_via_ws(
                 }
                 
                 await dsh_ws.send(json.dumps(prompt_msg))
-                await on_step_callback("⚡ 已向本地 宿主智能体发送 WebSocket 指令，等待推理返回...")
+                await on_step_callback("⚡ 已向本地宿主智能体发送 WebSocket 指令，等待推理返回...")
 
                 accumulated_text = []
                 start_t = time.time()
@@ -2290,7 +2290,7 @@ async def execute_local_harness(
         await on_step_callback(f"❌ [Task:{task_id[:6]}] SSRF 安全拦截")
         return False, err_msg
 
-    await on_step_callback(f"🚀 [1/3] 已接收到任务，正在调用本地 Agent 宿主 Agent ({model_name})...")
+    await on_step_callback(f"🚀 [1/3] 已接收到任务，正在调用本地 Agent 宿主的模型 ({model_name})...")
 
     active_session_id = (session_id or "").strip()
     real_session_id = None
@@ -2304,7 +2304,7 @@ async def execute_local_harness(
     }
 
     try:
-        # 0. 最优先尝试 宿主 3080/3081 原生 SSE 流式端点 (/v1/agent/prompt/stream)
+        # 0. 最优先尝试宿主 3080/3081 原生 SSE 流式端点 (/v1/agent/prompt/stream)
         reasoning_effort = extra_chat_config.get("reasoningEffort") or extra_chat_config.get("reasoning_effort") or ""
         permission = extra_chat_config.get("permission") or "workspace-write"
         sse_ok, sse_out = await execute_dsh_sse_stream(
@@ -2338,7 +2338,7 @@ async def execute_local_harness(
     if not content_list:
         content_list = [{"type": "text", "text": str(prompt or "")}]
 
-    # 备用通道（适配器 / WS RPC）拿不到 宿主的 selectModel，思考深度改不了。
+    # 备用通道（适配器 / WS RPC）拿不到宿主的 selectModel，思考深度改不了。
     # 这里如实告知，避免用户以为"选了没生效"是 App 的问题。
     if reasoning_effort and reasoning_effort != "default":
         await on_step_callback(
@@ -2422,7 +2422,7 @@ async def execute_local_harness(
             continue
 
         def do_request(url=target_url, data=req_data):
-            # 同样要带 宿主信任栅栏的 Cookie，否则本机回环请求也会被 401 拒绝
+            # 同样要带宿主信任栅栏的 Cookie，否则本机回环请求也会被 401 拒绝
             headers = dsh_headers(url, {
                 "Content-Type": "application/json; charset=utf-8",
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -2493,7 +2493,7 @@ async def execute_local_harness(
         return True, str(output_content)
 
     error_tip = (
-        "❌ 连接本地 Agent 宿主 / Agent 服务失败 (" + str(harness_base) + ")。\n"
+        "❌ 连接本地 Agent 宿主服务失败 (" + str(harness_base) + ")。\n"
         "   最近一次尝试报错: " + str(last_err) + "\n"
         "   💡 排查指南:\n"
         "   1. 请确认本地 3081 适配器服务在运行 (http://127.0.0.1:3081)；\n"
@@ -2531,7 +2531,7 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             return http_post_json_ex(register_url, {
                 "token": tk,
                 "clientInfo": {
-                    "name": "本地宿主-Harness-Local",
+                    "name": "LxAI-Bridge-Local",
                     "version": "3.7.0",
                     "harnessUrl": args.harness_url,
                     "model": args.harness_model,
@@ -2635,7 +2635,7 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
 
         try:
             async with semaphore:
-                # 先看是不是 宿主斜杠命令：是就直接执行，不丢给模型
+                # 先看是不是宿主斜杠命令：是就直接执行，不丢给模型
                 handled = await try_handle_dsh_command(prompt, session_id, harness_url)
                 if handled is not None:
                     success, output = handled
@@ -2762,7 +2762,7 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                 reg_info = ACTIVE_SESSION_REGISTRY.get(c_task_id)
                 if reg_info:
                     await abort_dsh_session(reg_info["harness_url"], reg_info["session_id"])
-                    print(f"\033[93m[一键中止] 已向本地 宿主发起中止轮次请求: {reg_info['session_id']}\033[0m")
+                    print(f"\033[93m[一键中止] 已向本地宿主发起中止轮次请求: {reg_info['session_id']}\033[0m")
             elif mtype in ("answer_question", "decline_question"):
                 q_id = resp.get("questionId")
                 q_decline = mtype == "decline_question"
@@ -2911,7 +2911,7 @@ async def run_bridge_client(args):
 
     proxy_mode_desc = "强制 Direct 直连" if args.no_proxy else (f"自定义代理 ({args.proxy})" if args.proxy else "自适应系统/VPN代理")
     print("=" * 70)
-    print("\033[96m 正在启动 本地 Agent 宿主本地反向桥接客户端 (v3.7 安全握手版)...\033[0m")
+    print("\033[96m 正在启动 LxAI Bridge 本地反向桥接客户端 (v3.7 安全握手版)...\033[0m")
     print(f" • 配对 Token     : \033[96m{token[:7] + '******' if len(token) > 7 else '***'}\033[0m")
     print(f" • App 调度服务器 : \033[94m{server_base}\033[0m")
     print(f" • 网络连接模式   : \033[95m{proxy_mode_desc}\033[0m")
@@ -2945,7 +2945,7 @@ async def run_bridge_client(args):
                     "type": "register",
                     "token": token,
                     "clientInfo": {
-                        "name": "本地宿主-Harness-Local",
+                        "name": "LxAI-Bridge-Local",
                         "version": "3.5.0",
                         "harnessUrl": args.harness_url,
                         "model": args.harness_model,
@@ -2966,11 +2966,11 @@ async def run_bridge_client(args):
                         "sessions": init_sess,
                         "models": init_mods
                     }))
-                    print(f"\033[92m[✓ 会话同步] 已向 App 同步本地 {len(init_sess)} 个 宿主会话，{len(init_mods)} 个可用模型\033[0m")
+                    print(f"\033[92m[✓ 会话同步] 已向 App 同步本地 {len(init_sess)} 个宿主会话，{len(init_mods)} 个可用模型\033[0m")
                 except Exception:
                     pass
 
-                # 选择框转发：把 宿主里 ask_user_question 挂起的提问经中继推给 App。
+                # 选择框转发：把宿主里 ask_user_question 挂起的提问经中继推给 App。
                 # 这个轮询同时充当"App 侧在线"的心跳（插件据此决定是否接管问题）。
                 async def ws_question_sender(payload: dict):
                     payload = dict(payload)
@@ -3033,7 +3033,7 @@ async def run_bridge_client(args):
                     }
 
                     try:
-                        # 先看是不是 宿主斜杠命令：是就直接执行，不丢给模型
+                        # 先看是不是宿主斜杠命令：是就直接执行，不丢给模型
                         handled = await try_handle_dsh_command(prompt, session_id, harness_url)
                         if handled is not None:
                             success, output = handled
@@ -3122,7 +3122,7 @@ async def run_bridge_client(args):
                             reg_info = ACTIVE_SESSION_REGISTRY.get(c_task_id)
                             if reg_info:
                                 await abort_dsh_session(reg_info["harness_url"], reg_info["session_id"])
-                                print(f"\033[93m[一键中止] 已向本地 宿主发起中止轮次请求: {reg_info['session_id']}\033[0m")
+                                print(f"\033[93m[一键中止] 已向本地宿主发起中止轮次请求: {reg_info['session_id']}\033[0m")
                             continue
 
                         if mtype == "agent_approve":
@@ -3256,7 +3256,7 @@ async def run_bridge_client(args):
                             # 关键：任务丢到后台协程执行，绝不在这里 await —— 否则任务一跑起来，
                             # 这个接收循环就被堵住，期间到达的「答复选择框 / 审批 / 中止 / 切权限」
                             # 全都要排队等任务结束。实测症状：手机答了选择框、App 卡片也收起了，
-                            # 但 宿主侧一直卡着不解开（用户只能去网页端补一个空答案）。
+                            # 但宿主侧一直卡着不解开（用户只能去网页端补一个空答案）。
                             _ws_task = asyncio.create_task(_run_ws_task(dict(msg)))
                             RUNNING_WS_TASKS.add(_ws_task)
                             _ws_task.add_done_callback(RUNNING_WS_TASKS.discard)
@@ -3287,7 +3287,7 @@ def main():
     try:
         asyncio.run(run_bridge_client(args))
     except KeyboardInterrupt:
-        print("\n\033[93m[已退出] 本地宿主 Bridge 安全退出。\033[0m")
+        print("\n\033[93m[已退出] LxAI Bridge 安全退出。\033[0m")
     except BaseException:
         # 未捕获异常：把完整堆栈写进日志（含 SystemExit/KeyboardInterrupt 之外的一切）
         print("\033[91m[致命错误] 桥接异常退出，堆栈如下：\033[0m")

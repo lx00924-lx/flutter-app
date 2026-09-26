@@ -472,7 +472,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
         attachments.add(_recordedPendingAudioUri!);
       }
 
-      // 生成中发送 → 先弹「插话 / 排队」让用户选，和官方 宿主一致
+      // 生成中发送 → 先弹「插话 / 排队」让用户选，和官方宿主一致
       if (widget.isGenerating) {
         _showSendModeSheet(finalText, attachments.isNotEmpty ? attachments : null);
         return;
@@ -1179,7 +1179,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
               ),
               // 0.4 宿主审批卡片：本地执行敏感操作前挂起等用户拍板。
               //     以前这条通知只走 socket.io，而 App 没有 socket.io 客户端，
-              //     所以只有 宿主自己弹窗；现在经 SSE 同步到这里。
+              //     所以只有宿主自己弹窗；现在经 SSE 同步到这里。
               Consumer<ChatProvider>(
                 builder: (context, chat, _) {
                   final approval = chat.pendingApproval;
@@ -1861,7 +1861,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   const SizedBox(width: 8),
 
                   // 3. 右侧按钮：生成中同时给「发送」和「停止」——
-                  //    点发送会弹出「插话 / 排队」选择（和官方 宿主的交互一致）
+                  //    点发送会弹出「插话 / 排队」选择（和官方宿主的交互一致）
                   if (widget.isGenerating && canSend)
                     IconButton.filled(
                       onPressed: _handleSend,

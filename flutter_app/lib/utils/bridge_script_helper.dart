@@ -39,7 +39,7 @@ class BridgeScriptHelper {
 chcp 65001 >nul
 title LxAI Bridge 本地智能体桥接服务
 echo ======================================================================
-echo    LxAI 本地 Agent 桥接 一键启动脚本 (会话自动管理增强版)
+echo    LxAI 本地 Agent 桥接一键启动脚本 (会话自动管理增强版)
 echo    服务器地址: $cleanServer
 echo    本地 Harness: $cleanHarness
 echo ======================================================================
@@ -132,7 +132,7 @@ def test_harness_connection(harness_url):
 def main():
     args = parse_args()
     logger.info("=" * 60)
-    logger.info(f"🚀 LxAI 本地 Agent 桥接 启动中...")
+    logger.info(f"🚀 LxAI 本地 Agent 桥接启动中...")
     logger.info(f"• 调度服务器: {args.server}")
     logger.info(f"• 本地 Harness: {args.harness_url}")
     logger.info(f"• 配对 Token: {args.token}")

@@ -292,7 +292,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       if (!mounted) return;
 
       // 这里不再"顺手清掉已失效的工作区"：快捷栏支持手输自定义路径，
-      // 手输的路径本来就不在 宿主的目录列表里，清掉会误伤用户刚填的值。
+      // 手输的路径本来就不在宿主的目录列表里，清掉会误伤用户刚填的值。
       // 真填错了，发消息时电脑端会明确报错，比这里静默清空好。
       final wsList = sp.agentWorkspaces;
 

@@ -242,7 +242,7 @@ class AppSettings {
     this.localBridgeWsUrl = 'http://127.0.0.1:3080',
     this.localAgentToken = '',
     // 不再预设 'deepseek-agent' 这类并不存在的假工作区：默认留空，
-    // 由「刷新列表」从电脑端 宿主取真实目录；没取到就显示空白框。
+    // 由「刷新列表」从电脑端宿主取真实目录；没取到就显示空白框。
     this.targetWorkspace = '',
     this.targetSessionId = '',
     this.isHarnessOnline = false,

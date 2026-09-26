@@ -61,7 +61,7 @@ class SyncService {
   final Dio _dio = Dio(
     BaseOptions(
       connectTimeout: const Duration(seconds: 10),
-      // 15 秒太短：Agent 任务要等本地 宿主跑完（服务端上限 300 秒），
+      // 15 秒太短：Agent 任务要等本地宿主跑完（服务端上限 300 秒），
       // 请求发出后十几秒没有任何事件就会被 Dio 判成 receive timeout，
       // 手机上表现为"发消息必失败：The request took longer than 0:00:15"。
       // 这里放宽到 2 分钟，SSE 长连接另外单独设更长的超时。
@@ -1201,7 +1201,7 @@ class SyncService {
   /// 打断/停止服务端正在进行的这一轮生成。
   ///
   /// 插话发送与「停止生成」都调用它。以前 App 只断开自己的 SSE，服务端那一轮
-  /// 照跑不误（本地 宿主也继续执行），跑完的结果过一会儿又同步回来 ——
+  /// 照跑不误（本地宿主也继续执行），跑完的结果过一会儿又同步回来 ——
   /// 这就是"点了停止，答案还诈尸"的原因。
   Future<bool> cancelServerGeneration({
     required String userId,
@@ -1305,9 +1305,9 @@ class SyncService {
     };
   }
 
-  /// 请求电脑端在本地 宿主中新建一个会话，成功返回新会话 id。
+  /// 请求电脑端在本地宿主中新建一个会话，成功返回新会话 id。
   ///
-  /// 服务端经中继把 create_session 转发给桥接脚本，桥接再调用本地 宿主创建；
+  /// 服务端经中继把 create_session 转发给桥接脚本，桥接再调用本地宿主创建；
   /// 失败（电脑端离线、宿主不可达）返回 null —— 调用方据此保留原选择并提示，
   /// 而不是伪造一个本地 id 发出去（那正是"发消息必然失败"的根源之一）。
   Future<String?> createAgentSession({
@@ -1493,7 +1493,7 @@ class SyncService {
               };
             } else if (eventName == 'approval') {
               // 宿主在本地执行时请求用户拍板（越权操作确认）。以前这条通知只走
-              // socket.io，而 App 没有 socket.io 客户端 —— 所以只有 宿主自己弹窗。
+              // socket.io，而 App 没有 socket.io 客户端 —— 所以只有宿主自己弹窗。
               yield {
                 'approval': parsed['approval'],
                 'taskId': parsed['taskId'],

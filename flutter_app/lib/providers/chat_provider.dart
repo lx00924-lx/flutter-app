@@ -378,7 +378,7 @@ class ChatProvider extends ChangeNotifier {
   /// 插话发送：打断当前轮次并立刻把这条发出去。
   ///
   /// 设计取舍（按实测调整）：
-  /// · 只断开本地 SSE 是不够的 —— 服务端那次生成、电脑上正在跑的 宿主任务都还在
+  /// · 只断开本地 SSE 是不够的 —— 服务端那次生成、电脑上正在跑的宿主任务都还在
   ///   继续，结果过一会儿又同步回来，所以先调 `/api/chat/cancel` 真打断；
   /// · 打断后的半截气泡**只留在本地、不推云端**：另一端拉到一半的内容再被服务端
   ///   的收尾版本覆盖，就会出现"这端有内容、那端是空气泡"。**完整消息才同步**；
@@ -395,7 +395,7 @@ class ChatProvider extends ChangeNotifier {
     final streaming = (_messages.isNotEmpty && _messages.last.isStreaming) ? _messages.last : null;
 
     try {
-      // 1) 通知服务端真正中止（含本地 宿主任务）
+      // 1) 通知服务端真正中止（含本地宿主任务）
       await SyncService.instance.cancelServerGeneration(
         userId: settingsProvider.syncUserId,
         assistantMessageId: streaming?.id ?? '',
@@ -576,7 +576,7 @@ class ChatProvider extends ChangeNotifier {
   /// 每个问题的自定义输入（也可以直接打字回答）
   final Map<String, TextEditingController> _questionCustoms = {};
 
-  /// 当前挂起的问题列表（服务端原样透传 宿主的 questions 数组）
+  /// 当前挂起的问题列表（服务端原样透传宿主的 questions 数组）
   List<Map<String, dynamic>> get _pendingQuestionItems {
     final raw = _pendingQuestion?['questions'];
     if (raw is List) {
@@ -675,7 +675,7 @@ class ChatProvider extends ChangeNotifier {
   }
 
 
-  /// 把当前选择收成 宿主要的答案格式：`[{id, selected:[...], custom?}]`
+  /// 把当前选择收成宿主要的答案格式：`[{id, selected:[...], custom?}]`
   List<Map<String, dynamic>> _collectQuestionAnswers() {
     final result = <Map<String, dynamic>>[];
     for (final item in _pendingQuestionItems) {
@@ -1894,8 +1894,8 @@ class ChatProvider extends ChangeNotifier {
   }
 
   void stopGeneration() {
-    // 通知服务端真正中止这一轮（含正在电脑上跑的 宿主任务）。
-    // 以前只断开本地 SSE：服务端那次生成照跑，本地 宿主也继续执行，
+    // 通知服务端真正中止这一轮（含正在电脑上跑的宿主任务）。
+    // 以前只断开本地 SSE：服务端那次生成照跑，本地宿主也继续执行，
     // 结果过一会儿又同步回来 —— 表现为"点了停止，答案还诈尸"。
     final streamingId = (_messages.isNotEmpty && _messages.last.isStreaming) ? _messages.last.id : '';
     if (streamingId.isNotEmpty || (_currentSession?.id.isNotEmpty ?? false)) {

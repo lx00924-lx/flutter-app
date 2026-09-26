@@ -60,7 +60,7 @@ const TURN_TIMEOUT_MS = 600_000
  * `state: 'waiting'`（卡片上提示"已等待较久"）。
  *
  * ⚠️ 注意这里**不再结束本轮、也不返回空答复**。
- * 上一版在到期时返回空答复，等于告诉 宿主"用户没答，你继续" —— 主模型于是接着
+ * 上一版在到期时返回空答复，等于告诉宿主"用户没答，你继续" —— 主模型于是接着
  * 说话（用户实测看到"超时后主聊天 API 也回复了"）。现在改为：继续挂着等，
  * 只有到 PARK_MAX_MS 才真正中止这一轮，期间模型不会说话。
  */
@@ -251,7 +251,7 @@ export function apply(ctx) {
    * 真正切换某个会话的权限预设（= 宿主内置 `/permission` 命令的同一条路径）。
    *
    * 为什么抽成一个函数：**两处**调用点以前都靠"排一条 `/permission <preset>` 文本"，
-   * 以为 宿主会把它当命令执行 —— 实际只是一条普通用户消息。表现就是：用户每次从
+   * 以为宿主会把它当命令执行 —— 实际只是一条普通用户消息。表现就是：用户每次从
    * 手机发消息，会话里都会多一条 `/permission xxx` 垃圾（和正文同一秒进同一个 turn，
    * 在 GUI 队列里看着像"成对消息"），而权限预设从未真正改变。现在两处统一走这里。
    *
@@ -430,7 +430,7 @@ export function apply(ctx) {
    * 从会话投影里读**真实生效**的模型档位与权限预设。
    *
    * 为什么需要：App 的 `agentModel / agentReasoningEffort / agentPermission` 此前
-   * 只写不读 —— 首次启动时界面显示的是 App 自己存的旧值，和 宿主会话里实际生效的
+   * 只写不读 —— 首次启动时界面显示的是 App 自己存的旧值，和宿主会话里实际生效的
    * 档位对不上，而且下一条消息还会把旧值**推回** 宿主，把电脑端的设置覆盖掉。
    *
    * 这两个投影本来就随会话列表一起下发（宿主自己的 Web 端就是这么读的：
@@ -528,7 +528,7 @@ export function apply(ctx) {
     // 3) 权限预设：调真接口即时切换
     //
     // ⚠️ 这里以前是 sessions().prompt({ mode:'queue', content:[{text:`/permission ${permission}`}] })，，
-    // 以为 宿主会把排队的文本当命令执行。实测不是：它只是一条普通用户消息，于是
+    // 以为宿主会把排队的文本当命令执行。实测不是：它只是一条普通用户消息，于是
     // **用户每从手机发一条消息，会话里就多一条 /permission 垃圾**（和正文同一秒进
     // 同一个 turn，在 GUI 队列里看着就是"成对消息"），而权限预设从未真正改变。
     if (typeof permission === 'string' && permission.length > 0) {
@@ -782,7 +782,7 @@ export function apply(ctx) {
   //#region 选择框桥（ask_user_question）
 
   /**
-   * 把 宿主的 `ask_user_question` 接到 App 上。
+   * 把宿主的 `ask_user_question` 接到 App 上。
    *
    * 背景：`ask_user_question` 走 `ctx.userQuestions`（waterfall 事件
    * `user-questions/request`），官方只有浏览器界面会应答；而桥接脚本吃的是
@@ -835,7 +835,7 @@ export function apply(ctx) {
     //
     // 为什么改：两边同时弹框时，若 App 先答，插件这边就返回了、工具调用结束，
     // 但网页端那个 answerer 仍在等用户点 —— 它的弹窗会**一直挂在界面上**，
-    // 用户以为"手机答了但 宿主没反应"（截图确认过：手机已答、网页弹窗还在）。
+    // 用户以为"手机答了但宿主没反应"（截图确认过：手机已答、网页弹窗还在）。
     //
     // 现在 App 在线（桥接在轮询）时由 App 独占：问题只推给 App，网页端不弹框；
     // 只有 App 超时/主动放弃时才调用 next() 把问题交回网页端 —— 那一刻弹窗
@@ -1285,7 +1285,7 @@ export function apply(ctx) {
           error: { code: 'unsupported', message: 'permissionPresets.apply 不可用：宿主版本过旧或插件未加载' },
         })
       }
-      // 真正的切换：与 宿主内置 /permission 命令完全同一条路径（写 permission/preset
+      // 真正的切换：与宿主内置 /permission 命令完全同一条路径（写 permission/preset
       // 会话事实 + 改沙箱模式 + 改审批策略）。具体实现见 switchSessionPermission，
       // 它与"每轮任务开头下发权限"共用同一段逻辑，避免两处再分叉。
       const switched = await switchSessionPermission(sessionId, preset)
@@ -1325,7 +1325,7 @@ export function apply(ctx) {
           error: { code: 'model-required', message: '必须同时指定 model（宿主的 selectModel 不接受只给档位）' },
         })
       }
-      // 档位必须是该模型声明的档位之一，否则 宿主侧会抛错并被静默忽略
+      // 档位必须是该模型声明的档位之一，否则宿主侧会抛错并被静默忽略
       if (typeof effort === 'string' && effort.length > 0 && effort !== 'default') {
         const catalogValue = await catalog().catch(() => undefined)
         const declared = []

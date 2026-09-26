@@ -260,7 +260,7 @@ class SettingsProvider extends ChangeNotifier {
     _settings.isHarnessOnline = online;
     _save(pushToCloud: false);
     debugPrint('[Settings] Agent 在线状态更新: $online');
-    // 电脑端刚上线（典型场景：先开 App，再开 宿主 / 桥接）：立刻补拉一次目录，
+    // 电脑端刚上线（典型场景：先开 App，再开宿主 / 桥接）：立刻补拉一次目录，
     // 把这期间电脑端真实生效的模型 / 思考深度 / 权限对齐过来 ——
     // 否则界面会一直停在 App 自己存的旧值，用户以为"设置没同步"。
     if (online && wasOffline && _settings.isLoggedIn) {
@@ -592,7 +592,7 @@ class SettingsProvider extends ChangeNotifier {
   //
   // 放在 Provider 里而不是设置页的 State：设置页每次重建都会用假的预设值
   // （'deepseek-agent' 等）初始化，用户返回再进来就看到一堆并不存在的选项，
-  // 选中后又把假目录发给 Agent，任务自然失败。目录只应由电脑端 宿主提供，
+  // 选中后又把假目录发给 Agent，任务自然失败。目录只应由电脑端宿主提供，
   // 取不到就保持为空 —— 界面上就是个空白框，而不是编一个出来。
 
   List<String> _agentWorkspaces = [];
@@ -610,7 +610,7 @@ class SettingsProvider extends ChangeNotifier {
   /// 电脑端真实可用的模型（每条含 id / name / provider / reasoningEfforts）。
   List<Map<String, dynamic>> get agentModels => List.unmodifiable(_agentModels);
 
-  /// 某个模型支持的思考档位（取不到时给出 宿主通用的四档）。
+  /// 某个模型支持的思考档位（取不到时给出宿主通用的四档）。
   List<String> reasoningEffortsFor(String modelId) {
     final id = modelId.trim();
     for (final m in _agentModels) {
@@ -668,7 +668,7 @@ class SettingsProvider extends ChangeNotifier {
   /// 采纳电脑端会话**真实生效**的模型 / 思考深度 / 权限预设。
   ///
   /// 为什么需要：这三项此前在 App 里**只写不读** —— 启动时界面显示的是 App 自己存的
-  /// 旧值（默认 high / workspace-write / deepseek-v4-flash），与 宿主会话里实际生效的
+  /// 旧值（默认 high / workspace-write / deepseek-v4-flash），与宿主会话里实际生效的
   /// 档位对不上（用户看到"深度=高"，电脑端其实是最高）；更糟的是下一条消息还会把这个
   /// 旧值**推回** 宿主，把用户在电脑端调好的设置覆盖掉。
   ///
