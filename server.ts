@@ -1001,7 +1001,7 @@ async function runServerSideGeneration({
 
       if (!isAgentOnline) {
         // Agent is offline
-        const offlineNotice = `> ⚠️ **【本地 Agent 模式提示】**\n> 检测到您已开启 **Agent 模式**，但未检测到本地 Agent 桥接连接。\n>\n> **快速解决**：\n> 1. 打开应用右上角 **设置 ➔ 🤖 本地 Agent**；\n> 2. 复制启动命令并在本地终端运行：\`python deepseek_bridge.py --token "${agentToken}" --server "${SERVER_BASE_URL}" --harness-url "http://127.0.0.1:3080"\`；\n> 3. 或在聊天输入框左侧一键切换回 **「💬 普通模式」**。`;
+        const offlineNotice = `> ⚠️ **【本地 Agent 模式提示】**\n> 检测到您已开启 **Agent 模式**，但未检测到本地 Agent 桥接连接。\n>\n> **快速解决**：\n> 1. 打开应用右上角 **设置 ➔ 🤖 本地 Agent**；\n> 2. 复制启动命令并在本地终端运行：\`python lxai_bridge.py --token "${agentToken}" --server "${SERVER_BASE_URL}" --harness-url "http://127.0.0.1:3080"\`；\n> 3. 或在聊天输入框左侧一键切换回 **「💬 普通模式」**。`;
         
         onChunk(offlineNotice);
         genState.status = 'completed';
@@ -2966,26 +2966,18 @@ async function startServer() {
     res.json({ success: true, timestamp: Date.now(), bootId: SERVER_BOOT_ID });
   });
 
-  app.get("/deepseek_bridge.py", async (req, res) => {
+  // 桥接脚本下载。
+  //
+  // 兼容旧路径：脚本从 deepseek_bridge.py 改名为 lxai_bridge.py（去掉第三方商标字样），
+  // 但历史教程、旧版 App 生成的一键脚本仍在请求旧地址 —— 一并保留，指向同一个文件，
+  // 只是下载下来的文件名统一为新名字。
+  app.get(["/lxai_bridge.py", "/deepseek_bridge.py", "/api/download/lxai_bridge.py",
+           "/api/download/deepseek_bridge.py", "/api/download/bridge.py"], async (req, res) => {
     try {
-      const scriptPath = path.resolve(process.cwd(), "deepseek_bridge.py");
+      const scriptPath = path.resolve(process.cwd(), "lxai_bridge.py");
       const content = await fs.readFile(scriptPath, "utf-8");
       res.setHeader("Content-Type", "application/octet-stream");
-      res.setHeader("Content-Disposition", 'attachment; filename="deepseek_bridge.py"');
-      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-      res.send(content);
-    } catch (err: any) {
-      res.status(404).send("File not found");
-    }
-  });
-
-  // Dedicated API download route for Python Bridge with attachment headers
-  app.get(["/api/download/deepseek_bridge.py", "/api/download/bridge.py"], async (req, res) => {
-    try {
-      const scriptPath = path.resolve(process.cwd(), "deepseek_bridge.py");
-      const content = await fs.readFile(scriptPath, "utf-8");
-      res.setHeader("Content-Type", "application/octet-stream");
-      res.setHeader("Content-Disposition", 'attachment; filename="deepseek_bridge.py"');
+      res.setHeader("Content-Disposition", 'attachment; filename="lxai_bridge.py"');
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.send(content);
     } catch (err: any) {
@@ -3026,16 +3018,16 @@ if %errorlevel% neq 0 (
 echo [1/3] 正在检查依赖库 (websockets, aiohttp, urllib3)...
 python -m pip install websockets aiohttp urllib3 -q --disable-pip-version-check 2>nul
 
-echo [2/3] 正在同步下载最新的 deepseek_bridge.py 桥接程序...
-python -c "import urllib.request; urllib.request.urlretrieve('${serverUrl}/api/download/deepseek_bridge.py', 'deepseek_bridge.py')" 2>nul
+echo [2/3] 正在同步下载最新的 lxai_bridge.py 桥接程序...
+python -c "import urllib.request; urllib.request.urlretrieve('${serverUrl}/api/download/lxai_bridge.py', 'lxai_bridge.py')" 2>nul
 
-if not exist "deepseek_bridge.py" (
-    echo [警告] 自动下载失败，将尝试使用本地已有的 deepseek_bridge.py...
+if not exist "lxai_bridge.py" (
+    echo [警告] 自动下载失败，将尝试使用本地已有的 lxai_bridge.py...
 )
 
 echo [3/3] 正在启动桥接服务并连接调度中心...
 echo.
-python deepseek_bridge.py --server "${serverUrl}" --token "${token}" --harness-url "${harnessUrl}"
+python lxai_bridge.py --server "${serverUrl}" --token "${token}" --harness-url "${harnessUrl}"
 if %errorlevel% neq 0 (
     echo.
     echo 桥接服务异常退出，请检查上方日志。
@@ -4183,7 +4175,7 @@ echo • 配对 Token   : ${token}
 echo • 服务器地址   : ${serverUrl}
 echo • 本地 Harness : ${harnessUrl}/v1
 echo.
-%PYTHON_CMD% deepseek_bridge.py --token "${token}" --server "${serverUrl}" --harness-url "${harnessUrl}"
+%PYTHON_CMD% lxai_bridge.py --token "${token}" --server "${serverUrl}" --harness-url "${harnessUrl}"
 
 if %errorlevel% neq 0 (
     echo.

@@ -1,0 +1,19 @@
+refactor!: 桥接脚本改名 deepseek_bridge.py -> lxai_bridge.py（含旧路径兼容）
+
+用户要求把 DeepSeek 相关文字与文件名换成不侵权的名字。这是唯一涉及文件名的改动，
+一次改到底并保留向后兼容：
+
+- git mv 两个文件：仓库根 + App 内置副本（assets/scripts/）；
+- 脚本内部自引用、日志横幅、argparse 描述同步改名，并把横幅里的产品名中性化；
+- bridge_process_manager.dart：按新文件名拉起进程（旧进程由 _killStaleBridges 清理）；
+- bridge_script_helper.dart：asset 路径 + 一键 bat 模板里的下载地址与文件名；
+- harness_settings_screen.dart：设置页显示的命令与「导出脚本」文件名；
+- server.ts：下载路由合并为 /lxai_bridge.py，并**保留 /deepseek_bridge.py 与
+  /api/download/deepseek_bridge.py 作为兼容别名** —— 旧教程与旧版 App 生成的一键
+  脚本仍然可用，只是下载下来的文件名统一为新名字；
+- README / AGENTS.md / 官网 Architecture 组件同步；
+- 中性化严格避开接口真值：模型 ID（deepseek-chat / deepseek-reasoner / deepseek-v4-*）
+  与 api.deepseek.com 一律原样保留。
+
+线上部署：安装目录与中继目录的脚本已改名，并清掉了两个重复运行的桥接进程
+（同一 token 起了两份，会互相抢连接，表现为会话数时有时无）。

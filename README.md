@@ -18,7 +18,7 @@ Flutter 纯原生多端客户端（Android / Windows） · Node + React 官网�
 | :--- | :--- | :--- | :--- |
 | **① 云端中继服务（含官网介绍页）** | `/`（`server.ts`、`src/`） | Express + TypeScript + React + Vite | 会话鉴权、Token 调度分配、消息持久化与增量漫游、设置云端同步、单点登录互斥、反向信道桥接；`src/` 为对外官网介绍与下载门户 |
 | **② 多端 App 客户端** | `flutter_app/` | Flutter（纯原生，无 WebView 套壳） | 手机/电脑遥控端：聊天、语音、扫码配对、本地 Agent 控制 |
-| **③ 本地反向长连接 Bridge** | `deepseek_bridge.py` | Python 3.8+ | 跑在**无公网 IP** 的电脑上，主动向云端建立反向长连接，把本地 Harness 暴露给 App |
+| **③ 本地反向长连接 Bridge** | `lxai_bridge.py` | Python 3.8+ | 跑在**无公网 IP** 的电脑上，主动向云端建立反向长连接，把本地 Harness 暴露给 App |
 
 核心能力：单点登录设备互斥（1 台手机 + 1 台电脑）、消息增量漫游、全局设置云端同步、扫码即配对。
 
@@ -141,7 +141,7 @@ cp .env.example .env
 
 ```bash
 pip install websockets aiohttp urllib3
-python deepseek_bridge.py --token "<App 里显示的配对 Token>" \
+python lxai_bridge.py --token "<App 里显示的配对 Token>" \
                           --server "https://your-domain.com" \
                           --harness-url "http://127.0.0.1:3080"
 ```
@@ -157,7 +157,7 @@ App 内「设置 ➔ 🤖 本地 Agent」会直接给出带 Token 的启动命�
 ```
 ├── server.ts                     # 云端中继服务端（鉴权/调度/持久化/漫游/桥接）
 ├── src/                          # LxAI 官网介绍与下载门户（React）
-├── deepseek_bridge.py            # Bridge 主程序（反向长连接，唯一真源）
+├── lxai_bridge.py            # Bridge 主程序（反向长连接，唯一真源）
 ├── flutter_app/                  # Flutter 纯原生多端 App
 │   ├── lib/config/app_config.dart    # 全局可配置项（服务器地址等）
 │   ├── lib/services/                 # 网络、同步、录音、TTS、本地 Agent
@@ -185,7 +185,7 @@ Windows 端首次构建需要 VS C++ 工具链；Android 端需要 SDK 与 JDK�
 `record_linux 0.7.2` 尚未适配新版抽象接口，`dependency_overrides` 锁版本是为了避免全平台编译失败，详见 `AGENTS.md`。
 
 **Q：App 提示「未检测到本地 Harness 桥接连接」？**
-说明 Bridge 没在运行或连到了别的服务器。确认 `python deepseek_bridge.py --server ...`
+说明 Bridge 没在运行或连到了别的服务器。确认 `python lxai_bridge.py --server ...`
 里的 `--server` 与 App 打包时使用的 `SERVER_BASE_URL` 完全一致。
 
 ---

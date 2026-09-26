@@ -6,7 +6,7 @@ import 'package:flutter/foundation.dart';
 import '../config/app_config.dart';
 import '../utils/bridge_script_helper.dart';
 
-/// 本地 bridge（`deepseek_bridge.py`）进程的**全局**管理器。
+/// 本地 bridge（`lxai_bridge.py`）进程的**全局**管理器。
 ///
 /// 为什么需要它：此前进程由「本地 Agent 设置页」的 State 持有，带来两个问题：
 /// 1. 页面一旦销毁，进程退出监控就被取消 —— 用户在别的页面时，桥接崩了/被重置
@@ -58,7 +58,7 @@ class BridgeProcessManager extends ChangeNotifier {
     _lastHarnessUrl = harnessUrl.trim().isEmpty ? '127.0.0.1:3080' : harnessUrl.trim();
 
     try {
-      final scriptPath = 'deepseek_bridge.py';
+      final scriptPath = 'lxai_bridge.py';
       await ensureScriptUpToDate(scriptPath);
 
       // 启动前先清掉游离的旧桥接进程。
@@ -138,7 +138,7 @@ class BridgeProcessManager extends ChangeNotifier {
     return start(token: token, harnessUrl: harnessUrl);
   }
 
-  /// 清掉本机游离的旧桥接进程（只认命令行里带 deepseek_bridge.py 的 python）。
+  /// 清掉本机游离的旧桥接进程（只认命令行里带 lxai_bridge.py 的 python）。
   ///
   /// 只清理同名脚本的进程，不动其它 python：用户可能有别的脚本在跑。
   Future<void> _killStaleBridges(String scriptPath) async {

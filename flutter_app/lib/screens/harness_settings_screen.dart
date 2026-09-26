@@ -1022,7 +1022,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                       borderRadius: BorderRadius.circular(8),
                       onLongPress: () {
                         Clipboard.setData(ClipboardData(
-                          text: 'python deepseek_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
+                          text: 'python lxai_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
                         ));
                         ScaffoldMessenger.of(context).showSnackBar(
                           const SnackBar(content: Text('已复制电脑端启动命令')),
@@ -1040,7 +1040,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              'python deepseek_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
+                              'python lxai_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
                               style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
                             ),
                             const SizedBox(height: 4),
@@ -1072,7 +1072,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                   onPressed: () async {
                                     final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
                                     final savedPath = await BridgeScriptHelper.downloadFile(
-                                      fileName: 'deepseek_bridge.py',
+                                      fileName: 'lxai_bridge.py',
                                       content: pyContent,
                                     );
                                     if (context.mounted) {
@@ -1157,7 +1157,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                   ),
                                   onPressed: () {
                                     Clipboard.setData(ClipboardData(
-                                      text: 'python deepseek_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
+                                      text: 'python lxai_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
                                     ));
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       const SnackBar(content: Text('已复制免 Token 启动命令')),
@@ -1194,7 +1194,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                               onPressed: () async {
                                 final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
                                 final savedPath = await BridgeScriptHelper.downloadFile(
-                                  fileName: 'deepseek_bridge.py',
+                                  fileName: 'lxai_bridge.py',
                                   content: pyContent,
                                 );
                                 if (context.mounted && savedPath != null) {
@@ -1241,7 +1241,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                               label: const Text('复制命令', style: TextStyle(fontSize: 13)),
                               onPressed: () {
                                 Clipboard.setData(ClipboardData(
-                                  text: 'python deepseek_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
+                                  text: 'python lxai_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
                                 ));
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(content: Text('已复制免 Token 启动命令')),

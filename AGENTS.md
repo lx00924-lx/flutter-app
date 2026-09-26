@@ -1,13 +1,13 @@
 # 核心架构与安全准则 (Critical Project Constraints)
 
 ## 1. 核心架构认知
-- 本项目是【LxAI 官网介绍与下载门户 (Web) + Flutter 纯原生多端 App 客户端 (`flutter_app/`) + 本地 Agent 反向长连接内网穿透 (`deepseek_bridge.py`)】的三位一体架构。
-- **架构精简与原生化**：已彻底剥离早期 Capacitor/WebView 混合套壳依赖（`package.json` 中的 Capacitor/Ionic 依赖、`public/deepseek_bridge.py` 旧副本与 `/api/agent/download-bridge` 旧控制台接口均已清除），移动与桌面端全面采用纯原生 Flutter 架构；Web 端（`src/`）现为**对外官网介绍与下载门户**，不再承担中继监控看板职能。
+- 本项目是【LxAI 官网介绍与下载门户 (Web) + Flutter 纯原生多端 App 客户端 (`flutter_app/`) + 本地 Agent 反向长连接内网穿透 (`lxai_bridge.py`)】的三位一体架构。
+- **架构精简与原生化**：已彻底剥离早期 Capacitor/WebView 混合套壳依赖（`package.json` 中的 Capacitor/Ionic 依赖、`public/lxai_bridge.py` 旧副本与 `/api/agent/download-bridge` 旧控制台接口均已清除），移动与桌面端全面采用纯原生 Flutter 架构；Web 端（`src/`）现为**对外官网介绍与下载门户**，不再承担中继监控看板职能。
 - **公网生产中继服务**：默认生产服务器域名为 **`https://www.lx00924ai.top`**，手机端扫码与电脑端 Bridge 均默认指向该地址。
 - **核心业务功能**：手机/电脑客户端通过云端中继远程遥控内网电脑（无公网 IP）上的私有 Agent（Harness / 本地模型 / 本地自动化工作区），支持单点登录设备互斥、消息增量漫游与全局设置云端同步。
 
 ## 2. 绝对受保护文件与目录（严禁删除、重构破坏或提议删除）
-- `deepseek_bridge.py`：电脑端反向长连接守护进程（用于解决无公网 IP 电脑连接云端中继、与 Harness 本地通信），属于核心生产力资产，**绝不可删除或废弃**！
+- `lxai_bridge.py`：电脑端反向长连接守护进程（用于解决无公网 IP 电脑连接云端中继、与 Harness 本地通信），属于核心生产力资产，**绝不可删除或废弃**！
 - `flutter_app/`：整个 Flutter 纯原生跨端多平台工程，包含所有 Dart 源码、状态管理（Provider）、本地持久化、云端增量漫游与 Android/Windows 打包配置，**绝不可破坏或删除**！
 - `server.ts`：包含 Harness 反向中继信道、Token 调度分配、消息持久化落盘、用户设置云端漫游（`messages_data/settings.json`）与单点登录互斥控制，**绝不可破坏核心逻辑**！
 - `src/`：已精简的 LxAI 官网介绍与下载门户（Navbar / Hero / Features / Architecture / Downloads / ContactFooter），通过 GitHub Releases API 展示并分发多端安装包。
@@ -22,7 +22,7 @@
 - **多端对齐原则**：在后续修复 Bug 或新增功能时，需保持服务端（Express/TS）与 Flutter 端（Dart）的数据结构与通信协议严密对齐。
 
 ## 5. 代码质量与零语法错误准则 (Zero Syntax Error & Build Protection)
-- **静态类型与语法完整性**：每次修改 Dart（`flutter_app/`）、TypeScript（`server.ts`, `src/`）或 Python（`deepseek_bridge.py`）代码时，必须保证语法 100% 正确，严禁出现拼写错误、漏闭合括号/分号、类型不匹配或未导入依赖包。
+- **静态类型与语法完整性**：每次修改 Dart（`flutter_app/`）、TypeScript（`server.ts`, `src/`）或 Python（`lxai_bridge.py`）代码时，必须保证语法 100% 正确，严禁出现拼写错误、漏闭合括号/分号、类型不匹配或未导入依赖包。
 - **打包兼容性检查**：
   - **Flutter/Dart 端**：严格遵循 Dart 空安全（Null-safety），禁止引入破坏性构造函数改动，确保各种 Platform Channels、Provider 状态监听以及 JSON 序列化字段严密对齐。
   - **Android Gradle 构建**：严禁随意更改 Gradle 依赖版本或混淆规则（`proguard-rules.pro`），确保与 Release 签名（`AI.jks`）完全兼容。

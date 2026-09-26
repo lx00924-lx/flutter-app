@@ -8,15 +8,15 @@ import 'web_download_stub.dart' if (dart.library.html) 'web_download_helper.dart
 import '../config/app_config.dart';
 
 class BridgeScriptHelper {
-  /// 从应用内置 Assets 中读取完整的工业级生产 deepseek_bridge.py
+  /// 从应用内置 Assets 中读取完整的工业级生产 lxai_bridge.py
   static Future<String> getFullBridgeScriptContent() async {
     try {
-      final content = await rootBundle.loadString('assets/scripts/deepseek_bridge.py');
+      final content = await rootBundle.loadString('assets/scripts/lxai_bridge.py');
       if (content.trim().isNotEmpty) {
         return content;
       }
     } catch (e) {
-      debugPrint('[BridgeScriptHelper] 读取内置 assets/scripts/deepseek_bridge.py 失败: $e');
+      debugPrint('[BridgeScriptHelper] 读取内置 assets/scripts/lxai_bridge.py 失败: $e');
     }
     // 降级兜底方案
     return generatePyContent();
@@ -52,16 +52,16 @@ if %errorlevel% neq 0 (
 echo [1/3] 正在检查依赖库 (websockets, aiohttp, urllib3)...
 python -m pip install websockets aiohttp urllib3 -q --disable-pip-version-check 2>nul
 
-echo [2/3] 正在同步下载最新的 deepseek_bridge.py 桥接程序...
-python -c "import urllib.request; urllib.request.urlretrieve('$cleanServer/api/download/deepseek_bridge.py', 'deepseek_bridge.py')" 2>nul
+echo [2/3] 正在同步下载最新的 lxai_bridge.py 桥接程序...
+python -c "import urllib.request; urllib.request.urlretrieve('$cleanServer/api/download/lxai_bridge.py', 'lxai_bridge.py')" 2>nul
 
-if not exist "deepseek_bridge.py" (
-    echo [警告] 自动下载失败，将尝试使用本地已有的 deepseek_bridge.py...
+if not exist "lxai_bridge.py" (
+    echo [警告] 自动下载失败，将尝试使用本地已有的 lxai_bridge.py...
 )
 
 echo [3/3] 正在启动桥接服务并连接调度中心...
 echo.
-python deepseek_bridge.py --server "$cleanServer" --token "$cleanToken" --harness-url "$cleanHarness"
+python lxai_bridge.py --server "$cleanServer" --token "$cleanToken" --harness-url "$cleanHarness"
 if %errorlevel% neq 0 (
     echo.
     echo 桥接服务异常退出，请检查上方日志。
@@ -70,7 +70,7 @@ if %errorlevel% neq 0 (
 ''';
   }
 
-  /// 获取标准 Python 桥接守护脚本 (deepseek_bridge.py)
+  /// 获取标准 Python 桥接守护脚本 (lxai_bridge.py)
   static String generatePyContent({
     String? serverUrl,
     String defaultHarnessUrl = 'http://127.0.0.1:3080',

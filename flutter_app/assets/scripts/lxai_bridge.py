@@ -17,7 +17,7 @@ DeepSeek Harness 本地安全反向桥接客户端 (DeepSeek Bridge v3.6 - 工�
 
 使用方式：
     pip install requests websockets
-    python deepseek_bridge.py --token YOUR_TOKEN
+    python lxai_bridge.py --token YOUR_TOKEN
 """
 
 import argparse
@@ -251,7 +251,7 @@ def dsh_auth_status():
 #   1) "装置凭证"机制：首次配对后领一枚长期凭证，启动或 token 被换发时用它
 #      静默换取当前 token。它引入了三方状态（服务端 / 本机凭证文件 / App 本地
 #      设置）互相覆盖，导致"重置后连不上、需要依次点停止-重置-启动"。
-#   2) "配对凭证复用"：把最近一次的 token 存在 ~/.deepseek_bridge/config.json，
+#   2) "配对凭证复用"：把最近一次的 token 存在 ~/.lxai_bridge/config.json，
 #      下次启动直接复用。结果每次启动都跳过扫码，与"重置即重新配对"的语义冲突。
 #
 # 现在的语义简单且可预期：
@@ -2554,7 +2554,7 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                 # Token 已失效（通常是被 App 重置过）：不再静默换 token，
                 # 而是明确提示用户按"重新配对"流程处理。
                 print("\033[93m  💡 该 Token 已失效。请在电脑上重新运行本脚本并【用手机扫码】完成配对：\033[0m")
-                print(f"\033[90m     python deepseek_bridge.py --harness-url \"{args.harness_url}\"\033[0m")
+                print(f"\033[90m     python lxai_bridge.py --harness-url \"{args.harness_url}\"\033[0m")
 
         try:
             await loop.run_in_executor(
@@ -2793,7 +2793,7 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                 # 这样旧 Token 立刻失效、连接立刻切断，且不引入任何隐藏状态。
                 print("\033[91m[权限注销] 当前配对 Token 已在 App 端被重置。桥接程序已停止。\033[0m")
                 print("\033[93m  💡 重新配对：在电脑上重新运行本脚本，并用手机扫描新生成的二维码 ——\033[0m")
-                print(f"\033[90m     python deepseek_bridge.py --harness-url \"{args.harness_url}\"\033[0m")
+                print(f"\033[90m     python lxai_bridge.py --harness-url \"{args.harness_url}\"\033[0m")
                 return
         except Exception as e:
             poll_fail_count += 1

@@ -71,7 +71,7 @@ export const Architecture: React.FC = () => {
               本地私有 Agent / Bridge
             </h4>
             <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed mb-4">
-              运行于办公电脑或家庭私有服务器的 `deepseek_bridge.py`，主动反向连接中继并遥控本地自动化环境。
+              运行于办公电脑或家庭私有服务器的 `lxai_bridge.py`，主动反向连接中继并遥控本地自动化环境。
             </p>
             <ul className="text-xs space-y-1.5 text-slate-500 dark:text-slate-400 font-medium">
               <li className="flex items-center gap-1.5">✓ 局域网无公网 IP 限制</li>
@@ -97,7 +97,7 @@ export const Architecture: React.FC = () => {
               <span className="text-xs font-bold text-indigo-600 dark:text-indigo-400">步骤 02</span>
               <h5 className="text-sm font-bold text-slate-900 dark:text-white">启动本地 Bridge</h5>
               <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                在内网电脑上执行 <code className="text-indigo-600 dark:text-indigo-400">python deepseek_bridge.py</code> 反向挂载到云端中继。
+                在内网电脑上执行 <code className="text-indigo-600 dark:text-indigo-400">python lxai_bridge.py</code> 反向挂载到云端中继。
               </p>
             </div>
             <div className="space-y-1.5">
