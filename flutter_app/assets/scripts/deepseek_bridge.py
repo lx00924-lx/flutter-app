@@ -2732,20 +2732,19 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             # 中继每次启动都会带上新的 bootId：发现变了就说明它重启过 ——
             # 长轮询只是兜底通道（会话不同步、能力更弱），此时应当切回 WebSocket。
             boot_id = resp.get("bootId")
+            # WebSocket 是主通道：只要轮询通了、且距上次 WS 失败已过冷却期，就尝试切回。
+            # **每次轮询都判断**（不是只在第一次），否则第一次轮询正好撞上冷却期，
+            # 就再也不会切回、永久停在轮询模式（表现为会话列表一直是 0 条）。
+            if args.transport != "polling" and time.time() - _last_ws_failure_at > 60:
+                print("\033[92m[↻ 恢复] 轮询通道正常，尝试切回 WebSocket 长连接...\033[0m")
+                if question_task:
+                    question_task.cancel()
+                if approval_task:
+                    approval_task.cancel()
+                return True
             if isinstance(boot_id, str) and boot_id:
                 if seen_boot_id is None:
                     seen_boot_id = boot_id
-                    # 刚从 WebSocket 掉下来（不是用户显式用 --transport polling）：
-                    # 轮询一旦通了就尝试切回长连接 —— 否则中继重启一次，桥接就会一直
-                    # 停在轮询模式（会话不再同步、能力降级）。带 60s 冷却，避免 WS 真的
-                    # 不可用时来回弹。
-                    if args.transport != "polling" and time.time() - _last_ws_failure_at > 60:
-                        print("\033[92m[↻ 恢复] 中继已恢复响应，尝试切回 WebSocket 长连接...\033[0m")
-                        if question_task:
-                            question_task.cancel()
-                        if approval_task:
-                            approval_task.cancel()
-                        return True
                 elif boot_id != seen_boot_id:
                     print("\033[92m[↻ 恢复] 中继已重启（bootId 变化），切回 WebSocket 长连接...\033[0m")
                     if question_task:

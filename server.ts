@@ -2492,8 +2492,16 @@ async function startServer() {
       console.log(`\x1b[32m[Agent Hub] Agent registered via HTTP [${token}] (${clientName}, mode: ${clientInfo.mode || 'polling'})\x1b[0m`);
 
       // 绑定归属；未能归属任何账号的 token 一律拒绝注册，
-      // 避免"孤儿 bridge 显示已连接、但手机端永远查不到"的假在线
-      const ownerUserId = await resolveTokenOwnerUserId(token);
+      // 避免"孤儿 bridge 显示已连接、但手机端永远查不到"的假在线。
+      //
+      // 但**中继刚启动的那几秒**里，归属反查可能因为 settings.json 还在加载/正被写入
+      // 而暂时查不到 —— 此时直接 403 会让桥接误判成"Token 已失效"并退回轮询模式
+      // （实测：重启后桥接报了 403，随后一直是 0 个会话）。所以这里重试几次再判死。
+      let ownerUserId = await resolveTokenOwnerUserId(token);
+      for (let attempt = 0; !ownerUserId && attempt < 4; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        ownerUserId = await resolveTokenOwnerUserId(token);
+      }
       if (!ownerUserId) {
         console.warn("[Security] 拒绝注册：该 Token 未绑定任何账号");
         return res.status(403).json({
