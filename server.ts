@@ -981,6 +981,50 @@ async function runServerSideGeneration({
     let contextLength = settings?.contextLength || 30000;
     const sessionSummary = settings?.sessionSummary;
 
+    /**
+     * Agent 模式下，如果 App 没配主模型 Key，就不要再去打任何模型接口。
+     *
+     * 实测过：App 的模型卡片 apiKey 空着 → 兜底逻辑把 Authorization 写成
+     * `Bearer lm-studio`（见下面 apiKey || "lm-studio"）→ 请求 https://api.deepseek.com
+     * 直接 401 Authentication Fails，App 把整段原始报错追加到气泡里
+     * （"Your api key: ****udio is invalid" 里的 udio 就是 lm-studio 的尾巴）。
+     * Agent 那一轮其实已经跑完并拿到输出，这种"二次总结"失败不该污染结果。
+     */
+    if (isAgentMode && !settings?.apiKey) {
+      const raw = (agentExecutionResult?.rawOutput ?? '').toString().trim();
+      const notice = raw.length > 0
+        ? raw
+        : '本地 Agent 已完成本轮执行（未配置主模型 Key，跳过二次总结）。';
+      const doneMessage = {
+        id: assistantMessageId,
+        sessionId: resolvedSessionId,
+        role: 'assistant',
+        content: notice,
+        timestamp: new Date().toISOString(),
+        type: 'text',
+        status: 'completed',
+        isAgentMode: true,
+        ...(agentExecutionResult ? { agentExecution: agentExecutionResult } : {}),
+      };
+      await upsertMessage(userId, doneMessage);
+      io.to(`user_${userId}`).emit("chat_completed", {
+        messageId: assistantMessageId,
+        content: notice,
+        isAgentMode: true,
+        agentExecution: agentExecutionResult,
+      });
+      generationEvents.emit(`completed_${assistantMessageId}`, {
+        messageId: assistantMessageId,
+        content: notice,
+        isAgentMode: true,
+        agentExecution: agentExecutionResult,
+      });
+      genState.status = 'completed';
+      genState.content = notice;
+      console.log('[Server Background Gen] 跳过二次总结：App 未配置主模型 Key（agent 模式直接用 Agent 输出）');
+      return;
+    }
+
     // 自动结合服务端维护的 model_limits.json 校验与修正上限，若用户填写的数值超过限制则自动更正
     const serverModelLimit = await getEffectiveModelContextLimit(modelName);
     if (serverModelLimit && serverModelLimit > 0 && contextLength > serverModelLimit) {
