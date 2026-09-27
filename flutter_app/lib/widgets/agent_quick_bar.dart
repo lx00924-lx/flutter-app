@@ -445,6 +445,14 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                                   : '电脑端在线，但目录仍为空：请确认电脑端宿主（本地 Agent）正常工作')
                               : '电脑端桥接不在线：请先在电脑上启动桥接');
                       _toast('没取到目录：$why', isError: true);
+                    } else {
+                      // 成功也要出声：这个按钮以前只在失败时提示，用户点完毫无反应
+                      // 会以为"没生效 / 按钮坏了"（实测被问了两次）。
+                      _toast(
+                        '已同步电脑端目录：${sp.agentWorkspaces.length} 个工作区 / '
+                        '${sp.agentSessions.length} 个会话',
+                        isError: false,
+                      );
                     }
                   },
           ),
