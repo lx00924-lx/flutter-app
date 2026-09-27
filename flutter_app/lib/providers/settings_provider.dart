@@ -277,6 +277,7 @@ class SettingsProvider extends ChangeNotifier {
     if (_settings.isHarnessOnline == online) return;
     final wasOffline = !_settings.isHarnessOnline;
     _settings.isHarnessOnline = online;
+    if (online) _agentOnlineSince = DateTime.now();
     _save(pushToCloud: false);
     debugPrint('[Settings] Agent 在线状态更新: $online');
     // 电脑端刚上线（典型场景：先开 App，再开宿主 / 桥接）：立刻补拉一次目录，
@@ -286,6 +287,13 @@ class SettingsProvider extends ChangeNotifier {
       unawaited(refreshAgentCatalog(silent: true));
     }
   }
+
+  /// 电脑端"上线"的时刻。用于区分两种"在线但目录为空"：
+  /// 刚上线（多半是目录还在路上，提示"正在同步"即可）vs 已在线很久（那才需要怀疑宿主）。
+  DateTime? _agentOnlineSince;
+  bool get agentRecentlyCameOnline =>
+      _agentOnlineSince != null &&
+      DateTime.now().difference(_agentOnlineSince!) < const Duration(seconds: 20);
 
   /// 服务端下发的「桥接状态切换中」标记（null = 已切换完成/无切换）。
   BridgeTransition? _bridgeTransition;
@@ -809,38 +817,52 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   /// 拉取一次电脑端工作区与会话，并缓存下来供设置页与聊天快捷栏共用。
+  ///
+  /// 两个针对"电脑端刚上线"的处理（实测：桥接从注册成功到推出第一份目录约 4 秒）：
+  /// - **在线但目录为空时自动重试**，最多 2 次（等 2 秒、4 秒），用户不必手点第二次；
+  /// - **取不到时保留上一次的目录**，不要把一个暂时取不到的目录清空成空白，
+  ///   否则用户看到的是"目录凭空消失"，而不是"暂时没拿到"。
   Future<bool> refreshAgentCatalog({bool silent = true}) async {
     if (_agentCatalogLoading) return false;
     _agentCatalogLoading = true;
     try {
-      final res = await fetchAgentWorkspacesAndSessions();
-      final wsList = (res['workspaces'] as List<dynamic>?)
-              ?.map((e) => e.toString().trim())
-              .where((e) => e.isNotEmpty)
-              .toList() ??
-          <String>[];
-      final sessList = (res['sessions'] as List<dynamic>?)
-              ?.whereType<Map>()
-              .map((e) => Map<String, dynamic>.from(e))
-              .toList() ??
-          <Map<String, dynamic>>[];
-      final modelList = (res['models'] as List<dynamic>?)
-              ?.whereType<Map>()
-              .map((e) => Map<String, dynamic>.from(e))
-              .toList() ??
-          <Map<String, dynamic>>[];
+      var res = await fetchAgentWorkspacesAndSessions();
+      var wsList = _parseWorkspaces(res);
+      var sessList = _parseSessions(res);
+      var modelList = _parseModels(res);
 
-      _agentWorkspaces = wsList;
-      _agentSessions = sessList;
+      // 电脑端在线却什么都没拿到 → 极可能是"刚注册、首份目录还在路上"，
+      // 这不是失败，等两拍再问一次（总耗时 ≤6 秒，调用方多为 unawaited）。
+      for (var retry = 0; retry < 2; retry++) {
+        final onlineButEmpty = _lastCatalogOnline && wsList.isEmpty && sessList.isEmpty;
+        if (!onlineButEmpty) break;
+        await Future.delayed(Duration(seconds: retry == 0 ? 2 : 4));
+        res = await fetchAgentWorkspacesAndSessions();
+        wsList = _parseWorkspaces(res);
+        sessList = _parseSessions(res);
+        modelList = _parseModels(res);
+      }
+
+      final gotContent = wsList.isNotEmpty || sessList.isNotEmpty;
+      if (gotContent) {
+        _agentWorkspaces = wsList;
+        _agentSessions = sessList;
+      } else if (!_agentCatalogLoaded) {
+        // 从来没取到过：保持空白（不要给假目录），界面据此显示"未取到"
+        _agentWorkspaces = const [];
+        _agentSessions = const [];
+      } else {
+        debugPrint('[Settings] 本次没取到目录，保留上一次缓存（${_agentWorkspaces.length} 个工作区）');
+      }
       if (modelList.isNotEmpty) _agentModels = modelList;
       // 取到电脑端目录后，顺手把电脑端**真实生效**的模型 / 思考深度 / 权限对齐过来
       _adoptAgentStateFromSession();
       // 只有真的取到内容才算"已加载"，避免把一次失败当成"电脑上确实没有"
-      _agentCatalogLoaded = _agentCatalogLoaded || wsList.isNotEmpty || sessList.isNotEmpty;
+      _agentCatalogLoaded = _agentCatalogLoaded || gotContent;
       debugPrint('[Settings] 目录刷新: ${wsList.length} 个工作区 / ${sessList.length} 个会话 / '
           '${modelList.length} 个模型${_agentCatalogLoaded ? "" : "（未取到，界面保持空白）"}');
       notifyListeners();
-      return wsList.isNotEmpty || sessList.isNotEmpty;
+      return gotContent;
     } catch (e) {
       debugPrint('[Settings] refreshAgentCatalog 失败: $e');
       _lastCatalogError = '$e';
@@ -850,6 +872,27 @@ class SettingsProvider extends ChangeNotifier {
       _agentCatalogLoading = false;
     }
   }
+
+  List<String> _parseWorkspaces(Map<String, dynamic> res) =>
+      (res['workspaces'] as List<dynamic>?)
+          ?.map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList() ??
+      <String>[];
+
+  List<Map<String, dynamic>> _parseSessions(Map<String, dynamic> res) =>
+      (res['sessions'] as List<dynamic>?)
+          ?.whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList() ??
+      <Map<String, dynamic>>[];
+
+  List<Map<String, dynamic>> _parseModels(Map<String, dynamic> res) =>
+      (res['models'] as List<dynamic>?)
+          ?.whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList() ??
+      <Map<String, dynamic>>[];
 
   /// 在电脑端新建一个会话，成功后刷新目录并返回新会话 id（失败返回 null）。
   Future<String?> createAgentSessionOnPc({

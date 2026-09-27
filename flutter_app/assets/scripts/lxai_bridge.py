@@ -1151,8 +1151,31 @@ async def query_dsh_workspaces_and_sessions(harness_url: str):
 ACTIVE_SESSION_REGISTRY = {}
 
 # 最近一次 WebSocket 失败的时间戳：轮询通道据此决定"是否可以立刻尝试切回长连接"。
-# 冷却 60 秒，避免在 WS 真的不可用时（代理封 WS 等）在两条通道之间来回弹。
+# 平时冷却 60 秒，避免在 WS 真的不可用时（代理封 WS 等）在两条通道之间来回弹；
+# 但若是"中继正在启动"这类**临时**失败（HTTP 503），冷却缩短到 15 秒，
+# 否则中继重启后要白等一分钟才切回长连接（实测过一次）。
 _last_ws_failure_at = 0.0
+_last_ws_failure_transient = False
+WS_RETRY_COOLDOWN_SEC = 60
+WS_RETRY_COOLDOWN_TRANSIENT_SEC = 15
+
+
+def mark_ws_failure(transient: bool = False) -> None:
+    """记录一次长连接失败。
+
+    transient=True 表示"中继正在启动（HTTP 503）"这类很快就能好的失败 ——
+    这种不该让用户等满 60 秒，也不该提示他重新配对。
+    """
+    global _last_ws_failure_at, _last_ws_failure_transient
+    _last_ws_failure_at = time.time()
+    if transient:
+        _last_ws_failure_transient = True
+
+
+def mark_ws_connected() -> None:
+    """长连接建立成功：清掉"临时失败"标记，下次断线回到默认冷却时长。"""
+    global _last_ws_failure_transient
+    _last_ws_failure_transient = False
 
 # WS 通道里跑着的任务协程引用。
 # 为什么要留着：asyncio 只对任务持弱引用，光 create_task 不保存引用的话，
@@ -2555,6 +2578,12 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                 # 而是明确提示用户按"重新配对"流程处理。
                 print("\033[93m  💡 该 Token 已失效。请在电脑上重新运行本脚本并【用手机扫码】完成配对：\033[0m")
                 print(f"\033[90m     python lxai_bridge.py --harness-url \"{args.harness_url}\"\033[0m")
+            elif status == 503 or (isinstance(reg_body, dict) and reg_body.get("transient")):
+                # 中继刚启动/设置还在加载 —— 这是**临时**状态，Token 完全没问题。
+                # 之前这种情况也走 403，于是打印"请重新扫码配对"把人引到错误方向。
+                mark_ws_failure(transient=True)
+                wait_s = int((reg_body or {}).get("retryAfterMs", 3000) / 1000) if isinstance(reg_body, dict) else 3
+                print(f"\033[93m  💡 中继正在启动中（{wait_s} 秒后自动重试），Token 无需重新配对。\033[0m")
 
         try:
             await loop.run_in_executor(
@@ -2735,7 +2764,10 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             # WebSocket 是主通道：只要轮询通了、且距上次 WS 失败已过冷却期，就尝试切回。
             # **每次轮询都判断**（不是只在第一次），否则第一次轮询正好撞上冷却期，
             # 就再也不会切回、永久停在轮询模式（表现为会话列表一直是 0 条）。
-            if args.transport != "polling" and time.time() - _last_ws_failure_at > 60:
+            # 冷却时长分两种：临时失败（中继启动中，503）15 秒即可重试；
+            # 其它失败（例如代理封 WS）仍等 60 秒，避免两条通道来回弹。
+            _ws_cooldown = WS_RETRY_COOLDOWN_TRANSIENT_SEC if _last_ws_failure_transient else WS_RETRY_COOLDOWN_SEC
+            if args.transport != "polling" and time.time() - _last_ws_failure_at > _ws_cooldown:
                 print("\033[92m[↻ 恢复] 轮询通道正常，尝试切回 WebSocket 长连接...\033[0m")
                 if question_task:
                     question_task.cancel()
@@ -2940,6 +2972,8 @@ async def run_bridge_client(args):
             ) as ws:
                 print(f"\033[92m[✓ 成功上线] 已与 App 服务器建立安全 WebSocket 长连接！等待任务下发...\033[0m")
                 ws_fail_count = 0
+                # 已经连上就不再算"临时失败"，下次断线回到默认 60 秒冷却
+                mark_ws_connected()
 
                 await ws.send(json.dumps({
                     "type": "register",
@@ -3269,8 +3303,7 @@ async def run_bridge_client(args):
 
         except Exception as ws_err:
             ws_fail_count += 1
-            global _last_ws_failure_at
-            _last_ws_failure_at = time.time()
+            mark_ws_failure()
             print(f"\033[93m[WS 握手受阻 ({ws_err})]\033[0m 正在自动无缝切换至 HTTP 智能长轮询通道...")
             # 轮询通道返回 True = 中继重启过、可以切回长连接。
             # 旧实现在这里直接 return，于是中继一重启，桥接就永久停在轮询模式

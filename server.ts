@@ -2855,15 +2855,33 @@ async function startServer() {
       // 绑定归属；未能归属任何账号的 token 一律拒绝注册，
       // 避免"孤儿 bridge 显示已连接、但手机端永远查不到"的假在线。
       //
-      // 但**中继刚启动的那几秒**里，归属反查可能因为 settings.json 还在加载/正被写入
-      // 而暂时查不到 —— 此时直接 403 会让桥接误判成"Token 已失效"并退回轮询模式
-      // （实测：重启后桥接报了 403，随后一直是 0 个会话）。所以这里重试几次再判死。
+      // 但**中继刚启动的那几秒到几十秒**里，归属反查要读 messages_data/settings.json
+      // （本机 6.6MB）并等启动期的设置加载/密钥迁移做完，此前查不到 —— 直接 403 会让
+      // 桥接误判成"Token 已失效"（并打印"请重新扫码配对"，把用户引到错误方向）。
+      // 所以：① 重试窗口拉到约 12 秒（桥接这次注册的 HTTP 超时是 15 秒，必须留余量）；
+      //       ② 仍查不到时，若设置根本还没加载出来 → 返回 503（可重试），
+      //          只有"设置已加载、确实没有这个 token 的归属"才回 403。
       let ownerUserId = await resolveTokenOwnerUserId(token);
-      for (let attempt = 0; !ownerUserId && attempt < 4; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 400));
+      for (let attempt = 0; !ownerUserId && attempt < 12; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
         ownerUserId = await resolveTokenOwnerUserId(token);
       }
       if (!ownerUserId) {
+        let settingsReady = false;
+        try {
+          const allSettings = await loadSettingsFile();
+          settingsReady = !!allSettings && Object.keys(allSettings).length > 0;
+        } catch {
+          settingsReady = false;
+        }
+        if (!settingsReady) {
+          console.warn("[Security] 注册暂缓：设置尚未加载完成（中继启动中），返回 503 让桥接稍后重试");
+          return res.status(503).json({
+            error: "中继正在启动中，账号归属尚未加载完成，请稍后重试",
+            transient: true,
+            retryAfterMs: 3000,
+          });
+        }
         console.warn("[Security] 拒绝注册：该 Token 未绑定任何账号");
         return res.status(403).json({
           error: "该 Agent Token 未绑定任何账号，请在 App 中重新扫码配对或使用 App 显示的 Token",

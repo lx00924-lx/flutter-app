@@ -226,4 +226,9 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - 生产中继目录 `F:\ai\flutter-app` **不是 Git 仓库**，源码靠手工同步：
   改完仓库要同步 `server.ts` / `lxai_bridge.py` / `docs/`，再 `npm run build` 并重启中继。
 - 用户插件**没有热重载**：`lib/index.js` 改完必须重启宿主 web 服务才生效（`dsh plugin` 子命令只管安装）。
+- 桥接「注册成功 → 推出第一份目录」约 **4 秒**（40 余次重启实测）。这期间 `/api/agent/sessions`
+  的 `online=true` 但 `workspaces/sessions/models` 全是空数组 —— 用户此时点刷新会看到
+  "在线但没取到目录"。App 侧已按此自动重试两次并给"正在同步"提示，排查时不要误判成宿主忙。
+- 中继重启后桥接恢复分两段：**注册**（归属反查要读 6.6MB 的 settings.json，启动期查不到 →
+  现在返回 503 可重试，而非 403 token 失效）与**切回 WebSocket**（临时失败冷却 15 秒、其它失败 60 秒）。
 

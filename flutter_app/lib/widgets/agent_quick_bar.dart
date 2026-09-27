@@ -434,10 +434,15 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                     if (!ok) {
                       // 按真实原因给提示：以前一律说"请确认电脑端桥接在线"，
                       // 网络抖动时会把用户指向错误的方向（实测过一次）。
+                      // 同理，"在线但目录为空"绝大多数是**电脑端刚上线、首份目录还在路上**
+                      // （实测注册成功到目录到位约 4 秒，refreshAgentCatalog 已自动重试两次），
+                      // 不该让用户去怀疑宿主忙。
                       final why = sp.lastCatalogError.isNotEmpty
                           ? sp.lastCatalogError
                           : (sp.lastCatalogOnline
-                              ? '电脑端在线，但这次没取到目录（本地 Agent 宿主可能正忙），稍后再试'
+                              ? (sp.agentRecentlyCameOnline
+                                  ? '电脑端刚上线，目录正在同步（约几秒），稍后再试'
+                                  : '电脑端在线，但目录仍为空：请确认电脑端宿主（本地 Agent）正常工作')
                               : '电脑端桥接不在线：请先在电脑上启动桥接');
                       _toast('没取到目录：$why', isError: true);
                     }

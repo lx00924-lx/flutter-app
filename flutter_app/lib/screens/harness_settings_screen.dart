@@ -300,7 +300,13 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         _snack('✅ 已同步电脑端目录（${wsList.length} 个工作区 / ${sp.agentSessions.length} 个会话）',
             isError: false);
       } else if (sp.settings.isHarnessOnline) {
-        _snack('⚠️ 桥接已在线，但没取到目录：请确认电脑端 Agent 宿主正常工作', isError: true);
+        // 在线却拿不到目录：刚上线那几秒多半是首份目录还在路上（实测约 4 秒，
+        // refreshAgentCatalog 内部已自动重试两次），别再让用户去怀疑宿主。
+        _snack(
+            sp.agentRecentlyCameOnline
+                ? '⏳ 电脑端刚上线，目录正在同步（约几秒），稍后再点一次刷新'
+                : '⚠️ 桥接已在线，但目录仍为空：请确认电脑端宿主（本地 Agent）正常工作',
+            isError: !sp.agentRecentlyCameOnline);
       } else {
         _snack('⚠️ 电脑端桥接未在线，暂无可用目录（启动桥接后会自动获取）', isError: true);
       }
