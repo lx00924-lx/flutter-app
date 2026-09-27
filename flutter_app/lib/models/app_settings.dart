@@ -346,6 +346,12 @@ class AppSettings {
     map['asrApiKey'] = '';
     map['ttsApiKey'] = '';
     map['accountPassword'] = '';
+    // isHarnessOnline 是本机运行时事实（这台设备此刻看不看得见电脑端桥接），
+    // **不参与云端漫游**：以前它跟着设置上传，云端存着上一次推送时的旧值，
+    // 各端回拉时会把本地"在线"打成"离线"，紧接着轮询又打回"在线" → 客户端
+    // 判定"电脑端刚上线" → 又自动拉一次目录（用户看到的就是 App 时不时闪一下、
+    // 自动刷新桥接目录）。中继侧也同步做了脱敏，这里是第二道闸。
+    map.remove('isHarnessOnline');
     if (map['apiEndpoints'] is List) {
       map['apiEndpoints'] = (map['apiEndpoints'] as List).map((item) {
         if (item is Map) {

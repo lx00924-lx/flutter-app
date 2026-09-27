@@ -600,7 +600,10 @@ class SyncService {
                 final local = storage.getMessageById(msg.id);
                 final remoteLen = msg.content.trim().length;
                 final localLen = (local?.content ?? '').trim().length;
-                if (remoteLen > localLen && remoteLen > 0) {
+                // 本地是"连接中断/取回中"的占位文案时无条件接受云端版本：
+                // 那是**状态**不是回答，长度比较挡不住它（占位句比短回答还长）。
+                final localIsPlaceholder = ChatMessage.isRetrievalPlaceholder(local?.content);
+                if (remoteLen > 0 && (remoteLen > localLen || localIsPlaceholder)) {
                   updatedMessages.add(msg);
                 }
                 continue;
@@ -669,7 +672,12 @@ class SyncService {
     if (cleanUserId.isEmpty || messages.isEmpty) return;
 
     final validMessages = messages
-        .where((m) => !m.isStreaming && (m.content.isNotEmpty || (m.attachments != null && m.attachments!.isNotEmpty)))
+        .where((m) =>
+            !m.isStreaming &&
+            // 断流占位文案绝不推云端：它会把服务端其实已经跑完的完整回答覆盖掉
+            // （占位句是"状态"，不是内容）。
+            !ChatMessage.isRetrievalPlaceholder(m.content) &&
+            (m.content.isNotEmpty || (m.attachments != null && m.attachments!.isNotEmpty)))
         .map((m) => m.toMap())
         .toList();
 

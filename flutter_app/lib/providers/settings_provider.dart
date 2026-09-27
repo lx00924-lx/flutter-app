@@ -239,6 +239,15 @@ class SettingsProvider extends ChangeNotifier {
         unawaited(pullCloudSettings());
         return;
       case 'agent_status_change':
+        // 只认自己这枚 Token。中继历史上是 `io.emit` 全服广播（推送通道又镜像了
+        // 所有 io.emit），客户端此前不校验 token —— 于是**别人电脑上的桥接上下线
+        // 会把本机打成在线/离线**，进而触发一次"电脑端刚上线 → 拉一次目录"。
+        // 中继侧已收窄到归属账号，这里是第二道闸（旧中继 + 归属未解析时的兜底广播）。
+        final eventToken = data['token']?.toString().trim() ?? '';
+        final myToken = _settings.harnessToken.trim();
+        if (eventToken.isNotEmpty && myToken.isNotEmpty && eventToken != myToken) {
+          return;
+        }
         final online = data['online'];
         if (online is bool) _applyAgentOnline(online);
         return;
@@ -284,7 +293,15 @@ class SettingsProvider extends ChangeNotifier {
     // 把这期间电脑端真实生效的模型 / 思考深度 / 权限对齐过来 ——
     // 否则界面会一直停在 App 自己存的旧值，用户以为"设置没同步"。
     if (online && wasOffline && _settings.isLoggedIn) {
-      unawaited(refreshAgentCatalog(silent: true));
+      // 节流：刚成功拿到过目录就别再拉一次。中继的在线状态会因桥接重连/心跳
+      // 抖动而反复变成 true，每次都拉一遍的结果就是快捷栏那个刷新图标一直在转，
+      // 看上去就是"App 时不时闪一下、自动刷新桥接"。
+      final last = _lastCatalogSuccessAt;
+      if (last != null && DateTime.now().difference(last) < const Duration(seconds: 60)) {
+        debugPrint('[Settings] 刚拿到过电脑端目录，本次上线不重复拉取');
+      } else {
+        unawaited(refreshAgentCatalog(silent: true));
+      }
     }
   }
 
@@ -823,6 +840,16 @@ class SettingsProvider extends ChangeNotifier {
   /// 会立刻拿到 false，界面据此弹出"没取到目录"——纯属误报。
   Future<bool>? _agentCatalogPending;
 
+  /// 「用户主动点刷新」才为 true —— 界面**只在这个窗口转圈**。
+  ///
+  /// 自动刷新（电脑端刚上线、启动时对齐）以前也复用 `_agentCatalogLoading`，
+  /// 于是那个刷新图标会无缘无故地转一下 —— 用户看到的就是"App 时不时闪一下"。
+  /// 后台刷新本来就该是无声的。
+  bool _agentCatalogUserLoading = false;
+
+  /// 最近一次**成功**取到目录的时刻（用于给"刚上线就补拉"节流）。
+  DateTime? _lastCatalogSuccessAt;
+
   /// 拉取一次电脑端工作区与会话，并缓存下来供设置页与聊天快捷栏共用。
   ///
   /// 两个针对"电脑端刚上线"的处理（实测：桥接从注册成功到推出第一份目录约 4 秒）：
@@ -830,17 +857,31 @@ class SettingsProvider extends ChangeNotifier {
   /// - **取不到时保留上一次的目录**，不要把一个暂时取不到的目录清空成空白，
   ///   否则用户看到的是"目录凭空消失"，而不是"暂时没拿到"。
   Future<bool> refreshAgentCatalog({bool silent = true}) {
+    if (!silent && !_agentCatalogUserLoading) {
+      _agentCatalogUserLoading = true;
+      notifyListeners();
+    }
     final pending = _agentCatalogPending;
     if (pending != null) {
       debugPrint('[Settings] 已有一次目录刷新在进行，复用其结果');
-      return pending;
+      return silent ? pending : pending.whenComplete(_endUserCatalogLoading);
     }
     final future = _refreshAgentCatalogInner(silent: silent);
     _agentCatalogPending = future;
-    return future.whenComplete(() {
+    final wrapped = future.whenComplete(() {
       if (identical(_agentCatalogPending, future)) _agentCatalogPending = null;
     });
+    return silent ? wrapped : wrapped.whenComplete(_endUserCatalogLoading);
   }
+
+  void _endUserCatalogLoading() {
+    if (!_agentCatalogUserLoading) return;
+    _agentCatalogUserLoading = false;
+    notifyListeners();
+  }
+
+  /// 界面的刷新按钮据此转圈：只反映"用户点的那一次"。
+  bool get agentCatalogUserLoading => _agentCatalogUserLoading;
 
   Future<bool> _refreshAgentCatalogInner({required bool silent}) async {
     _agentCatalogLoading = true;
@@ -866,6 +907,7 @@ class SettingsProvider extends ChangeNotifier {
       if (gotContent) {
         _agentWorkspaces = wsList;
         _agentSessions = sessList;
+        _lastCatalogSuccessAt = DateTime.now();
       } else if (!_agentCatalogLoaded) {
         // 从来没取到过：保持空白（不要给假目录），界面据此显示"未取到"
         _agentWorkspaces = const [];
@@ -984,7 +1026,14 @@ class SettingsProvider extends ChangeNotifier {
           cloud.harnessToken = generateAgentPairingToken();
         }
 
+        // 在线状态是本机运行时事实：云端那份是**上一次推送时的旧值**（中继启动期
+        // 尤其容易是 false，实测生产库里就恒为 false）。以前这里整份覆盖，于是
+        // 每次云端漫游/推送回拉都把本地"在线"打成"离线"，下一轮轮询再打回"在线" ——
+        // 客户端据此判定"电脑端刚上线"，又去拉一次目录（App 时不时闪一下的根因）。
+        // 注意：中继与 pushSettings 两侧也已不再上传/存储这个字段，这里是第三道闸。
+        final keepHarnessOnline = _settings.isHarnessOnline;
         _settings = cloud;
+        _settings.isHarnessOnline = keepHarnessOnline;
         _save(pushToCloud: false);
       }
     } catch (e) {

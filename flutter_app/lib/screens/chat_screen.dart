@@ -497,22 +497,59 @@ class _ChatScreenState extends State<ChatScreen> {
                             }
                             return false;
                           },
-                          child: ListView.builder(
-                            controller: _scrollController,
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            cacheExtent: 600,
-                            addRepaintBoundaries: true,
-                            itemCount: chat.messages.length,
-                            itemBuilder: (ctx, index) {
-                              final msg = chat.messages[index];
-                              // 检查是否为整个会话中最后一条 Assistant 消息
-                              final isLatestAssistant = msg.role == MessageRole.assistant &&
-                                  index == chat.messages.lastIndexWhere((m) => m.role == MessageRole.assistant);
-                              return MessageBubble(
-                                message: msg,
-                                isLatestAssistant: isLatestAssistant,
-                              );
-                            },
+                          child: Stack(
+                            children: [
+                              ListView.builder(
+                                controller: _scrollController,
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                cacheExtent: 600,
+                                addRepaintBoundaries: true,
+                                itemCount: chat.messages.length,
+                                itemBuilder: (ctx, index) {
+                                  final msg = chat.messages[index];
+                                  // 检查是否为整个会话中最后一条 Assistant 消息
+                                  final isLatestAssistant = msg.role == MessageRole.assistant &&
+                                      index == chat.messages.lastIndexWhere((m) => m.role == MessageRole.assistant);
+                                  final prev = index > 0 ? chat.messages[index - 1] : null;
+                                  return MessageBubble(
+                                    message: msg,
+                                    isLatestAssistant: isLatestAssistant,
+                                    // 同一发送者的连续消息收紧间距（微信/QQ 那种分组观感），
+                                    // 换人时留出更明显的间隔
+                                    groupedWithPrev: prev != null && prev.role == msg.role,
+                                  );
+                                },
+                              ),
+                              // 向上翻历史时给一个"回到最新"的入口：以前只能自己一路划回去
+                              if (_userScrolledUp)
+                                Positioned(
+                                  right: 12,
+                                  bottom: 10,
+                                  child: Material(
+                                    color: isDark ? const Color(0xFF1E293B) : Colors.white,
+                                    elevation: 3,
+                                    shape: const CircleBorder(),
+                                    child: InkWell(
+                                      customBorder: const CircleBorder(),
+                                      onTap: () {
+                                        _isUserInteracting = false;
+                                        if (_userScrolledUp) {
+                                          setState(() => _userScrolledUp = false);
+                                        }
+                                        _scrollToBottom(animate: true, force: true);
+                                      },
+                                      child: const Padding(
+                                        padding: EdgeInsets.all(8),
+                                        child: Icon(
+                                          Icons.keyboard_double_arrow_down,
+                                          size: 20,
+                                          color: Color(0xFF0284C7),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                            ],
                           ),
                         ),
                 ),

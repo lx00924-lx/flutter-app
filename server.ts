@@ -1062,6 +1062,17 @@ async function runServerSideGeneration({
           isAgentMode: true,
           agentExecution: offlineMsg.agentExecution
         });
+        // SSE 侧必须补一个终止事件：这条分支以前只发 socket.io 的 chat_completed
+        // 就直接 return，于是那条 SSE 连接既没有 done、也没有 res.end() —— 手机端
+        // 只能干等（客户端 receiveTimeout 是 10 分钟）。期间界面一直停在"生成中"，
+        // 而"生成中"会把所有定时对账跳过（见 chat_provider 的 if (!_isGenerating)），
+        // 也就是一旦命中就再也恢复不了。补上 completed_<id> 让 SSE 正常收尾。
+        generationEvents.emit(`completed_${assistantMessageId}`, {
+          messageId: assistantMessageId,
+          content: offlineNotice,
+          isAgentMode: true,
+          agentExecution: offlineMsg.agentExecution
+        });
         return;
       }
 
@@ -2480,6 +2491,12 @@ async function startServer() {
     if ("asrApiKey" in sanitized) sanitized.asrApiKey = "";
     if ("accountPassword" in sanitized) sanitized.accountPassword = "";
     if ("password" in sanitized) sanitized.password = "";
+    // isHarnessOnline 是**本机运行时事实**（这台设备此刻看不看得见桥接），不是用户设置。
+    // 以前它跟着设置一起漫游：云端存着上一次推送时的旧值（实测生产库里恒为 false），
+    // 各端回拉时会把本地"在线"打成"离线"，紧接着轮询又打回"在线" → 客户端判定
+    // "电脑端刚上线" → 又自动拉一次电脑端目录。表现就是"App 时不时闪一下、
+    // 自动刷新桥接目录"。这里直接不落云端，从源头断掉。
+    if ("isHarnessOnline" in sanitized) delete sanitized.isHarnessOnline;
     if (Array.isArray(sanitized.apiEndpoints)) {
       sanitized.apiEndpoints = sanitized.apiEndpoints.map((ep: any) => {
         if (ep && typeof ep === "object") {
@@ -2510,6 +2527,9 @@ async function startServer() {
       await withFileLock(SETTINGS_FILE, async () => {
         const allSettings = await loadSettingsFile();
         allSettings[userId] = { ...(allSettings[userId] || {}), ...newSettings };
+        // 老数据里可能残留过这个字段（它是运行时状态，不该上云），保存时顺手清掉：
+        // 只靠 sanitizeSettings 的话，合并语义会让历史值一直留在文件里。
+        if (allSettings[userId]) delete allSettings[userId].isHarnessOnline;
         await saveSettingsFile(allSettings);
       });
       io.to(`user_${userId}`).emit("settings_updated", newSettings);
@@ -2533,6 +2553,7 @@ async function startServer() {
       await withFileLock(SETTINGS_FILE, async () => {
         const allSettings = await loadSettingsFile();
         allSettings[cleanUserId] = { ...(allSettings[cleanUserId] || {}), ...cleanSettings };
+        if (allSettings[cleanUserId]) delete allSettings[cleanUserId].isHarnessOnline;
         await saveSettingsFile(allSettings);
       });
 
@@ -2906,7 +2927,7 @@ async function startServer() {
         agent.mode = clientInfo.mode || agent.mode || 'polling';
       }
 
-      io.emit("agent_status_change", { token, online: true, clientName });
+      emitAgentStatusChange(token, true, ownerUserId, clientName);
       res.json({ success: true, token, registeredAt: agent.connectedAt });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to register agent" });
@@ -2934,7 +2955,7 @@ async function startServer() {
           queuedTasks: []
         };
         connectedAgents.set(token, agent);
-        io.emit("agent_status_change", { token, online: true, clientName: agent.clientName });
+        emitAgentStatusChange(token, true, agent.ownerUserId, agent.clientName);
       } else {
         agent.lastPing = Date.now();
       }
@@ -3043,7 +3064,7 @@ async function startServer() {
         queuedTasks: []
       };
       connectedAgents.set(token, agent);
-      io.emit("agent_status_change", { token, online: true, clientName: agent.clientName });
+      emitAgentStatusChange(token, true, undefined, agent.clientName);
     }
     res.json({ success: true, timestamp: Date.now(), bootId: SERVER_BOOT_ID });
   });
@@ -4016,8 +4037,9 @@ if %errorlevel% neq 0 (
               agent.ws.close(1000, "Token Revoked");
             }
           } catch {}
+          const revokedOwner = agent.ownerUserId;
           connectedAgents.delete(oldToken);
-          io.emit("agent_status_change", { token: oldToken, online: false });
+          emitAgentStatusChange(oldToken, false, revokedOwner);
         }
       }
       res.json({ success: true, message: "Old token revoked successfully" });
@@ -4079,8 +4101,9 @@ if %errorlevel% neq 0 (
             kickedAgent = true;
           }
         } catch {}
+        const rotatedOwner = agent?.ownerUserId || ownerUserId;
         connectedAgents.delete(oldToken);
-        io.emit("agent_status_change", { token: oldToken, online: false });
+        emitAgentStatusChange(oldToken, false, rotatedOwner);
       }
 
       const newToken = generateServerAgentToken();
@@ -4609,6 +4632,33 @@ if %errorlevel% neq 0 (
     return target;
   };
 
+  /**
+   * 桥接上/下线只通知「拥有这枚 Token 的账号」。
+   *
+   * 以前这里是 `io.emit`（全服广播），而所有 io.emit 都会被镜像到 App 推送通道
+   * （见上面 io.emit 的包装），客户端拿到 agent_status_change 又不校验 token ——
+   * 于是**别人电脑上的桥接上下线会把你的手机打成在线/离线**，进而触发一次
+   * "电脑端刚上线 → 拉一次目录"。实测桌面端日志里 `Agent 在线状态更新: true`
+   * 连着出现 5 次、中间没有任何一次 false，就是这条链路。
+   *
+   * 归属未知时（启动早期/老数据）仍退回广播：客户端已按 token 自行过滤。
+   */
+  const emitAgentStatusChange = (
+    token: string,
+    online: boolean,
+    ownerUserId?: string,
+    clientName?: string,
+  ) => {
+    const payload: any = { token, online };
+    if (clientName) payload.clientName = clientName;
+    const owner = (ownerUserId || connectedAgents.get(token)?.ownerUserId || "").trim();
+    if (owner) {
+      io.to(`user_${owner}`).emit("agent_status_change", payload);
+      return;
+    }
+    io.emit("agent_status_change", payload);
+  };
+
   appWss.on("connection", async (clientWs, request) => {
     let conn: AppSocket | null = null;
     try {
@@ -4720,6 +4770,9 @@ if %errorlevel% neq 0 (
       const agentInfo: ConnectedAgent = {
         ws: clientWs,
         token,
+        // 归属要继承：注册接口（/api/agent/register）已经把 ownerUserId 认下来了，
+        // 这里直接覆盖建条目会把归属丢掉 —— 之后上下线通知就只能退回全服广播。
+        ownerUserId: connectedAgents.get(token)?.ownerUserId,
         clientName,
         connectedAt: Date.now(),
         lastPing: Date.now(),
@@ -4729,8 +4782,8 @@ if %errorlevel% neq 0 (
       };
       connectedAgents.set(token, agentInfo);
 
-      // Notify all connected frontend sockets
-      io.emit("agent_status_change", { token, online: true, clientName });
+      // 只通知拥有这枚 Token 的账号，不再全服广播
+      emitAgentStatusChange(token, true, agentInfo.ownerUserId, clientName);
 
       clientWs.on("message", (raw) => {
         try {
@@ -4741,7 +4794,7 @@ if %errorlevel% neq 0 (
             if (msg.clientInfo?.name) agentInfo.clientName = msg.clientInfo.name;
             connectedAgents.set(updatedToken, agentInfo);
             console.log(`[Agent Hub] Agent registered with token [${updatedToken}]`);
-            io.emit("agent_status_change", { token: updatedToken, online: true, clientName: agentInfo.clientName });
+            emitAgentStatusChange(updatedToken, true, agentInfo.ownerUserId, agentInfo.clientName);
           } else if (msg.type === "agent_step") {
             console.log(`[Agent Hub] Agent step for task ${msg.taskId}: ${msg.step}`);
             io.emit("agent_task_step", {
@@ -4855,7 +4908,7 @@ if %errorlevel% neq 0 (
         console.log(`\x1b[33m[Agent Hub] Local Agent disconnected for token [${token}]\x1b[0m`);
         if (connectedAgents.get(token)?.ws === clientWs) {
           connectedAgents.delete(token);
-          io.emit("agent_status_change", { token, online: false });
+          emitAgentStatusChange(token, false, agentInfo.ownerUserId);
         }
 
         // Fail-fast any pending tasks that were waiting for this disconnected agent

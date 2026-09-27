@@ -18,6 +18,10 @@ class MessageBubble extends StatelessWidget {
   final ChatMessage message;
   final bool isLatestAssistant;
 
+  /// 是否与上一条同属一个"发送者分组"（同角色连续消息）：
+  /// 用来收紧行间距，做出微信/QQ 那种一段一段的观感。
+  final bool groupedWithPrev;
+
   static final Map<String, Uint8List> _attachmentBytesCache = {};
   static final Map<String, ImageProvider> _imageProviderCache = {};
 
@@ -71,6 +75,7 @@ class MessageBubble extends StatelessWidget {
     super.key,
     required this.message,
     this.isLatestAssistant = false,
+    this.groupedWithPrev = false,
   });
 
   /// 类似 Windows 右键的就地气泡菜单（弹出：引用、删除、朗读、选取文字、复制）
@@ -416,6 +421,11 @@ class MessageBubble extends StatelessWidget {
     final settings = settingsProvider.settings;
     final chat = context.read<ChatProvider>();
 
+    // 执行步骤：已完成的消息用自己那份记录；正在流式的用本轮实时收集的那份
+    // （宿主是边跑边推的，agentExecution 要等 done 才有，中间这段时间界面得看得到）。
+    final steps = message.agentExecution?.steps ??
+        (message.isStreaming ? chat.liveSteps : const <String>[]);
+
     final userAvatarBytes = settingsProvider.userAvatarBytes;
     final aiAvatarBytes = settingsProvider.aiAvatarBytes;
 
@@ -428,7 +438,8 @@ class MessageBubble extends StatelessWidget {
     Offset? tapPosition;
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      // 分组间距：同一发送者的连续消息贴紧，换人时留出更明显的间隔
+      padding: EdgeInsets.fromLTRB(16, groupedWithPrev ? 3 : 10, 16, 4),
       child: Row(
         mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -578,13 +589,15 @@ class MessageBubble extends StatelessWidget {
                         ],
                       ),
 
-                    // 思考链展示
-                    if (message.reasoningContent != null &&
-                        message.reasoningContent!.isNotEmpty)
+                    // 思考链 + 执行步骤（两者分开：思考是宿主原话，步骤是工具/派发记录）
+                    if ((message.reasoningContent != null &&
+                            message.reasoningContent!.isNotEmpty) ||
+                        steps.isNotEmpty)
                       ReasoningView(
-                        reasoningText: message.reasoningContent!,
+                        reasoningText: message.reasoningContent ?? '',
                         isStreaming: message.isStreaming && message.content.isEmpty,
                         elapsedSeconds: message.elapsedSeconds,
+                        steps: steps,
                       ),
 
                     // 正文渲染
@@ -595,7 +608,7 @@ class MessageBubble extends StatelessWidget {
                           style: TextStyle(
                             color: Colors.white,
                             fontSize: settings.chatFontSize.toDouble(),
-                            height: 1.4,
+                            height: 1.5,
                           ),
                         )
                       else
@@ -607,18 +620,58 @@ class MessageBubble extends StatelessWidget {
                         styleSheet: MarkdownStyleSheet(
                           p: TextStyle(
                             fontSize: settings.chatFontSize.toDouble(),
-                            height: 1.6,
+                            height: 1.62,
                             color: isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
+                          ),
+                          // 标题层级：以前没配，全靠默认值 —— 手机上行距与正文不一致、
+                          // 上下也不留白，长回答读起来"糊成一团"。
+                          h1: TextStyle(
+                            fontSize: (settings.chatFontSize + 4).toDouble(),
+                            fontWeight: FontWeight.w700,
+                            height: 1.4,
+                            color: isDark ? const Color(0xFFF8FAFC) : const Color(0xFF0F172A),
+                          ),
+                          h2: TextStyle(
+                            fontSize: (settings.chatFontSize + 2).toDouble(),
+                            fontWeight: FontWeight.w700,
+                            height: 1.4,
+                            color: isDark ? const Color(0xFFF8FAFC) : const Color(0xFF0F172A),
+                          ),
+                          h3: TextStyle(
+                            fontSize: (settings.chatFontSize + 1).toDouble(),
+                            fontWeight: FontWeight.w600,
+                            height: 1.4,
+                            color: isDark ? const Color(0xFFF8FAFC) : const Color(0xFF0F172A),
                           ),
                           listBullet: TextStyle(
                             fontSize: settings.chatFontSize.toDouble(),
+                            height: 1.6,
                             color: isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
+                          ),
+                          // 段间距 / 列表缩进：让多段长回答有呼吸感（聊天阅读体验）
+                          blockSpacing: 8,
+                          listIndent: 20,
+                          blockquotePadding: const EdgeInsets.fromLTRB(10, 6, 8, 6),
+                          blockquoteDecoration: BoxDecoration(
+                            color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border(
+                              left: BorderSide(
+                                color: isDark ? const Color(0xFF38BDF8) : const Color(0xFF0284C7),
+                                width: 3,
+                              ),
+                            ),
+                          ),
+                          a: TextStyle(
+                            color: isDark ? const Color(0xFF38BDF8) : const Color(0xFF0284C7),
+                            decoration: TextDecoration.underline,
                           ),
                           code: TextStyle(
                             backgroundColor: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9),
                             fontFamily: 'monospace',
                             fontSize: (settings.chatFontSize - 2).toDouble().clamp(11, 24),
                           ),
+                          codeblockPadding: const EdgeInsets.all(10),
                           codeblockDecoration: BoxDecoration(
                             color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
                             borderRadius: BorderRadius.circular(8),
@@ -628,6 +681,8 @@ class MessageBubble extends StatelessWidget {
                           ),
                         ),
                       ),
+                    // 流式输出时的打字光标：比干巴巴一句"正在思考中..."更像在说话
+                    if (!isUser && message.isStreaming) const _TypingCursor(),
                     const SizedBox(height: 6),
                   ],
                 ),
@@ -663,10 +718,53 @@ class MessageBubble extends StatelessWidget {
         textAlign: isUser ? TextAlign.right : TextAlign.left,
         style: TextStyle(
           fontSize: 11,
-          fontWeight: FontWeight.w400,
+          fontWeight: FontWeight.w500,
           letterSpacing: 0.2,
-          // 透明背景 + 弱化的灰色：不抢正文，也不再叠在蓝色气泡上
-          color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF94A3B8),
+          // 用户要求：时间戳由灰色改为黑色。亮色模式下用近黑（与正文同色系，
+          // 比纯黑更耐看）；暗色模式下纯黑会直接看不见，所以用浅色。
+          color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF111827),
+        ),
+      ),
+    );
+  }
+}
+
+/// 流式输出中的打字光标（各家大模型客户端的通用提示）。
+///
+/// 以前正文区只写一句静态的"正在思考中..."，看不出"还在继续输出"还是"卡住了"。
+class _TypingCursor extends StatefulWidget {
+  const _TypingCursor();
+
+  @override
+  State<_TypingCursor> createState() => _TypingCursorState();
+}
+
+class _TypingCursorState extends State<_TypingCursor> with SingleTickerProviderStateMixin {
+  late final AnimationController _controller = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 850),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: FadeTransition(
+        opacity: Tween<double>(begin: 0.2, end: 1.0).animate(_controller),
+        child: Container(
+          width: 7,
+          height: 14,
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF38BDF8) : const Color(0xFF0284C7),
+            borderRadius: BorderRadius.circular(1.5),
+          ),
         ),
       ),
     );

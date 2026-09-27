@@ -40,6 +40,22 @@ class ChatMessage {
   final String sessionId;
   final MessageRole role;
   String content;
+
+  /// 断流后的占位文案。
+  ///
+  /// 这两句是**状态**不是**内容**：既不能当成回答推给云端（会把服务端其实
+  /// 已经跑完的完整回答覆盖成这一句），也不能挡住云端更完整版本的回填。
+  /// 所以落库与合并两侧都要能认出它（见 StorageService/SyncService 的调用点）。
+  static const String interruptedPlaceholder = '（连接中断，正在向电脑端取回结果…）';
+
+  /// 取回超时后的如实说明（不再无限期挂着"正在取回…"）。
+  static const String interruptedTimeoutNote =
+      '（连接中断：电脑端那一轮可能还在跑，结果到了会自动补上；也可以长按这条消息选「重新生成」）';
+
+  static bool isRetrievalPlaceholder(String? text) {
+    final t = text?.trim() ?? '';
+    return t == interruptedPlaceholder || t == interruptedTimeoutNote;
+  }
   String? reasoningContent; // 思考链过程
   final DateTime createdAt;
   bool isStreaming;

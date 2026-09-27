@@ -417,7 +417,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
             visualDensity: VisualDensity.compact,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(minWidth: 30, minHeight: 30),
-            icon: sp.agentCatalogLoading
+            icon: sp.agentCatalogUserLoading
                 ? const SizedBox(
                     width: 13,
                     height: 13,
@@ -425,7 +425,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                   )
                 : const Icon(Icons.refresh, size: 16),
             tooltip: '重新获取电脑端工作区/会话',
-            onPressed: sp.agentCatalogLoading
+            onPressed: sp.agentCatalogUserLoading
                 ? null
                 : () async {
                     _requestedCatalog = true;

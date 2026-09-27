@@ -74,6 +74,104 @@ class ChatProvider extends ChangeNotifier {
   /// 轮次编号：每开一轮 +1；SSE 事件按编号认领，过期事件一律丢弃
   int _turnSeq = 0;
 
+  /// 宿主（电脑端 DSH）这一轮的**真实思考**文本，与 [ChatMessage.reasoningContent] 对应。
+  ///
+  /// 桥接把宿主的 `reasoning` 事件逐个 delta 包成 `💭 …` 的 step 事件发上来
+  /// （见 lxai_bridge.py 的 on_step_callback），中继原样当 step 转发。以前 App 把它
+  /// 和 `🔧/✓` 这类执行步骤一起塞进同一个字符串、还统一加了 `>` 引用前缀，于是
+  /// "思维链"看起来是一串工具调用 —— 用户明确要求：思维链要显示 DSH 里那份思考。
+  /// 现在按前缀分流：💭 进思考、其余进执行步骤，两个缓冲互不污染。
+  final StringBuffer _harnessThinking = StringBuffer();
+
+  /// 宿主这一轮的执行步骤（派发 / 工具调用 / 完成），单独展示，不混进思考。
+  final List<String> _stepLog = <String>[];
+
+  /// 润色阶段（服务端拿主模型总结执行结果）的思考，**不展示**。
+  ///
+  /// 它不是宿主那份思考（server.ts 的 reasoning 来自润色的那个模型），混进思维链
+  /// 会让人以为"电脑端就是这么想的"。只有在完全没拿到宿主思考时才拿它兜底。
+  final StringBuffer _polishThinking = StringBuffer();
+
+  /// 每开一轮清空一次，避免上一轮的内容串到这一轮。
+  void _resetTurnTrace() {
+    _harnessThinking.clear();
+    _stepLog.clear();
+    _polishThinking.clear();
+  }
+
+  /// 宿主思考在 step 通道里的前缀（桥接侧 `f"💭 {txt}"`）。
+  static const String _thinkingPrefix = '💭';
+
+  /// 把宿主的一条 step 文本分流：`💭` 是模型的思考 delta（直接拼接还原原文），
+  /// 其余（🚀 派发 / 🔧 工具 / ✓ 工具完成 / ✅ 执行完成）算执行步骤。
+  void _absorbStep(String raw) {
+    if (raw.startsWith('$_thinkingPrefix ')) {
+      _harnessThinking.write(raw.substring(_thinkingPrefix.length + 1));
+      return;
+    }
+    if (raw.startsWith(_thinkingPrefix)) {
+      _harnessThinking.write(raw.substring(_thinkingPrefix.length));
+      return;
+    }
+    final text = raw.trim();
+    if (text.isNotEmpty) _stepLog.add(text);
+  }
+
+  /// 本轮实时收集到的执行步骤（执行中给界面用；结束后以 message.agentExecution 为准）。
+  List<String> get liveSteps => List<String>.unmodifiable(_stepLog);
+
+  /// 把当前会话视图按本地库重建（对账导入新版本后调用）。
+  ///
+  /// **生成中一律不动**：正在流式输出的那条消息还没落库，用库里的列表覆盖
+  /// `_messages` 会让气泡当场消失（表现为"聊天气泡闪一下不见了"）。
+  void _reloadCurrentSession() {
+    if (_isGenerating) return;
+    final currentId = _currentSession?.id;
+    _sessions = _storage.getAllSessions();
+    if (currentId != null && _sessions.any((s) => s.id == currentId) && _storage.hasSession(currentId)) {
+      _currentSession = _sessions.firstWhere((s) => s.id == currentId);
+      _messages = _storage.getMessagesForSession(currentId);
+    } else if (_sessions.isNotEmpty) {
+      _currentSession = _sessions.first;
+      _messages = _storage.getMessagesForSession(_sessions.first.id);
+    }
+    notifyListeners();
+  }
+
+  /// 断流后向电脑端"取回结果"：**分多次**，而不是打一枪就走。
+  ///
+  /// 为什么必须重试：SSE 断掉时电脑端那一轮常常还在跑（实测 DSH 还在思考时，
+  /// 这一次对账必然落空）；而对账本身还可能被并发的同步挡掉
+  /// （`pullAndMergeMessages` 里有 `_isSyncing` 闸门，直接 return 0、连回调都不进）。
+  /// 中继会把这一轮跑完并按**同一个 messageId** 落库（server.ts 的 upsertMessage），
+  /// 所以只要坚持重试就一定补得回来；超时才留一句如实的说明。
+  Future<void> _retrieveInterruptedResult(String messageId) async {
+    for (var attempt = 0; attempt < 20; attempt++) {
+      // 前 6 次等 2 秒（电脑端通常几秒内就出结果），之后放慢到 4 秒，总计约 70 秒
+      await Future.delayed(Duration(seconds: attempt < 6 ? 2 : 4));
+      final local = _storage.getMessageById(messageId);
+      if (local == null) return; // 消息已被删除
+      if (!ChatMessage.isRetrievalPlaceholder(local.content)) return; // 已经补上了
+      await SyncService.instance.pullAndMergeMessages(
+        userId: settingsProvider.syncUserId,
+        clientSessionId: settingsProvider.clientSessionId,
+        onNewMessagesImported: _reloadCurrentSession,
+      );
+      final after = _storage.getMessageById(messageId);
+      if (after == null) return;
+      if (!ChatMessage.isRetrievalPlaceholder(after.content)) {
+        _reloadCurrentSession();
+        return;
+      }
+    }
+    final local = _storage.getMessageById(messageId);
+    if (local != null && ChatMessage.isRetrievalPlaceholder(local.content)) {
+      local.content = ChatMessage.interruptedTimeoutNote;
+      _storage.saveMessage(local);
+      _reloadCurrentSession();
+    }
+  }
+
   /// 有「Agent 刚回了话但用户还没看」的未读（Windows 托盘图标用它变绿）
   ///
   /// 只在窗口不在前台时才真的显示（判定在 TrayService 里）；
@@ -1094,12 +1192,17 @@ class ChatProvider extends ChangeNotifier {
     }
 
     final isAgentMode = settingsProvider.settings.defaultAgentMode;
+    // 开新一轮：清空上一轮的思考/步骤缓冲（也含被插话打断的半截）
+    _resetTurnTrace();
     final assistantMsg = ChatMessage(
       id: const Uuid().v4(),
       sessionId: _currentSession!.id,
       role: MessageRole.assistant,
       content: '',
-      reasoningContent: isAgentMode ? '> 🤖 正在连接本地 Agent 调度管道...\n' : '',
+      // Agent 模式下这里**不再预填** "🤖 正在连接本地 Agent 调度管道..."：那是
+      // 执行步骤、不是思考，预填会让人以为模型已经开始想了。宿主的真实思考到了
+      // 才显示（💭 流），等待期间正文区照旧显示"正在思考中…"。
+      reasoningContent: '',
       isStreaming: true,
       isAgentMode: isAgentMode,
     );
@@ -1185,15 +1288,19 @@ class ChatProvider extends ChangeNotifier {
 
             if (chunk['agent_started'] == true) {
               final step = chunk['initialStep']?.toString() ?? '任务已派发至本地 Harness';
-              assistantMsg.reasoningContent = '> 🤖 $step\n';
+              _stepLog.add(step);
               _turnPhase = TurnPhase.executing;
               notifyListeners();
               return;
             }
 
             if (chunk['step'] != null) {
-              final stepText = chunk['step'].toString();
-              assistantMsg.reasoningContent = (assistantMsg.reasoningContent ?? '') + '> ⚙️ $stepText\n';
+              _absorbStep(chunk['step'].toString());
+              // 思维链只显示宿主真实的思考（💭 流）；派发/工具/完成这些执行步骤
+              // 走 agentExecution，不再混进同一个字符串冒充"思考过程"。
+              if (_harnessThinking.isNotEmpty) {
+                assistantMsg.reasoningContent = _harnessThinking.toString();
+              }
               if (_turnPhase != TurnPhase.executing) _turnPhase = TurnPhase.executing;
               notifyListeners();
               return;
@@ -1210,7 +1317,24 @@ class ChatProvider extends ChangeNotifier {
             }
 
             if (chunk['agent_finished'] == true) {
-              assistantMsg.reasoningContent = (assistantMsg.reasoningContent ?? '') + '\n> ✅ 本地智能体执行完毕，正在整理分析结果...\n\n';
+              // 执行阶段结束：把这一轮的步骤固化下来（宿主回传的优先，缺失时用本地
+              // 实时收集的那份）。以前这里往思维链里追一句 "✅ 执行完毕"，现在
+              // 步骤有了自己的位置，不再污染思考文本。
+              final result = chunk['result'];
+              if (result is Map) {
+                final rec = AgentExecutionRecord.fromMap(result);
+                assistantMsg.agentExecution = AgentExecutionRecord(
+                  status: rec.status,
+                  steps: rec.steps.isNotEmpty ? rec.steps : List<String>.from(_stepLog),
+                  rawOutput: rec.rawOutput,
+                  timestamp: rec.timestamp,
+                );
+              } else if (_stepLog.isNotEmpty) {
+                assistantMsg.agentExecution = AgentExecutionRecord(
+                  status: 'completed',
+                  steps: List<String>.from(_stepLog),
+                );
+              }
               _turnPhase = TurnPhase.polishing;
               notifyListeners();
               return;
@@ -1222,11 +1346,24 @@ class ChatProvider extends ChangeNotifier {
               if (chunk['fullContent'] != null && chunk['fullContent'].toString().isNotEmpty) {
                 assistantMsg.content = chunk['fullContent'].toString();
               }
-              if (chunk['fullReasoning'] != null && chunk['fullReasoning'].toString().isNotEmpty) {
+              // 思维链优先用宿主那份**真实思考**（💭 流）。fullReasoning 是"润色"
+              // 那一步的模型（App 自己配的主模型）的思考，和宿主不是一回事 ——
+              // 以前无条件用它覆盖，卡片会在收尾瞬间整段换一次内容（用户看到的
+              // 就是"闪一下"），而且内容也不再是 DSH 里那份思考了。
+              if (_harnessThinking.isNotEmpty) {
+                assistantMsg.reasoningContent = _harnessThinking.toString();
+              } else if (chunk['fullReasoning'] != null && chunk['fullReasoning'].toString().isNotEmpty) {
                 assistantMsg.reasoningContent = chunk['fullReasoning'].toString();
+              } else if (_polishThinking.isNotEmpty) {
+                assistantMsg.reasoningContent = _polishThinking.toString();
               }
               if (chunk['agentExecution'] is Map) {
                 assistantMsg.agentExecution = AgentExecutionRecord.fromMap(chunk['agentExecution'] as Map<dynamic, dynamic>);
+              } else if (_stepLog.isNotEmpty) {
+                assistantMsg.agentExecution = AgentExecutionRecord(
+                  status: 'completed',
+                  steps: List<String>.from(_stepLog),
+                );
               }
               _storage.saveMessage(assistantMsg);
               SyncService.instance.pushMessages(
@@ -1249,7 +1386,10 @@ class ChatProvider extends ChangeNotifier {
             final reasoningDelta = chunk['reasoning'] as String? ?? '';
 
             if (reasoningDelta.isNotEmpty) {
-              assistantMsg.reasoningContent = (assistantMsg.reasoningContent ?? '') + reasoningDelta;
+              // Agent 模式的这段 reasoning 来自"润色"那一步的模型（中继是用 App
+              // 配的主模型去总结执行结果的），**不是宿主的思考** —— 只暂存不显示，
+              // 否则会混进思维链、让人以为是电脑端在想。
+              _polishThinking.write(reasoningDelta);
             }
             if (contentDelta.isNotEmpty) {
               assistantMsg.content += contentDelta;
@@ -1262,16 +1402,18 @@ class ChatProvider extends ChangeNotifier {
             }
             assistantMsg.isStreaming = false;
             // 流断了 ≠ 没答案：服务端那一轮通常还在跑完、并把完整结果落库。
-            // 这里只留一句轻提示（不再吓唬用户"桥接离线"），然后立刻对账拉取 ——
-            // 漫游合并会用云端更完整的版本覆盖本地这半截（见 pullAndMergeMessages）。
+            // 这里只留一句轻提示（不再吓唬用户"桥接离线"），然后**反复**对账 ——
+            // 以前只拉一次：电脑端那一轮往往还在跑（实测 DSH 还在思考时必然落空），
+            // 而对账本身还可能被并发的同步挡掉（pullAndMergeMessages 的 _isSyncing
+            // 闸门会直接 return 0），于是占位文案就永久挂在那儿、再也取不回来。
             if (assistantMsg.content.trim().isEmpty) {
-              assistantMsg.content = '（连接中断，正在向电脑端取回结果…）';
+              assistantMsg.content = ChatMessage.interruptedPlaceholder;
             }
             _storage.saveMessage(assistantMsg);
             _isGenerating = false;
             _cancelToken = null;
             notifyListeners();
-            _silentSyncFromServer();
+            unawaited(_retrieveInterruptedResult(assistantMsg.id));
           },
           onDone: () {
             if (assistantMsg.isStreaming) {
@@ -1578,12 +1720,17 @@ class ChatProvider extends ChangeNotifier {
 
     // 3. 构建新的流式助理消息
     final isAgentMode = settingsProvider.settings.defaultAgentMode;
+    // 开新一轮：清空上一轮的思考/步骤缓冲（也含被插话打断的半截）
+    _resetTurnTrace();
     final assistantMsg = ChatMessage(
       id: const Uuid().v4(),
       sessionId: _currentSession!.id,
       role: MessageRole.assistant,
       content: '',
-      reasoningContent: isAgentMode ? '> 🤖 正在连接本地 Agent 调度管道...\n' : '',
+      // Agent 模式下这里**不再预填** "🤖 正在连接本地 Agent 调度管道..."：那是
+      // 执行步骤、不是思考，预填会让人以为模型已经开始想了。宿主的真实思考到了
+      // 才显示（💭 流），等待期间正文区照旧显示"正在思考中…"。
+      reasoningContent: '',
       isStreaming: true,
       isAgentMode: isAgentMode,
     );
@@ -1667,15 +1814,19 @@ class ChatProvider extends ChangeNotifier {
 
             if (chunk['agent_started'] == true) {
               final step = chunk['initialStep']?.toString() ?? '任务已派发至本地 Harness';
-              assistantMsg.reasoningContent = '> 🤖 $step\n';
+              _stepLog.add(step);
               _turnPhase = TurnPhase.executing;
               notifyListeners();
               return;
             }
 
             if (chunk['step'] != null) {
-              final stepText = chunk['step'].toString();
-              assistantMsg.reasoningContent = (assistantMsg.reasoningContent ?? '') + '> ⚙️ $stepText\n';
+              _absorbStep(chunk['step'].toString());
+              // 思维链只显示宿主真实的思考（💭 流）；派发/工具/完成这些执行步骤
+              // 走 agentExecution，不再混进同一个字符串冒充"思考过程"。
+              if (_harnessThinking.isNotEmpty) {
+                assistantMsg.reasoningContent = _harnessThinking.toString();
+              }
               if (_turnPhase != TurnPhase.executing) _turnPhase = TurnPhase.executing;
               notifyListeners();
               return;
@@ -1692,7 +1843,24 @@ class ChatProvider extends ChangeNotifier {
             }
 
             if (chunk['agent_finished'] == true) {
-              assistantMsg.reasoningContent = (assistantMsg.reasoningContent ?? '') + '\n> ✅ 本地智能体执行完毕，正在整理分析结果...\n\n';
+              // 执行阶段结束：把这一轮的步骤固化下来（宿主回传的优先，缺失时用本地
+              // 实时收集的那份）。以前这里往思维链里追一句 "✅ 执行完毕"，现在
+              // 步骤有了自己的位置，不再污染思考文本。
+              final result = chunk['result'];
+              if (result is Map) {
+                final rec = AgentExecutionRecord.fromMap(result);
+                assistantMsg.agentExecution = AgentExecutionRecord(
+                  status: rec.status,
+                  steps: rec.steps.isNotEmpty ? rec.steps : List<String>.from(_stepLog),
+                  rawOutput: rec.rawOutput,
+                  timestamp: rec.timestamp,
+                );
+              } else if (_stepLog.isNotEmpty) {
+                assistantMsg.agentExecution = AgentExecutionRecord(
+                  status: 'completed',
+                  steps: List<String>.from(_stepLog),
+                );
+              }
               _turnPhase = TurnPhase.polishing;
               notifyListeners();
               return;
@@ -1704,11 +1872,24 @@ class ChatProvider extends ChangeNotifier {
               if (chunk['fullContent'] != null && chunk['fullContent'].toString().isNotEmpty) {
                 assistantMsg.content = chunk['fullContent'].toString();
               }
-              if (chunk['fullReasoning'] != null && chunk['fullReasoning'].toString().isNotEmpty) {
+              // 思维链优先用宿主那份**真实思考**（💭 流）。fullReasoning 是"润色"
+              // 那一步的模型（App 自己配的主模型）的思考，和宿主不是一回事 ——
+              // 以前无条件用它覆盖，卡片会在收尾瞬间整段换一次内容（用户看到的
+              // 就是"闪一下"），而且内容也不再是 DSH 里那份思考了。
+              if (_harnessThinking.isNotEmpty) {
+                assistantMsg.reasoningContent = _harnessThinking.toString();
+              } else if (chunk['fullReasoning'] != null && chunk['fullReasoning'].toString().isNotEmpty) {
                 assistantMsg.reasoningContent = chunk['fullReasoning'].toString();
+              } else if (_polishThinking.isNotEmpty) {
+                assistantMsg.reasoningContent = _polishThinking.toString();
               }
               if (chunk['agentExecution'] is Map) {
                 assistantMsg.agentExecution = AgentExecutionRecord.fromMap(chunk['agentExecution'] as Map<dynamic, dynamic>);
+              } else if (_stepLog.isNotEmpty) {
+                assistantMsg.agentExecution = AgentExecutionRecord(
+                  status: 'completed',
+                  steps: List<String>.from(_stepLog),
+                );
               }
               _storage.saveMessage(assistantMsg);
               SyncService.instance.pushMessages(
@@ -1730,7 +1911,10 @@ class ChatProvider extends ChangeNotifier {
             final reasoningDelta = chunk['reasoning'] as String? ?? '';
 
             if (reasoningDelta.isNotEmpty) {
-              assistantMsg.reasoningContent = (assistantMsg.reasoningContent ?? '') + reasoningDelta;
+              // Agent 模式的这段 reasoning 来自"润色"那一步的模型（中继是用 App
+              // 配的主模型去总结执行结果的），**不是宿主的思考** —— 只暂存不显示，
+              // 否则会混进思维链、让人以为是电脑端在想。
+              _polishThinking.write(reasoningDelta);
             }
             if (contentDelta.isNotEmpty) {
               assistantMsg.content += contentDelta;
@@ -1743,16 +1927,18 @@ class ChatProvider extends ChangeNotifier {
             }
             assistantMsg.isStreaming = false;
             // 流断了 ≠ 没答案：服务端那一轮通常还在跑完、并把完整结果落库。
-            // 这里只留一句轻提示（不再吓唬用户"桥接离线"），然后立刻对账拉取 ——
-            // 漫游合并会用云端更完整的版本覆盖本地这半截（见 pullAndMergeMessages）。
+            // 这里只留一句轻提示（不再吓唬用户"桥接离线"），然后**反复**对账 ——
+            // 以前只拉一次：电脑端那一轮往往还在跑（实测 DSH 还在思考时必然落空），
+            // 而对账本身还可能被并发的同步挡掉（pullAndMergeMessages 的 _isSyncing
+            // 闸门会直接 return 0），于是占位文案就永久挂在那儿、再也取不回来。
             if (assistantMsg.content.trim().isEmpty) {
-              assistantMsg.content = '（连接中断，正在向电脑端取回结果…）';
+              assistantMsg.content = ChatMessage.interruptedPlaceholder;
             }
             _storage.saveMessage(assistantMsg);
             _isGenerating = false;
             _cancelToken = null;
             notifyListeners();
-            _silentSyncFromServer();
+            unawaited(_retrieveInterruptedResult(assistantMsg.id));
           },
           onDone: () {
             if (assistantMsg.isStreaming) {
@@ -1912,6 +2098,14 @@ class ChatProvider extends ChangeNotifier {
     _isGenerating = false;
     if (_messages.isNotEmpty && _messages.last.isStreaming) {
       _messages.last.isStreaming = false;
+      // 手动停止也要把这一轮已经跑过的执行步骤固化下来：否则卡片里只剩思考、
+      // 看不到"到底做到哪一步了"（实时步骤只在 isStreaming 时展示）。
+      if (_messages.last.agentExecution == null && _stepLog.isNotEmpty) {
+        _messages.last.agentExecution = AgentExecutionRecord(
+          status: 'cancelled',
+          steps: List<String>.from(_stepLog),
+        );
+      }
       // 若刚生成气泡尚未吐出任何字且无推理内容，清理空占位
       if (_messages.last.content.isEmpty && (_messages.last.reasoningContent?.isEmpty ?? true)) {
         final emptyId = _messages.last.id;
