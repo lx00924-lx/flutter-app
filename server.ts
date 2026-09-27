@@ -4519,6 +4519,23 @@ if %errorlevel% neq 0 (
   }
   const appSockets = new Map<string, AppSocket>();
 
+  /**
+   * 只推给某一个会话（对应 socket.io 的 `session_<clientSessionId>` 房间）。
+   *
+   * 为什么必须有：顶号通知同时发往 `session_<被顶的旧id>` 与
+   * `user_<用户名>_<设备类型>`。镜像层如果只认 `user_*` 前缀，`session_*`
+   * 就会落进 pushToAll（推给**所有**在线连接）—— 实测手机端因此收到了
+   * 电脑端的顶号通知。appSockets 的 key 正好就是 clientSessionId，直接查表即可。
+   */
+  const pushToSession = (clientSessionId: string, event: string, payload: any) => {
+    if (!clientSessionId) return;
+    const conn = appSockets.get(clientSessionId);
+    if (!conn || conn.ws.readyState !== WSWebSocket.OPEN) return;
+    try {
+      conn.ws.send(JSON.stringify({ event, data: payload ?? null, at: Date.now() }));
+    } catch {}
+  };
+
   const pushToUser = (userId: string, event: string, payload: any, deviceType?: string) => {
     if (!userId) return;
     for (const conn of appSockets.values()) {
@@ -4558,11 +4575,16 @@ if %errorlevel% neq 0 (
     const originalTargetEmit = target.emit.bind(target);
     target.emit = (event: string, ...args: any[]) => {
       try {
-        // room 形如 user_<userId> 或 user_<userId>_<deviceType>：
-        // 前者推给该用户全部设备，后者只推给对应设备类型。
-        const m = typeof room === "string" ? /^user_(.+?)(?:_(mobile|desktop))?$/.exec(room) : null;
-        if (m && m[1]) pushToUser(m[1], event, args[0], m[2]);
-        else pushToAll(event, args[0]);
+        if (typeof room === "string" && room.startsWith("session_")) {
+          // session_<clientSessionId>：只推给那一个会话的连接，绝不能全推
+          pushToSession(room.slice("session_".length), event, args[0]);
+        } else {
+          // room 形如 user_<userId> 或 user_<userId>_<deviceType>：
+          // 前者推给该用户全部设备，后者只推给对应设备类型。
+          const m = /^user_(.+?)(?:_(mobile|desktop))?$/.exec(room);
+          if (m && m[1]) pushToUser(m[1], event, args[0], m[2]);
+          else pushToAll(event, args[0]);
+        }
       } catch {}
       return originalTargetEmit(event, ...args);
     };
