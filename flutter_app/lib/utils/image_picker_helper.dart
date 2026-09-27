@@ -4,8 +4,49 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import '../services/storage_path_service.dart';
+
+/// `compute` 入口：把图片解码后压进"字节预算"里。
+///
+/// 放在顶层（isolate 入口必须是顶层/静态函数），返回 JPEG 字节；解码失败返回 null。
+/// 策略：先按最长边缩到 [maxDimension]（仅当原图更大），再按 82 质量编码 JPEG；
+/// 若仍超过 [maxBytes] 就每轮 ×0.75 继续降分辨率，最多 6 轮或到 64px 为止。
+Uint8List? _compressImageToBudget(Map<String, dynamic> request) {
+  final bytes = request['bytes'] as Uint8List?;
+  final maxDimension = (request['maxDimension'] as int?) ?? 1024;
+  final maxBytes = (request['maxBytes'] as int?) ?? 256 * 1024;
+  if (bytes == null || bytes.isEmpty) return null;
+
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) return null;
+  var current = decoded;
+
+  final longest = current.width >= current.height ? current.width : current.height;
+  if (longest > maxDimension) {
+    current = current.width >= current.height
+        ? img.copyResize(current, width: maxDimension, interpolation: img.Interpolation.average)
+        : img.copyResize(current, height: maxDimension, interpolation: img.Interpolation.average);
+  }
+
+  var encoded = img.encodeJpg(current, quality: 82);
+  var round = 0;
+  while (encoded.length > maxBytes && round < 6) {
+    round++;
+    final nextWidth = (current.width * 0.75).round();
+    final nextHeight = (current.height * 0.75).round();
+    if (nextWidth < 64 || nextHeight < 64) break;
+    current = img.copyResize(
+      current,
+      width: nextWidth,
+      height: nextHeight,
+      interpolation: img.Interpolation.average,
+    );
+    encoded = img.encodeJpg(current, quality: 82);
+  }
+  return encoded;
+}
 
 /// 选取的通用文件元数据
 class PickedFileData {
@@ -185,17 +226,69 @@ class ImagePickerHelper {
     return null;
   }
 
+  /// 把**已有的** data URI 压进预算（用于历史遗留的超大图片字段）。
+  ///
+  /// 与 [pickImageAsBase64] 共用同一条压缩链路，失败返回 null（调用方保留原值）。
+  static Future<String?> compressImageDataUri(
+    String dataUri, {
+    required int maxDimension,
+    required int maxBytes,
+  }) async {
+    try {
+      if (!dataUri.startsWith('data:image/') || !dataUri.contains(',')) return null;
+      final bytes = base64Decode(dataUri.split(',').last);
+      if (bytes.isEmpty) return null;
+      final compressed = await compute(_compressImageToBudget, <String, dynamic>{
+        'bytes': bytes,
+        'maxDimension': maxDimension,
+        'maxBytes': maxBytes,
+      });
+      if (compressed == null || compressed.isEmpty) return null;
+      return 'data:image/jpeg;base64,${base64Encode(compressed)}';
+    } catch (e) {
+      debugPrint('compressImageDataUri error: $e');
+      return null;
+    }
+  }
+
   /// 选择图片并直接转为 Base64 字符串（用于头像、背景图、启动图等设置项）
-  static Future<String?> pickImageAsBase64({int maxDimension = 1024}) async {
+  ///
+  /// [maxBytes] > 0 时启用**预算压缩**：解码 → 按最长边缩放 → JPEG 编码，仍超预算
+  /// 就继续降分辨率（最多 6 轮），全程在后台 isolate 里做。
+  ///
+  /// 为什么必须预算压缩：这些字段跟着设置一起走云端漫游，历史上出现过一张
+  /// **6.14 MB 的 base64 头像**（旧实现把照片缩到 1024px 后仍用 PNG 无损编码，
+  /// `quality` 参数根本没生效）→ 每次改设置都要整包上传 6.6 MB → 中继的设置写锁
+  /// 被长时间占住：桥接注册的归属反查（要读 6.9 MB 设置文件）12 次重试全落空报
+  /// **403**、App 的设置推送连续 **2 分钟超时**、SSE 流被拖断（用户看到"连接中断"）。
+  /// 头像在界面上只有几十像素，背景也不需要原图分辨率，压到预算内完全够用。
+  static Future<String?> pickImageAsBase64({
+    int maxDimension = 1024,
+    int maxBytes = 0,
+  }) async {
     try {
       final processed = await pickImageFromGallery();
       if (processed == null) return null;
 
+      final rawBase64 = processed.highResBase64.contains(',')
+          ? processed.highResBase64.split(',').last
+          : processed.highResBase64;
+      final rawBytes = base64Decode(rawBase64);
+
+      // 预算模式：交给后台 isolate 压到目标字节数以内（JPEG）
+      if (maxBytes > 0) {
+        final compressed = await compute(_compressImageToBudget, <String, dynamic>{
+          'bytes': rawBytes,
+          'maxDimension': maxDimension,
+          'maxBytes': maxBytes,
+        });
+        if (compressed != null && compressed.isNotEmpty) {
+          return 'data:image/jpeg;base64,${base64Encode(compressed)}';
+        }
+        debugPrint('预算压缩未产出结果，退回 PNG 缩放路径');
+      }
+
       if (maxDimension > 0) {
-        final rawBase64 = processed.highResBase64.contains(',')
-            ? processed.highResBase64.split(',').last
-            : processed.highResBase64;
-        final rawBytes = base64Decode(rawBase64);
         final resized = await resizeImageBytes(rawBytes, maxDimension: maxDimension);
         final mime = processed.highResBase64.startsWith('data:image/jpeg')
             ? 'image/jpeg'

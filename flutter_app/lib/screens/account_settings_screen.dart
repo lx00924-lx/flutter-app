@@ -336,7 +336,11 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
                           icon: const Icon(Icons.image_outlined, size: 16),
                           label: const Text('选择图片'),
                           onPressed: () async {
-                            final base64Image = await ImagePickerHelper.pickImageAsBase64();
+                            // 用户头像：界面最大只有 44px 半径，压到 128 KB 足够清楚
+                            final base64Image = await ImagePickerHelper.pickImageAsBase64(
+                              maxDimension: 512,
+                              maxBytes: 128 * 1024,
+                            );
                             if (base64Image != null && mounted) {
                               s.userAvatar = base64Image;
                               sp.updateSettings(s);
@@ -385,7 +389,10 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
                         icon: const Icon(Icons.image_outlined, size: 16),
                         label: const Text('选择图片'),
                         onPressed: () async {
-                          final base64Image = await ImagePickerHelper.pickImageAsBase64();
+                          final base64Image = await ImagePickerHelper.pickImageAsBase64(
+                            maxDimension: 512,
+                            maxBytes: 128 * 1024,
+                          );
                           if (base64Image != null && mounted) {
                             s.aiAvatar = base64Image;
                             sp.updateSettings(s);

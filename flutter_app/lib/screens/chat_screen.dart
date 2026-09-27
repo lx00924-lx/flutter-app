@@ -221,10 +221,16 @@ class _ChatScreenState extends State<ChatScreen> {
       final isSessionSwitched = chat.currentSession?.id != _lastSessionId;
       _lastMessageCount = chat.messages.length;
       _lastSessionId = chat.currentSession?.id;
-      // 会话切换或收到新消息时，重置用户上滑与手势交互状态并强制吸底
+      // 会话切换或收到新消息时，重置用户上滑与手势交互状态并强制吸底。
+      //
+      // 但"消息条数变了"并不都是用户自己发的：云端迟到的回答、另一端同步过来的
+      // 消息也会让条数变化 —— 以前一律 force:true，等于把正在往上翻历史的用户
+      // 硬拽回底部（用户实测反馈："消息框位置不对"）。现在只有**本机正在生成**
+      // （= 用户刚发了消息）或切换会话时才强制吸底，其余情况尊重用户当前位置。
+      final shouldForce = isSessionSwitched || chat.isGenerating;
       _userScrolledUp = false;
       _isUserInteracting = false;
-      _scrollToBottom(animate: !isSessionSwitched, force: true);
+      _scrollToBottom(animate: !isSessionSwitched, force: shouldForce);
     } else if (chat.isGenerating) {
       _scrollToBottom(animate: false);
     }

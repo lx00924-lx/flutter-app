@@ -42,6 +42,12 @@ dependencies:
   path_provider: ^2.1.3
   file_picker: ^8.0.3
   image_picker: ^1.1.2
+  # 纯 Dart 图像编解码：头像/背景图在**上传前**压成小尺寸 JPEG。
+  # 为什么必须压：这些字段跟着设置上云，历史上一张头像 base64 达 6.14 MB，
+  # 每次改设置都要整包上传 6.6 MB → 中继设置写锁被占住（桥接归属反查 403、
+  # App 推送 2 分钟超时、SSE 被拖断）。它本来就是 image_picker 的传递依赖，
+  # 这里显式声明以便直接调用（不新增下载）。
+  image: ^4.10.1
   record: ^5.2.0
   audioplayers: ^6.0.0
   flutter_tts: ^4.2.2

@@ -1809,10 +1809,16 @@ async def execute_dsh_sse_stream(
     permission: str,
     on_step_callback,
     extra_chat_config: dict = None,
-    on_approval_callback = None
+    on_approval_callback = None,
+    on_content_callback = None
 ):
     """
     通过宿主 3080 SSE 流式端点 (POST /v1/agent/prompt/stream) 执行任务并实时推送思考与工具事件
+
+    on_content_callback: 宿主正在产出的**正文**（assistant 的 text 块）增量。
+    为什么要单独一路：以前正文只在整轮结束时才作为 output 回传，于是「宿主在等用户
+    拍板」的那段时间里，App 上只有思考与工具步骤、看不到 Agent 说的任何一句话
+    （用户实测反馈："没有展示你给我发的内容"）。
     """
     loop = asyncio.get_running_loop()
     endpoints = [
@@ -1961,6 +1967,11 @@ async def execute_dsh_sse_stream(
                 txt = parsed_json.get("content", "")
                 if txt:
                     accumulated_content.append(txt)
+                    if on_content_callback:
+                        try:
+                            await on_content_callback(txt)
+                        except Exception:
+                            pass
             elif ev_type == "tool_start":
                 tool_name = parsed_json.get("tool", "工具")
                 tool_input = parsed_json.get("input", "")
@@ -2307,7 +2318,8 @@ async def execute_local_harness(
     on_step_callback,
     extra_chat_config: dict = None,
     target_workspace: str = "",
-    on_approval_callback = None
+    on_approval_callback = None,
+    on_content_callback = None
 ):
     harness_base = harness_url.rstrip("/")
     extra_chat_config = extra_chat_config or {}
@@ -2346,7 +2358,8 @@ async def execute_local_harness(
             permission=permission,
             on_step_callback=on_step_callback,
             extra_chat_config=extra_chat_config,
-            on_approval_callback=on_approval_callback
+            on_approval_callback=on_approval_callback,
+            on_content_callback=on_content_callback
         )
         if sse_ok and sse_out and not is_html_content(sse_out):
             await on_step_callback("✅ [3/3] 本地 Agent 宿主智能体已完成本轮所有操作，正在向 App 调度中心回传结果...")
@@ -3085,6 +3098,25 @@ async def run_bridge_client(args):
                         except Exception:
                             pass
 
+                    async def ws_content_cb(content_text: str):
+                        """宿主正在产出的正文（assistant 的 text 块）实时上报。
+
+                        以前正文只在整轮结束时回传：用户在"等选择答案"期间看不到
+                        Agent 说的任何一句话（实测反馈）。这里增量直发，中继转成
+                        SSE chunk 交给 App 追加到气泡上。
+                        """
+                        if not content_text:
+                            return
+                        try:
+                            await ws.send(json.dumps({
+                                "type": "agent_content",
+                                "taskId": task_id,
+                                "content": content_text,
+                                "timestamp": int(time.time() * 1000)
+                            }))
+                        except Exception:
+                            pass
+
                     async def ws_approval_cb(approval_data: dict):
                         try:
                             await ws.send(json.dumps({
@@ -3112,7 +3144,7 @@ async def run_bridge_client(args):
                             await ws_step_cb(output)
                         else:
                             success, output = await execute_local_harness(
-                                task_id, prompt, messages, harness_url, model_name, session_id, ws_step_cb, extra_config, target_workspace=target_ws, on_approval_callback=ws_approval_cb
+                                task_id, prompt, messages, harness_url, model_name, session_id, ws_step_cb, extra_config, target_workspace=target_ws, on_approval_callback=ws_approval_cb, on_content_callback=ws_content_cb
                             )
                     except Exception as task_err:
                         success = False

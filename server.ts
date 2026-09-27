@@ -2315,6 +2315,21 @@ async function startServer() {
       sendEvent("step", { step: data.step, taskId: data.taskId });
     };
 
+    /**
+     * 宿主这一轮正在产出的**正文**（assistant 的 text 块），实时透给 App。
+     *
+     * 以前正文只在整轮结束时才回传（`agent_result.output` → 润色 → done），于是
+     * 「宿主在等用户拍板」的这段时间里，App 上只有思考与工具步骤、看不到 Agent
+     * 说的任何一句话（用户实测反馈："没有展示你给我发的内容"）。桥接现在把
+     * harness 的 content 增量单独上报，这里按 chunk 发给客户端 —— 客户端本来就会
+     * 把 content 追加到气泡上，最终 done 仍会用完整版本覆盖。
+     */
+    const contentHandler = (data: any) => {
+      if (data.messageId === assistantMessageId && data.content) {
+        sendEvent("chunk", { content: String(data.content) });
+      }
+    };
+
     const taskStartedHandler = (data: any) => {
       if (data.messageId === assistantMessageId) {
         sendEvent("agent_started", { initialStep: data.initialStep, taskId: data.taskId });
@@ -2381,6 +2396,7 @@ async function startServer() {
       clearInterval(heartbeat);
       generationEvents.off(`chunk_${assistantMessageId}`, chunkHandler);
       generationEvents.off(`step_${assistantMessageId}`, stepHandler);
+      generationEvents.off(`content_${assistantMessageId}`, contentHandler);
       generationEvents.off(`task_started_${assistantMessageId}`, taskStartedHandler);
       generationEvents.off(`task_finished_${assistantMessageId}`, taskFinishedHandler);
       generationEvents.off(`phase_${assistantMessageId}`, phaseHandler);
@@ -2402,6 +2418,7 @@ async function startServer() {
 
     generationEvents.on(`chunk_${assistantMessageId}`, chunkHandler);
     generationEvents.on(`step_${assistantMessageId}`, stepHandler);
+    generationEvents.on(`content_${assistantMessageId}`, contentHandler);
     generationEvents.on(`task_started_${assistantMessageId}`, taskStartedHandler);
     generationEvents.on(`task_finished_${assistantMessageId}`, taskFinishedHandler);
     generationEvents.on(`phase_${assistantMessageId}`, phaseHandler);
@@ -2529,11 +2546,39 @@ async function startServer() {
     }
   });
 
+  /**
+   * 设置负载体积护栏（返回 true 表示已拒绝，调用方直接 return）。
+   *
+   * 图像字段是历史事故点：一张 6.14 MB 的 base64 头像让每次设置推送变成 6.6 MB
+   * 上传，中继的设置写锁被长时间占住 —— 桥接注册的归属反查（要读 6.9 MB 设置文件）
+   * 12 次重试全落空报 403、App 推送连续 2 分钟超时、SSE 被拖断（用户看到"连接中断"）。
+   * App 侧已把图片压进预算（头像 128 KB / 背景 480 KB），这里再硬挡一道：
+   * 超限明确报 413，而不是默默写进文件继续拖垮所有人。
+   */
+  const settingsPayloadGuard = (payload: any, userId: string, res: any): boolean => {
+    let size = 0;
+    try {
+      size = Buffer.byteLength(JSON.stringify(payload ?? {}), "utf8");
+    } catch {
+      return false;
+    }
+    const limit = 2 * 1024 * 1024;
+    if (size <= limit) return false;
+    const mb = (size / 1024 / 1024).toFixed(2);
+    console.warn(`[Settings] 拒绝过大的设置负载: user=${userId} size=${mb}MB`);
+    res.status(413).json({
+      error: `设置体积过大（${mb} MB，上限 2 MB）：请检查头像 / 聊天背景图片是否过大`,
+      code: "SETTINGS_TOO_LARGE",
+    });
+    return true;
+  };
+
   app.post("/api/settings/:userId", async (req, res) => {
     const userId = (req.params.userId || "").trim();
     if (!userId || userId === 'guest') {
       return res.json({ success: true, message: "Guest settings ignored" });
     }
+    if (settingsPayloadGuard(req.body, userId, res)) return;
     const newSettings = sanitizeSettings(req.body || {});
     try {
       await withFileLock(SETTINGS_FILE, async () => {
@@ -2560,6 +2605,7 @@ async function startServer() {
     if (!cleanUserId || cleanUserId === 'guest') {
       return res.json({ success: true, message: "Guest settings ignored" });
     }
+    if (settingsPayloadGuard(settings, cleanUserId, res)) return;
     const cleanSettings = sanitizeSettings(settings || {});
     try {
       await withFileLock(SETTINGS_FILE, async () => {
@@ -4818,6 +4864,16 @@ if %errorlevel% neq 0 (
               generationEvents.emit(`step_${pending.assistantMessageId}`, {
                 taskId: msg.taskId,
                 step: msg.step,
+              });
+            }
+          } else if (msg.type === "agent_content") {
+            // 宿主正在产出的正文：实时转给 App（不落库、不改 genState，
+            // 最终内容仍以 agent_result / done 的完整版本为准）
+            const pending = pendingAgentTasks.get(msg.taskId);
+            if (pending && msg.content) {
+              generationEvents.emit(`content_${pending.assistantMessageId}`, {
+                messageId: pending.assistantMessageId,
+                content: String(msg.content),
               });
             }
           } else if (msg.type === "agent_result") {

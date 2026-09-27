@@ -162,7 +162,11 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
                         icon: const Icon(Icons.image_outlined, size: 16),
                         label: const Text('选择图片'),
                         onPressed: () async {
-                          final base64Image = await ImagePickerHelper.pickImageAsBase64();
+                          // 聊天背景：铺满屏，预算放到 480 KB（原图分辨率没必要上云）
+                          final base64Image = await ImagePickerHelper.pickImageAsBase64(
+                            maxDimension: 1440,
+                            maxBytes: 480 * 1024,
+                          );
                           if (base64Image != null && mounted) {
                             s.customBackground = base64Image;
                             sp.updateSettings(s);
@@ -312,7 +316,11 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
                         icon: const Icon(Icons.photo_outlined, size: 16),
                         label: const Text('选择图片'),
                         onPressed: () async {
-                          final base64Image = await ImagePickerHelper.pickImageAsBase64();
+                          // 启动页图片：预算 320 KB
+                          final base64Image = await ImagePickerHelper.pickImageAsBase64(
+                            maxDimension: 1080,
+                            maxBytes: 320 * 1024,
+                          );
                           if (base64Image != null && mounted) {
                             s.splashImage = base64Image;
                             sp.updateSettings(s);

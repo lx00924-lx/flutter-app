@@ -45,6 +45,10 @@ class SettingsProvider extends ChangeNotifier {
     // 异步拉取服务端维护的模型上下文上限表
     fetchAndApplyModelLimits();
 
+    // 历史遗留的超大图像字段（旧版本 PNG 无损编码留下的 MB 级 base64）就地压缩，
+    // 免得它继续把每次设置推送顶成几 MB 的上传。后台跑，不阻塞启动。
+    unawaited(_shrinkOversizedMediaIfNeeded());
+
     // 若已登录，立即启动多端互斥监听与云端设置静默同步
     if (_settings.isLoggedIn && _settings.loginAccount.trim().isNotEmpty) {
       _startSessionMonitoring();
@@ -73,6 +77,84 @@ class SettingsProvider extends ChangeNotifier {
     _userAvatarBytes = ImagePickerHelper.decodeBase64Image(_settings.userAvatar);
     _aiAvatarBytes = ImagePickerHelper.decodeBase64Image(_settings.aiAvatar);
     _customBackgroundBytes = ImagePickerHelper.decodeBase64Image(_settings.customBackground);
+  }
+
+  /// 各图像字段的"上云预算"（与选择图片时的参数保持一致）。
+  static int _mediaBudgetBytes(String key) {
+    switch (key) {
+      case 'aiAvatar':
+      case 'userAvatar':
+        return 128 * 1024;
+      case 'customBackground':
+        return 480 * 1024;
+      case 'splashImage':
+        return 320 * 1024;
+      default:
+        return 512 * 1024;
+    }
+  }
+
+  static int _mediaBudgetDimension(String key) {
+    switch (key) {
+      case 'aiAvatar':
+      case 'userAvatar':
+        return 512;
+      case 'customBackground':
+        return 1440;
+      case 'splashImage':
+        return 1080;
+      default:
+        return 1024;
+    }
+  }
+
+  void _applyMediaValue(String key, String value) {
+    switch (key) {
+      case 'aiAvatar':
+        _settings.aiAvatar = value;
+        break;
+      case 'userAvatar':
+        _settings.userAvatar = value;
+        break;
+      case 'customBackground':
+        _settings.customBackground = value;
+        break;
+      case 'splashImage':
+        _settings.splashImage = value;
+        break;
+    }
+  }
+
+  /// 把历史遗留的**超大图像字段**就地压到预算内（启动后后台跑一次）。
+  ///
+  /// 为什么需要：旧版本把照片缩到 1024px 后仍用 PNG 无损编码（`quality` 参数其实
+  /// 没生效），实测留下过一个 **6.14 MB 的 base64 头像**。它跟着设置上云，于是每次
+  /// 改设置都要整包上传 6.6 MB —— 中继设置写锁被占死、桥接归属反查 403、App 推送
+  /// 连续 2 分钟超时、SSE 被拖断。这里在本地先压小并保存，下一次推送就会用压缩版
+  /// 覆盖云端那份旧的（中继按键合并，服务端只保留最新一份）。
+  Future<void> _shrinkOversizedMediaIfNeeded() async {
+    var changed = false;
+    for (final key in AppSettings.mediaSettingKeys) {
+      final value = _mediaValueOf(key);
+      if (value.isEmpty || !value.startsWith('data:image/') || !value.contains(',')) continue;
+      final approxBytes = (value.length * 3) ~/ 4; // base64 → 原始字节的粗略估算
+      if (approxBytes <= _mediaBudgetBytes(key)) continue;
+      final compressed = await ImagePickerHelper.compressImageDataUri(
+        value,
+        maxDimension: _mediaBudgetDimension(key),
+        maxBytes: _mediaBudgetBytes(key),
+      );
+      if (compressed == null || compressed.length >= value.length) continue;
+      _applyMediaValue(key, compressed);
+      changed = true;
+      debugPrint('[Settings] 超大图像字段已就地压缩: $key '
+          '${(value.length / 1024 / 1024).toStringAsFixed(2)}MB → '
+          '${(compressed.length / 1024).toStringAsFixed(0)}KB');
+    }
+    if (changed) {
+      _updateImageCache();
+      _save();
+    }
   }
 
   void toggleTheme() {
@@ -1045,15 +1127,88 @@ class SettingsProvider extends ChangeNotifier {
   void _debouncePushSettings() {
     _cloudPushDebounceTimer?.cancel();
     _cloudPushDebounceTimer = Timer(const Duration(milliseconds: 1200), () {
-      if (_settings.isLoggedIn && _settings.loginAccount.trim().isNotEmpty && _settings.loginAccount.trim() != 'guest') {
-        SyncService.instance.pushSettings(
-          userId: _settings.loginAccount,
-          settings: _settings,
-          clientSessionId: _settings.clientSessionId,
-        );
-      }
+      unawaited(_pushSettingsGated());
     });
   }
+
+  /// 本会话内**已经成功推上云**的图像字段指纹（key → 内容哈希）。
+  ///
+  /// 图像字段（头像/背景/启动图）几十到几百 KB，而设置推送是每次改动都整包发的；
+  /// 没有这层闸门时，"改一个开关"也会顺带把图片重传一遍（历史事故：一张 6.14 MB
+  /// 的头像让每次推送变成 6.6 MB 上传，把中继设置写锁占死 → 桥接归属反查 403、
+  /// App 推送 2 分钟超时、SSE 被拖断）。这里记住已推过的内容，没变就省略该字段
+  /// （中继按键合并，省略 = 保留服务端那份）。
+  final Map<String, String> _pushedMediaHashes = <String, String>{};
+
+  /// 轻量稳定哈希（FNV-1a）：只用于"内容有没有变"，不需要密码学强度，
+  /// 但要跨进程稳定，所以不能用 String.hashCode。
+  static String _contentFingerprint(String value) {
+    var hash = 0x811c9dc5;
+    for (var i = 0; i < value.length; i++) {
+      hash ^= value.codeUnitAt(i);
+      hash = (hash * 0x01000193) & 0xFFFFFFFF;
+    }
+    return '${value.length}-${hash.toRadixString(16)}';
+  }
+
+  String _mediaValueOf(String key) {
+    switch (key) {
+      case 'aiAvatar':
+        return _settings.aiAvatar;
+      case 'userAvatar':
+        return _settings.userAvatar;
+      case 'customBackground':
+        return _settings.customBackground;
+      case 'splashImage':
+        return _settings.splashImage;
+      default:
+        return '';
+    }
+  }
+
+  /// 把设置推到云端（图像字段按需省略），成功则记下这次的图片指纹。
+  Future<bool> _pushSettingsGated() async {
+    if (!_settings.isLoggedIn ||
+        _settings.loginAccount.trim().isEmpty ||
+        _settings.loginAccount.trim() == 'guest') {
+      return false;
+    }
+    final omit = <String>{};
+    for (final key in AppSettings.mediaSettingKeys) {
+      final value = _mediaValueOf(key);
+      if (value.isEmpty) continue;
+      // 兜底：还超预算的（压缩失败/极端图）就别上云了 ——
+      // 中继有 2 MB 硬上限，超了整次推送会被 413 打回，反而把设置同步弄停。
+      if ((value.length * 3) ~/ 4 > _mediaBudgetBytes(key)) {
+        debugPrint('[Settings] 图像字段 $key 超过预算仍未压下来，本次不上云');
+        continue;
+      }
+      // 只省略"非空且内容没变"的：清空图片必须让服务端也知道（否则换机恢复会诈尸）
+      if (_pushedMediaHashes[key] == _contentFingerprint(value)) {
+        omit.add(key);
+      }
+    }
+    _settings.omitMediaOnCloudPush
+      ..clear()
+      ..addAll(omit);
+
+    final ok = await SyncService.instance.pushSettings(
+      userId: _settings.loginAccount,
+      settings: _settings,
+      clientSessionId: _settings.clientSessionId,
+    );
+    if (ok) {
+      for (final key in AppSettings.mediaSettingKeys) {
+        final value = _mediaValueOf(key);
+        if (value.isNotEmpty) _pushedMediaHashes[key] = _contentFingerprint(value);
+      }
+      if (omit.isNotEmpty) {
+        debugPrint('[Settings] 本次推送省略未变更的图像字段: ${omit.join(', ')}');
+      }
+    }
+    return ok;
+  }
+
 
   /// 从服务端获取模型限制表并自动校验修正当前已配置的端点
   Future<void> fetchAndApplyModelLimits() async {

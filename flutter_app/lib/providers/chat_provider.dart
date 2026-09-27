@@ -146,9 +146,18 @@ class ChatProvider extends ChangeNotifier {
   /// 中继会把这一轮跑完并按**同一个 messageId** 落库（server.ts 的 upsertMessage），
   /// 所以只要坚持重试就一定补得回来；超时才留一句如实的说明。
   Future<void> _retrieveInterruptedResult(String messageId) async {
-    for (var attempt = 0; attempt < 20; attempt++) {
-      // 前 6 次等 2 秒（电脑端通常几秒内就出结果），之后放慢到 4 秒，总计约 70 秒
-      await Future.delayed(Duration(seconds: attempt < 6 ? 2 : 4));
+    // 退避表：前 6 次 2 秒（电脑端通常几秒内出结果），随后 4 秒 ×10、8 秒 ×20、
+    // 15 秒 ×14，合计约 6 分钟。为什么拉这么长：实测"宿主在等用户拍板"的那一轮
+    // 可能要好几分钟才结束，而服务器跑完就会按同一个 messageId 落库 —— 窗口太短
+    // 就会出现"答案 05:24:15 落库、客户端 05:24:0x 刚放弃"的错位（真实事故）。
+    const delays = <int>[
+      2, 2, 2, 2, 2, 2,
+      4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+      8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8,
+      15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    ];
+    for (var attempt = 0; attempt < delays.length; attempt++) {
+      await Future.delayed(Duration(seconds: delays[attempt]));
       final local = _storage.getMessageById(messageId);
       if (local == null) return; // 消息已被删除
       if (!ChatMessage.isRetrievalPlaceholder(local.content)) return; // 已经补上了

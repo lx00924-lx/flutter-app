@@ -198,6 +198,24 @@ class AppSettings {
   String customDataPath;
   bool showDebugFab;
 
+  /// 会随设置一起上云、但**体积可能很大**的图像字段。
+  ///
+  /// 这些字段在界面上只占几十到几百像素，压过之后再上云即可；本地永远有一份
+  /// （就存在设置里，App 直接读本地），云端那份只是换机/重装时的恢复备份。
+  static const List<String> mediaSettingKeys = <String>[
+    'aiAvatar',
+    'userAvatar',
+    'customBackground',
+    'splashImage',
+  ];
+
+  /// 本次推送可以**省略**的图像字段（内容自上次成功推送以来没变）。
+  ///
+  /// 不参与序列化，只决定"这一次要不要把 base64 塞进请求体"：中继对设置是
+  /// 按键合并（`{...旧, ...新}`），省略即保留服务端已有的那份 —— 于是改一个
+  /// 不相干的开关不会再顺带重传几百 KB 的图片。
+  final Set<String> omitMediaOnCloudPush = <String>{};
+
   AppSettings({
     this.isDarkMode = false,
     this.activeEndpointId = '',
@@ -361,6 +379,11 @@ class AppSettings {
     // 判定"电脑端刚上线" → 又自动拉一次目录（用户看到的就是 App 时不时闪一下、
     // 自动刷新桥接目录）。中继侧也同步做了脱敏，这里是第二道闸。
     map.remove('isHarnessOnline');
+    // 图像字段（头像/背景/启动图）本次没变就不重传：中继按键合并，省略即保留
+    // 服务端已有那份。否则"改个开关"也要顺带把几百 KB 图片塞进请求体。
+    for (final key in omitMediaOnCloudPush) {
+      map.remove(key);
+    }
     if (map['apiEndpoints'] is List) {
       map['apiEndpoints'] = (map['apiEndpoints'] as List).map((item) {
         if (item is Map) {
