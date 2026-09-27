@@ -30,6 +30,9 @@ class ReasoningView extends StatefulWidget {
   /// `{'kind': 'thinking'|'action'|'note'|'text', 'text': 展示文本, 'tool': 工具名, 'detail': 完整参数}`
   final List<Map<String, dynamic>> timeline;
 
+  /// 打开「执行详情」页（重内容都在那一页，气泡里只留索引）。
+  final VoidCallback? onOpenDetail;
+
   const ReasoningView({
     super.key,
     required this.reasoningText,
@@ -38,6 +41,7 @@ class ReasoningView extends StatefulWidget {
     this.steps = const [],
     this.stepDetails = const [],
     this.timeline = const [],
+    this.onOpenDetail,
   });
 
   @override
@@ -156,7 +160,24 @@ class _ReasoningViewState extends State<ReasoningView> {
                         ),
                       )
                     else
-                      for (final item in items) _TimelineRow(item: item, isDark: isDark),
+                      for (final item in items)
+                        _TimelineRow(item: item, isDark: isDark, onOpenDetail: widget.onOpenDetail),
+                    if (widget.onOpenDetail != null && items.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton.icon(
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 6),
+                            minimumSize: const Size(0, 30),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          onPressed: widget.onOpenDetail,
+                          icon: const Icon(Icons.open_in_new, size: 15),
+                          label: const Text('查看执行详情', style: TextStyle(fontSize: 12.5)),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -169,11 +190,14 @@ class _ReasoningViewState extends State<ReasoningView> {
 }
 
 /// 时间线里的一项：思考 / 行动 / 提示 / 宿主原话。
+///
+/// 点整行 = 打开「执行详情」页（完整参数、完整输出都在那一页），气泡里只留索引。
 class _TimelineRow extends StatelessWidget {
-  const _TimelineRow({required this.item, required this.isDark});
+  const _TimelineRow({required this.item, required this.isDark, this.onOpenDetail});
 
   final Map<String, dynamic> item;
   final bool isDark;
+  final VoidCallback? onOpenDetail;
 
   String get _kind => (item['kind'] ?? 'note').toString();
   String get _rawText => (item['text'] ?? '').toString();
@@ -280,7 +304,9 @@ class _TimelineRow extends StatelessWidget {
     if (!expandable) return content;
     return InkWell(
       borderRadius: BorderRadius.circular(6),
-      onTap: () => _showDetail(context),
+      // 点整行 = 去「执行详情」页看完整内容（不在气泡里弹大段文本 ——
+      // 工具输出动辄几 KB，铺在对话里又长又吵）
+      onTap: onOpenDetail ?? (() => _showDetail(context)),
       child: content,
     );
   }

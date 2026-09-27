@@ -11,6 +11,7 @@ import '../providers/settings_provider.dart';
 import '../services/tts_service.dart';
 import '../utils/image_picker_helper.dart';
 import 'app_avatar.dart';
+import '../screens/agent_execution_detail_screen.dart';
 import 'reasoning_view.dart';
 import 'text_selection_modal.dart';
 import 'voice_message_bubble.dart';
@@ -124,6 +125,17 @@ class MessageBubble extends StatelessWidget {
           ),
         ),
         PopupMenuItem<String>(
+          value: 'trace',
+          height: 40,
+          child: Row(
+            children: [
+              Icon(Icons.account_tree_outlined, size: 18, color: isDark ? Colors.lightBlueAccent : const Color(0xFF0284C7)),
+              const SizedBox(width: 10),
+              const Text('执行详情', style: TextStyle(fontSize: 14)),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
           value: 'select',
           height: 40,
           child: Row(
@@ -192,6 +204,9 @@ class MessageBubble extends StatelessWidget {
               duration: Duration(seconds: 1),
             ),
           );
+          break;
+        case 'trace':
+          showAgentExecutionDetail(context, message);
           break;
         case 'select':
           FocusManager.instance.primaryFocus?.unfocus();
@@ -614,6 +629,10 @@ class MessageBubble extends StatelessWidget {
                         steps: steps,
                         stepDetails: stepDetails,
                         timeline: timeline,
+                        // 重内容（工具参数/输出）都在「执行详情」页，气泡里只留索引
+                        onOpenDetail: (timeline.isNotEmpty || steps.isNotEmpty)
+                            ? () => showAgentExecutionDetail(context, message)
+                            : null,
                       ),
 
                     // 正文渲染
