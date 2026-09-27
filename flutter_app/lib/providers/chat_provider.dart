@@ -167,7 +167,10 @@ class ChatProvider extends ChangeNotifier {
     });
   }
 
-  /// 宿主正在产出的**正文**（它对我们说的话）也进时间线，和思考/行动按顺序排在一起。
+  /// 宿主正在产出的**正文**（它对我们说的话）：目前只写进过程气泡的正文，
+  /// 不重复塞进时间线 —— 用户给的结构图里它显示在思维链容器**下方**。
+  /// 保留这个方法以便将来需要在时间线内联展示时复用。
+  // ignore: unused_element
   void _absorbAgentText(String delta) {
     if (delta.isEmpty) return;
     if (_timeline.isNotEmpty && _timeline.last['kind'] == 'text') {
@@ -1591,9 +1594,9 @@ class ChatProvider extends ChangeNotifier {
               return;
             }
             if (contentDelta.isNotEmpty) {
-              // 宿主自己说的话：既进过程气泡正文，也按顺序进时间线（DSH 那种排布）
+              // 宿主自己说的话 → 过程气泡的**正文**（按用户给的结构图，它显示在
+              // 思维链容器下方；不再同时塞进时间线，否则同一段话会出现两次）
               assistantMsg.content += contentDelta;
-              _absorbAgentText(contentDelta);
             }
             if (reasoningDelta.isNotEmpty) {
               // 兜底（老版本中继）：没有 answerMessageId 的 reasoning 只可能是润色模型
@@ -2146,9 +2149,9 @@ class ChatProvider extends ChangeNotifier {
               return;
             }
             if (contentDelta.isNotEmpty) {
-              // 宿主自己说的话：既进过程气泡正文，也按顺序进时间线（DSH 那种排布）
+              // 宿主自己说的话 → 过程气泡的**正文**（按用户给的结构图，它显示在
+              // 思维链容器下方；不再同时塞进时间线，否则同一段话会出现两次）
               assistantMsg.content += contentDelta;
-              _absorbAgentText(contentDelta);
             }
             if (reasoningDelta.isNotEmpty) {
               // 兜底（老版本中继）：没有 answerMessageId 的 reasoning 只可能是润色模型
