@@ -99,7 +99,9 @@ flutter build apk --release
 ```powershell
 cd F:\ai\flutter\123
 # ...修改源码...
-git add -A ; git commit -m "..." ; git push
+git add <显式路径>          # 不要用 git add -A：临时/报告文件会被误提交（见文末「已知陷阱」§3）
+git commit -F 信息文件.md    # 中文多行提交信息用文件传入；文件用 UTF-8 无 BOM 写
+git push
 ```
 
 **打包测试（在 flutter-app）**
@@ -151,3 +153,62 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 ## 七、换用自己的 Android 签名（fork 者指引）
 
 仓库**不含任何密钥**。放置 `flutter_app/android/key.properties` + `flutter_app/android/app/AI.jks` 即自动切换为正式签名；缺失时 `android/app/build.gradle` 会回退到 debug 签名，**构建不会失败**。详细步骤见 `flutter_app/android/SIGNING_README.md`。
+
+---
+
+# ⚠️ 已知陷阱与实测教训（改动前必读）
+
+> 全部是真实踩过的坑，附现象与判据，下次直接对照排查，不要重新试错。
+
+## 1. 发给 Windows 用户的 `.bat` 必须 CRLF，且注意编码
+
+- **现象**：双击启动脚本刷一屏 `'cho' 不是内部或外部命令` / `'t' 不是内部或外部命令`，随即退出。
+- **根因**：`cmd.exe` 按 CRLF 定位批处理行边界，LF-only 的文件会被逐字符吃掉（`echo`→`cho`、`title`→`t`）。
+  三处下发模板（中继 `/api/download/run_bridge.bat`、`/api/agent/download-bat`、App 导出的 `run_bridge.bat`）
+  都是 JS/Dart 模板字符串，换行天生是 LF。
+- **判据**：`CR 数 == LF 数`；不相等即 LF-only。
+- **做法**：中继侧一律过 `toCrlf()`；Dart 侧模板 `.replaceAll('\n','\r\n')`；
+  本机启动器改完必须跑"解析自检"（把启动行换成 `echo` 再执行，看有没有 `is not recognized`）。
+- **编码**：本机控制台码页是 **936（GBK）**，所以 `.bat` 里的中文要么存 GBK、要么整份纯 ASCII；
+  存 UTF-8 会在 `chcp 65001` 生效前被按 GBK 解析而报错。另外**不要写 BOM**。
+
+## 2. 从宿主子 shell 启动的程序，会被"重启宿主"连带杀掉
+
+- **现象**：重启宿主后桌面 App 和它拉起的桥接一起消失，中继侧 `online=False`。
+- **根因**：`restart-dsh.bat` 用 `taskkill /PID <3080监听者> /T /F` 清扫整棵进程树；
+  Agent 工具调用里 `Start-Process` 起来的 App 正好在那棵树里（用户双击启动的则不会）。
+- **做法**：用 WMI 派生启动（`Win32_Process.Create`，父进程显示为 `WmiPrvSE.exe`），启动后复核 `ParentProcessId`。
+
+## 3. `git add -A` 会把临时文件带进提交
+
+- **现象**：提交信息文件、探测脚本、报告文件被一起提交（本仓库已发生两次）。
+- **做法**：一律 `git add <显式路径>`；提交信息临时文件提交后立刻删除；
+  写信息文件用 `[IO.File]::WriteAllText(..., New-Object Text.UTF8Encoding($false))`，避免 BOM 混进 commit subject。
+
+## 4. 单点互斥 `clientSessionId` 的语义（改登录 / 会话逻辑前必读）
+
+服务端 `messages_data/active_sessions.json` 按「1 手机 + 1 电脑」分槽记录，判定时**严格相等**比对：
+
+1. 登录**成功之后**才把新 id 落盘（`settings_provider.loginWithServer`）。先改本地再发请求，
+   一旦请求失败（中继重启/断网）并走"离线登录"兜底，就会留下一个**服务端从没见过的新 id**，
+   之后每次握手/轮询都被判"已在另一台设备登录" —— 即"每次重启 App 都弹账号已下线"的假顶号。
+2. 离线登录必须**沿用旧 id**。
+3. 服务端 `canTakeover` 只在「该槽位 3 分钟无活跃」时下发，这是分叉的自愈通道；
+   真在用的设备槽位始终新鲜，拿不到它，所以不会两台机器互抢。
+4. `lastActive` **必须落盘**（60 秒节流）：只改内存副本会让活跃槽位三分钟后被误判过期。
+5. 推送通道 `/ws/app` 的 `force_logout` **必须带 `kickedSessionId`**：缺了它，客户端只能按设备类型判断，
+   同类型的每个实例（含刚启动的那个）都会把自己当成被顶下线。
+6. 顶号广播只发给被顶的设备类型（`session_<旧id>` + `user_<用户名>_<设备类型>`），
+   **不要**发 `user_<用户名>`（会让手机也被误通知）。
+
+## 5. 运行环境事实（排查时容易找错地方）
+
+- 桌面 App 的本地数据在 **`C:\Users\lx\Documents`**（Hive：`settings_box.hive` / `sessions_box.hive` / `messages_box.hive`），
+  **不在安装目录**；清缓存或换机会丢登录态与本地会话。
+- 中继按 `NODE_ENV` 决定官网前端走 Vite 开发中间件还是 `dist/` 静态文件；`start-relay.bat` 已设 `NODE_ENV=production`，
+  改完前端要 `npm run build`（`vite build` 出 `dist/`，`esbuild` 出 `dist/server.cjs`）。
+- 干净的 cmd 环境里 `node` **不在 PATH** 上：启动脚本用绝对路径 `C:\nvm4w\nodejs\node.exe`；桥接用 `C:\Python314\python.exe`。
+- 生产中继目录 `F:\ai\flutter-app` **不是 Git 仓库**，源码靠手工同步：
+  改完仓库要同步 `server.ts` / `lxai_bridge.py` / `docs/`，再 `npm run build` 并重启中继。
+- 用户插件**没有热重载**：`lib/index.js` 改完必须重启宿主 web 服务才生效（`dsh plugin` 子命令只管安装）。
+
