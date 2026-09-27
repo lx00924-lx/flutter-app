@@ -180,6 +180,11 @@ class _TimelineRow extends StatelessWidget {
   String get _detail => (item['detail'] ?? '').toString();
   String get _tool => (item['tool'] ?? '').toString();
 
+  /// 工具输出（由 result 步骤折进来）
+  String get _result => (item['result'] ?? '').toString();
+  String get _status => (item['status'] ?? '').toString();
+  bool get _isError => _status == 'error';
+
   /// `🔧 [执行工具] pwsh · 摘要` → `摘要`
   String get _actionSummary {
     final idx = _rawText.indexOf('· ');
@@ -201,9 +206,13 @@ class _TimelineRow extends StatelessWidget {
     return _rawText;
   }
 
-  /// 点开能看到的东西：行动看完整参数，思考看全文
+  /// 点开能看到的东西：行动 = 完整参数 + 工具输出（DSH 里输入输出在同一处展开），
+  /// 思考 = 全文
   String get _expandableContent {
-    if (_detail.trim().isNotEmpty) return _detail;
+    final parts = <String>[];
+    if (_detail.trim().isNotEmpty) parts.add(_detail);
+    if (_result.trim().isNotEmpty) parts.add('── 输出 ──\n$_result');
+    if (parts.isNotEmpty) return parts.join('\n\n');
     if (_kind == 'thinking') return _rawText;
     return '';
   }
@@ -227,62 +236,44 @@ class _TimelineRow extends StatelessWidget {
     final expandable = _expandableContent.trim().isNotEmpty;
     final isAction = _kind == 'action';
     final isThinking = _kind == 'thinking';
+    final label = isAction ? _actionLabel : (isThinking ? '思考' : '');
 
+    // 完全照 DSH 的排版：左侧一个 ⌄（可展开的行才有，其余行留空对齐），
+    // 然后是 "标签 · 内容" 的**纯文本单行**，无图标、无加粗、同一灰度。
     final row = Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Padding(
-          padding: const EdgeInsets.only(top: 1),
-          child: Icon(
-            isAction
-                ? Icons.terminal
-                : isThinking
-                    ? Icons.psychology_outlined
-                    : Icons.chevron_right,
-            size: 14,
-            color: isAction
-                ? (isDark ? const Color(0xFF38BDF8) : const Color(0xFF0284C7))
-                : muted,
-          ),
+        SizedBox(
+          width: 16,
+          child: expandable
+              ? Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Icon(Icons.keyboard_arrow_down, size: 14, color: muted),
+                )
+              : null,
         ),
-        const SizedBox(width: 6),
-        if (isAction || isThinking)
-          Padding(
-            padding: const EdgeInsets.only(right: 6),
-            child: Text(
-              isAction ? _actionLabel : '思考',
-              style: TextStyle(
-                fontSize: 12.5,
-                height: 1.5,
-                fontWeight: FontWeight.w600,
-                color: isAction
-                    ? (isDark ? const Color(0xFF7DD3FC) : const Color(0xFF0369A1))
-                    : muted,
-              ),
-            ),
-          ),
         Expanded(
-          child: Text(
-            _displayText,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 12.5, height: 1.5, color: muted),
-          ),
-        ),
-        if (expandable)
-          Padding(
-            padding: const EdgeInsets.only(left: 6, top: 1),
-            child: Icon(
-              Icons.unfold_more,
-              size: 14,
-              color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
+          child: SelectableText.rich(
+            TextSpan(
+              children: [
+                if (label.isNotEmpty) TextSpan(text: '$label · '),
+                TextSpan(text: _displayText),
+              ],
+            ),
+            maxLines: 1,
+            style: TextStyle(
+              fontSize: 12.5,
+              height: 1.6,
+              // 工具报错时整行标红：DSH 会给失败的行一个红标记
+              color: _isError ? (isDark ? const Color(0xFFFCA5A5) : const Color(0xFFDC2626)) : muted,
             ),
           ),
+        ),
       ],
     );
 
     final content = Padding(
-      padding: EdgeInsets.only(bottom: isThinking ? 8 : 4, top: 1),
+      padding: EdgeInsets.only(bottom: isThinking ? 6 : 3, top: 1),
       child: row,
     );
 
@@ -300,7 +291,7 @@ class _TimelineRow extends StatelessWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(
-          _kind == 'action' ? '${_actionLabel} · 完整参数' : '思考全文',
+          _kind == 'action' ? '${_actionLabel} · 输入与输出' : '思考全文',
           style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
         ),
         content: ConstrainedBox(

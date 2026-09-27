@@ -93,8 +93,10 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
-  void _showRenameSessionDialog(BuildContext context, ChatSession session) {
-    final controller = TextEditingController(text: session.title);
+  bool _isSameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  void _showRenameSessionDialog(BuildContext context, ChatSession session) {    final controller = TextEditingController(text: session.title);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -517,12 +519,23 @@ class _ChatScreenState extends State<ChatScreen> {
                                   final isLatestAssistant = msg.role == MessageRole.assistant &&
                                       index == chat.messages.lastIndexWhere((m) => m.role == MessageRole.assistant);
                                   final prev = index > 0 ? chat.messages[index - 1] : null;
-                                  return MessageBubble(
+                                  final bubble = MessageBubble(
                                     message: msg,
                                     isLatestAssistant: isLatestAssistant,
                                     // 同一发送者的连续消息收紧间距（微信/QQ 那种分组观感），
                                     // 换人时留出更明显的间隔
                                     groupedWithPrev: prev != null && prev.role == msg.role,
+                                  );
+                                  // 跨天时插一条居中日期分隔（微信/QQ 都有），长会话里定位快很多
+                                  if (prev != null && _isSameDay(prev.createdAt, msg.createdAt)) {
+                                    return bubble;
+                                  }
+                                  return Column(
+                                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                                    children: [
+                                      _DateDivider(dateTime: msg.createdAt, isDark: isDark),
+                                      bubble,
+                                    ],
                                   );
                                 },
                               ),
@@ -572,6 +585,53 @@ class _ChatScreenState extends State<ChatScreen> {
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 跨天时的居中日期分隔条（今天 / 昨天 / 6月12日 / 2025年6月12日）。
+///
+/// 微信、QQ 以及各家大模型 App 都有这条：长会话里一眼能看出"这是哪天的对话"，
+/// 比以前只靠每条消息下方的时刻去推算要直观得多。
+class _DateDivider extends StatelessWidget {
+  const _DateDivider({required this.dateTime, required this.isDark});
+
+  final DateTime dateTime;
+  final bool isDark;
+
+  String get _label {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final day = DateTime(dateTime.year, dateTime.month, dateTime.day);
+    final diff = today.difference(day).inDays;
+    if (diff == 0) return '今天';
+    if (diff == 1) return '昨天';
+    if (diff == 2) return '前天';
+    if (dateTime.year == now.year) return '${dateTime.month}月${dateTime.day}日';
+    return '${dateTime.year}年${dateTime.month}月${dateTime.day}日';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 6, bottom: 2),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text(
+            _label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+              color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+            ),
+          ),
         ),
       ),
     );

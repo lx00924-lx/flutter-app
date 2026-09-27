@@ -694,7 +694,9 @@ export function apply(ctx) {
             send('tool_end', {
               id: data.message?.toolCallId ?? data.callId,
               tool: data.message?.toolName ?? data.name ?? 'tool',
-              output: shorten(data.message?.content),
+              // 输出上限放大到 4000：App 要把它折进行动行的展开里（保真转发），
+              // 600 字会把报错与回显截掉一半
+              output: shorten(data.message?.content, 4000),
               status: data.error === undefined ? 'success' : 'error',
             })
             break

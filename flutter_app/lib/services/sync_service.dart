@@ -1485,10 +1485,12 @@ class SyncService {
             } else if (eventName == 'step') {
               yield {
                 'step': parsed['step'] ?? '',
-                // detail = 完整工具参数（折叠展示）；kind = thinking/action/note；tool = 工具名
+                // detail = 完整工具参数或工具输出原文（折叠展示）
+                // kind = thinking/action/result/note；tool = 工具名；status = success/error
                 'detail': parsed['detail'] ?? '',
                 'kind': parsed['kind'] ?? '',
                 'tool': parsed['tool'] ?? '',
+                'status': parsed['status'] ?? '',
                 'done': false,
               };
             } else if (eventName == 'agent_started') {

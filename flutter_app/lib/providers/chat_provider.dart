@@ -122,7 +122,8 @@ class ChatProvider extends ChangeNotifier {
   ///
   /// [kind] 由桥接显式给出；老版本桥接没有这个字段时，退回按 `💭` 前缀判断。
   /// [detail] 是同一条步骤的完整参数（例如工具调用的原始 JSON），只做折叠展示用。
-  void _absorbStep(String raw, {String detail = '', String kind = '', String tool = ''}) {
+  void _absorbStep(String raw,
+      {String detail = '', String kind = '', String tool = '', String status = ''}) {
     var text = raw;
     var resolvedKind = kind.trim();
     if (resolvedKind.isEmpty) {
@@ -157,6 +158,24 @@ class ChatProvider extends ChangeNotifier {
         : (trimmedDetail.length > _stepDetailMaxChars
             ? '${trimmedDetail.substring(0, _stepDetailMaxChars)}…（已截断）'
             : trimmedDetail);
+
+    // 工具输出：折进**对应的行动行**（DSH 里工具输入与输出是同一行的展开内容），
+    // 不新增一行，否则一个工具会占两行、看着比 DSH 还乱。
+    if (resolvedKind == 'result') {
+      for (var i = _timeline.length - 1; i >= 0; i--) {
+        final item = _timeline[i];
+        if (item['kind'] != 'action') continue;
+        if (tool.isNotEmpty && item['tool']?.toString() != tool) continue;
+        if ((item['result'] ?? '').toString().isNotEmpty) continue;
+        item['result'] = storedDetail;
+        if (status.isNotEmpty) item['status'] = status;
+        return;
+      }
+      // 找不到对应行动行（例如工具调用是在旧版本桥接上发生的）：退化成一条提示行
+      _timeline.add({'kind': 'note', 'text': text, 'tool': '', 'detail': ''});
+      return;
+    }
+
     _stepLog.add(text);
     _stepDetails.add(storedDetail);
     _timeline.add({
@@ -1478,6 +1497,7 @@ class ChatProvider extends ChangeNotifier {
                 detail: chunk['detail']?.toString() ?? '',
                 kind: chunk['kind']?.toString() ?? '',
                 tool: chunk['tool']?.toString() ?? '',
+                status: chunk['status']?.toString() ?? '',
               );
               // 思维链只显示宿主真实的思考（💭 流）；派发/工具/完成这些执行步骤
               // 走 agentExecution，不再混进同一个字符串冒充"思考过程"。
@@ -2037,6 +2057,7 @@ class ChatProvider extends ChangeNotifier {
                 detail: chunk['detail']?.toString() ?? '',
                 kind: chunk['kind']?.toString() ?? '',
                 tool: chunk['tool']?.toString() ?? '',
+                status: chunk['status']?.toString() ?? '',
               );
               // 思维链只显示宿主真实的思考（💭 流）；派发/工具/完成这些执行步骤
               // 走 agentExecution，不再混进同一个字符串冒充"思考过程"。

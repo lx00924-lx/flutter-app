@@ -2351,6 +2351,7 @@ async function startServer() {
         detail: data.detail,
         kind: data.kind,
         tool: data.tool,
+        status: data.status,
       });
     };
 
@@ -3108,12 +3109,25 @@ async function startServer() {
   // Agent task step update
   app.post("/api/agent/step", (req, res) => {
     try {
-      const { taskId, step, token } = req.body;
+      const { taskId, step, token, kind, tool, detail, status } = req.body;
       if (token && connectedAgents.has(token)) {
         connectedAgents.get(token)!.lastPing = Date.now();
       }
       if (taskId && step) {
-        io.emit("agent_task_step", { taskId, step });
+        io.emit("agent_task_step", { taskId, step, kind, tool });
+        // 轮询模式也要把步骤喂给 SSE：以前只有 WS 模式的 agent_step 会发
+        // generationEvents，桥接退到长轮询时 App 就完全看不到过程了。
+        const pendingStep = pendingAgentTasks.get(taskId);
+        if (pendingStep) {
+          generationEvents.emit(`step_${pendingStep.assistantMessageId}`, {
+            taskId,
+            step,
+            detail,
+            kind,
+            tool,
+            status,
+          });
+        }
       }
       res.json({ success: true });
     } catch (err: any) {
@@ -4909,6 +4923,7 @@ if %errorlevel% neq 0 (
                 detail: msg.detail,
                 kind: msg.kind,
                 tool: msg.tool,
+                status: msg.status,
               });
             }
           } else if (msg.type === "agent_content") {
