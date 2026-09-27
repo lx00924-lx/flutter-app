@@ -2573,17 +2573,30 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
         else:
             hint = reg_body.get("error") if isinstance(reg_body, dict) else ""
             print(f"\033[91m[✗ 注册被拒] HTTP {status} {hint}\033[0m")
-            if status in (401, 403):
-                # Token 已失效（通常是被 App 重置过）：不再静默换 token，
-                # 而是明确提示用户按"重新配对"流程处理。
+            # 判定"token 真失效"必须**只有中继自己说了才算**。
+            #
+            # 实测（02:50:17 拿到 403，而中继 02:50:21 才开始监听）：中继下线期间，
+            # 公网边缘（Cloudflare/隧道）会自己回 403/502/522 之类，正文不是中继的 JSON。
+            # 旧代码把任何 401/403 都当"token 失效"并打印"请重新扫码配对"，
+            # 把用户引到完全错误的方向（其实只需等中继起来）。
+            err_text = hint if isinstance(hint, str) else ""
+            relay_confirmed_invalid = ("未绑定" in err_text) or ("无效" in err_text) or ("不存在" in err_text)
+            if status in (401, 403) and relay_confirmed_invalid:
+                # 中继明确说这个 token 无效/未绑定（通常是被 App 重置过）：
+                # 不静默换 token，明确提示用户按"重新配对"流程处理。
                 print("\033[93m  💡 该 Token 已失效。请在电脑上重新运行本脚本并【用手机扫码】完成配对：\033[0m")
                 print(f"\033[90m     python lxai_bridge.py --harness-url \"{args.harness_url}\"\033[0m")
-            elif status == 503 or (isinstance(reg_body, dict) and reg_body.get("transient")):
-                # 中继刚启动/设置还在加载 —— 这是**临时**状态，Token 完全没问题。
-                # 之前这种情况也走 403，于是打印"请重新扫码配对"把人引到错误方向。
+            else:
+                # 其余（中继启动中的 503、边缘网关的 403/502/522、空正文……）都按**临时**处理：
+                # Token 没问题，缩短冷却尽快重试，并且不吓唬用户。
                 mark_ws_failure(transient=True)
-                wait_s = int((reg_body or {}).get("retryAfterMs", 3000) / 1000) if isinstance(reg_body, dict) else 3
-                print(f"\033[93m  💡 中继正在启动中（{wait_s} 秒后自动重试），Token 无需重新配对。\033[0m")
+                wait_s = 3
+                if isinstance(reg_body, dict):
+                    try:
+                        wait_s = max(1, int(int(reg_body.get("retryAfterMs", 3000)) / 1000))
+                    except Exception:
+                        wait_s = 3
+                print(f"\033[93m  💡 中继/网关暂时不可用（HTTP {status}），{wait_s} 秒后自动重试，Token 无需重新配对。\033[0m")
 
         try:
             await loop.run_in_executor(
