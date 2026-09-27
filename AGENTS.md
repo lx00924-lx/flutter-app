@@ -216,7 +216,22 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
      读取侧与写入侧各挡一道。
   3. 调用方一律显式处理失败（提示用户"重新安装 App / 从正规渠道重新下载"），不要静默 continue。
 
-## 6. 运行环境事实（排查时容易找错地方）
+## 6. 严禁按"命令行文本"匹配去结束进程（已发生两次）
+
+- **现象**：用
+  `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'lxai_bridge\.py' } | Stop-Process`
+  结束进程，结果把**自己这条命令的执行环境**也杀了 —— 宿主派生的 subprocess runner 的命令行里
+  就含有正在执行的这段命令文本，于是工具调用以
+  `subprocess-local: Windows Job runner exited with exit code 4294967295` 收场，且被杀的程序
+  （这里是桥接）也没被重新拉起。
+- **正确做法**：
+  - 杀桥接：先按进程名过滤 `Get-CimInstance Win32_Process -Filter "Name='python.exe'"`，
+    再在该结果里匹配 `lxai_bridge`（runner 是 node.exe，不会命中）；
+  - 杀中继/宿主：按端口拿 PID（`(Get-NetTCPConnection -LocalPort 3000 -State Listen).OwningProcess`）
+    再 `Stop-Process -Id`；
+  - 一句话：**不要把"要杀的特征"写成会出现在自己命令行里的字符串**。
+
+## 7. 运行环境事实（排查时容易找错地方）
 
 - 桌面 App 的本地数据在 **`C:\Users\lx\Documents`**（Hive：`settings_box.hive` / `sessions_box.hive` / `messages_box.hive`），
   **不在安装目录**；清缓存或换机会丢登录态与本地会话。
