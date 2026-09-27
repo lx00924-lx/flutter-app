@@ -816,14 +816,33 @@ class SettingsProvider extends ChangeNotifier {
     }
   }
 
+  /// 正在进行的刷新（并发调用复用同一次，不要把"正在刷"当成"失败"）。
+  ///
+  /// 曾经的写法是开头 `if (_agentCatalogLoading) return false;`：
+  /// 用户在自动刷新（尤其是带重试的那次，窗口最长约 10 秒）期间点刷新，
+  /// 会立刻拿到 false，界面据此弹出"没取到目录"——纯属误报。
+  Future<bool>? _agentCatalogPending;
+
   /// 拉取一次电脑端工作区与会话，并缓存下来供设置页与聊天快捷栏共用。
   ///
   /// 两个针对"电脑端刚上线"的处理（实测：桥接从注册成功到推出第一份目录约 4 秒）：
-  /// - **在线但目录为空时自动重试**，最多 2 次（等 2 秒、4 秒），用户不必手点第二次；
+  /// - **在线但目录为空时自动重试**，最多 2 次（等 2 秒、3 秒），用户不必手点第二次；
   /// - **取不到时保留上一次的目录**，不要把一个暂时取不到的目录清空成空白，
   ///   否则用户看到的是"目录凭空消失"，而不是"暂时没拿到"。
-  Future<bool> refreshAgentCatalog({bool silent = true}) async {
-    if (_agentCatalogLoading) return false;
+  Future<bool> refreshAgentCatalog({bool silent = true}) {
+    final pending = _agentCatalogPending;
+    if (pending != null) {
+      debugPrint('[Settings] 已有一次目录刷新在进行，复用其结果');
+      return pending;
+    }
+    final future = _refreshAgentCatalogInner(silent: silent);
+    _agentCatalogPending = future;
+    return future.whenComplete(() {
+      if (identical(_agentCatalogPending, future)) _agentCatalogPending = null;
+    });
+  }
+
+  Future<bool> _refreshAgentCatalogInner({required bool silent}) async {
     _agentCatalogLoading = true;
     try {
       var res = await fetchAgentWorkspacesAndSessions();
@@ -832,11 +851,11 @@ class SettingsProvider extends ChangeNotifier {
       var modelList = _parseModels(res);
 
       // 电脑端在线却什么都没拿到 → 极可能是"刚注册、首份目录还在路上"，
-      // 这不是失败，等两拍再问一次（总耗时 ≤6 秒，调用方多为 unawaited）。
+      // 这不是失败，等两拍再问一次。
       for (var retry = 0; retry < 2; retry++) {
         final onlineButEmpty = _lastCatalogOnline && wsList.isEmpty && sessList.isEmpty;
         if (!onlineButEmpty) break;
-        await Future.delayed(Duration(seconds: retry == 0 ? 2 : 4));
+        await Future.delayed(Duration(seconds: retry == 0 ? 2 : 3));
         res = await fetchAgentWorkspacesAndSessions();
         wsList = _parseWorkspaces(res);
         sessList = _parseSessions(res);
