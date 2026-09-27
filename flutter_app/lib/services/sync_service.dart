@@ -1486,11 +1486,13 @@ class SyncService {
               yield {
                 'step': parsed['step'] ?? '',
                 // detail = 完整工具参数或工具输出原文（折叠展示）
-                // kind = thinking/action/result/note；tool = 工具名；status = success/error
+                // kind = thinking/action/result/note；tool = 工具名；
+                // status = success/error；callId = 调用与结果的精确配对
                 'detail': parsed['detail'] ?? '',
                 'kind': parsed['kind'] ?? '',
                 'tool': parsed['tool'] ?? '',
                 'status': parsed['status'] ?? '',
+                'callId': parsed['callId'] ?? '',
                 'done': false,
               };
             } else if (eventName == 'agent_started') {

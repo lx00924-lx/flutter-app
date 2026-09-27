@@ -1805,9 +1805,32 @@ _TOOL_SUMMARY_KEYS = (
     "prompt", "title", "sessionId", "session_id",
 )
 
-# 工具输出（tool/result）随 step 上报时的长度上限：够看清报错与回显，又不至于
-# 把消息体积顶爆（它会被折进行动行、跟着消息落库上云）。
-TOOL_OUTPUT_MAX_CHARS = 4000
+# 工具输出（tool/result）与工具参数随 step 上报时的长度上限：够看清报错与回显，
+# 又不至于把消息体积顶爆（它会被折进行动行、跟着消息落库上云）。
+TOOL_OUTPUT_MAX_CHARS = 16000
+TOOL_INPUT_MAX_CHARS = 16000
+
+
+def prettify_tool_input(tool_input) -> str:
+    """把工具参数整成**可读的多行 JSON**。
+
+    插件给过来的是模型原始产出的 `arguments` —— 一个 JSON **字符串**。以前的写法是
+    "是字符串就原样用"，于是 App 的展开里是一整行几百字的 JSON（用户实测："pwsh 没排版"）。
+    这里先尝试解析成对象再缩进输出；解析不了就原样返回。
+    """
+    if isinstance(tool_input, (dict, list)):
+        try:
+            return json.dumps(tool_input, ensure_ascii=False, indent=2)
+        except Exception:
+            return str(tool_input)
+    text = tool_input if isinstance(tool_input, str) else str(tool_input)
+    stripped = text.strip()
+    if stripped[:1] in ("{", "["):
+        try:
+            return json.dumps(json.loads(stripped), ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    return text
 
 
 def summarize_tool_input(tool_name: str, tool_input) -> str:
@@ -2049,17 +2072,19 @@ async def execute_dsh_sse_stream(
             elif ev_type == "tool_start":
                 tool_name = parsed_json.get("tool", "工具")
                 tool_input = parsed_json.get("input", "")
+                call_id = str(parsed_json.get("id", "") or "")
                 # 摘要进"执行步骤"（一行），完整参数走 detail 随同一条 step 发上去，
-                # 由 App 折叠展示 —— 以前是把 JSON 原样截 120 字符糊在界面上。
+                # 由 App 折叠展示 —— 参数先整成多行 JSON，别让整条命令糊成一行。
                 summary = summarize_tool_input(tool_name, tool_input)
-                detail = tool_input if isinstance(tool_input, str) else json.dumps(tool_input, ensure_ascii=False, indent=2)
-                if len(detail) > 4000:
-                    detail = detail[:4000] + "\n…（已截断）"
+                detail = prettify_tool_input(tool_input)
+                if len(detail) > TOOL_INPUT_MAX_CHARS:
+                    detail = detail[:TOOL_INPUT_MAX_CHARS] + "\n…（已截断）"
                 step_line = f"🔧 [执行工具] {tool_name} · {summary}" if summary else f"🔧 [执行工具] {tool_name}"
-                await on_step_callback(step_line, detail, "action", tool_name)
+                await on_step_callback(step_line, detail, "action", tool_name, "", call_id)
             elif ev_type == "tool_end":
                 tool_name = parsed_json.get("tool", "工具")
                 status = parsed_json.get("status", "success")
+                call_id = str(parsed_json.get("id", "") or "")
                 # 工具输出以前**被直接丢掉**（App 只能看到"✓ 工具完成"一行），
                 # 这里原样带上去，由 App 折进对应行动行的展开内容 ——
                 # DSH 里工具输入与输出也是同一行的展开，用户要的就是"保真转发"。
@@ -2074,6 +2099,7 @@ async def execute_dsh_sse_stream(
                     "result",
                     tool_name,
                     status,
+                    call_id,
                 )
             elif ev_type == "waiting_approval":
                 approval_id = parsed_json.get("approvalId")
@@ -2751,7 +2777,7 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
         print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
         steps_collected = []
 
-        async def on_step(step_text: str, detail: str = "", kind: str = "note", tool: str = "", status: str = ""):
+        async def on_step(step_text: str, detail: str = "", kind: str = "note", tool: str = "", status: str = "", call_id: str = ""):
             steps_collected.append(step_text)
             print(f"\033[90m  └─ {step_text}\033[0m")
             try:
@@ -2767,6 +2793,8 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                     payload["tool"] = tool
                 if status:
                     payload["status"] = status
+                if call_id:
+                    payload["callId"] = call_id
                 await loop.run_in_executor(
                     None,
                     lambda: http_post_json(step_url, payload, timeout=5)
@@ -3186,7 +3214,7 @@ async def run_bridge_client(args):
                     print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
                     steps_collected = []
 
-                    async def ws_step_cb(step_text: str, detail: str = "", kind: str = "note", tool: str = "", status: str = ""):
+                    async def ws_step_cb(step_text: str, detail: str = "", kind: str = "note", tool: str = "", status: str = "", call_id: str = ""):
                         steps_collected.append(step_text)
                         print(f"\033[90m  └─ {step_text}\033[0m")
                         try:
@@ -3207,6 +3235,10 @@ async def run_bridge_client(args):
                                 payload["tool"] = tool
                             if status:
                                 payload["status"] = status
+                            # callId：工具调用与结果精确配对（DSH 的 tool/result 里没有工具名，
+                            # 靠 id 才不会把输出折到错误的行上）
+                            if call_id:
+                                payload["callId"] = call_id
                             await ws.send(json.dumps(payload))
                         except Exception:
                             pass

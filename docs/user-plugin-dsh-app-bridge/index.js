@@ -609,6 +609,11 @@ export function apply(ctx) {
 
     let emittedContent = ''
     let emittedReasoning = ''
+    // callId → 工具名。`tool/result` 帧里**没有工具名**（只有 callId），名字只在
+    // `tool/call` 帧上，所以要在这里记下来、收到结果时取回。以前读的是
+    // `message.toolName` / `data.name`，两个字段都不存在 → 工具名恒为 "tool"，
+    // 于是 App 认不出这是哪个工具的输出，只能另起一行（用户实测）。
+    const toolNameByCallId = new Map()
     let currentTurn
     let finished = false
 
@@ -687,17 +692,30 @@ export function apply(ctx) {
             break
           }
           case 'tool/call': {
+            if (typeof data.callId === 'string' && data.callId.length > 0 && typeof data.name === 'string') {
+              toolNameByCallId.set(data.callId, data.name)
+            }
             send('tool_start', { id: data.callId, tool: data.name, input: data.arguments })
             break
           }
           case 'tool/result': {
+            // 结果帧结构（见 dsh-llm 的 ToolResultMessage / ToolResultBlock）：
+            //   data.message.content = [{ type:'tool-result', toolCallId, content:[文本块], isError? }]
+            //   data.message.source  = { kind:'tool', callId }
+            // **工具名不在这一帧里**，按 callId 从 tool/call 的记录里取回。
+            const block = Array.isArray(data.message?.content) ? data.message.content[0] : undefined
+            const callId = data.message?.source?.callId ?? block?.toolCallId ?? data.callId
+            const toolName =
+              (typeof callId === 'string' ? toolNameByCallId.get(callId) : undefined) ?? data.name ?? 'tool'
+            if (typeof callId === 'string') toolNameByCallId.delete(callId)
+            const failed = block?.isError === true || data.error !== undefined
             send('tool_end', {
-              id: data.message?.toolCallId ?? data.callId,
-              tool: data.message?.toolName ?? data.name ?? 'tool',
-              // 输出上限放大到 4000：App 要把它折进行动行的展开里（保真转发），
-              // 600 字会把报错与回显截掉一半
-              output: shorten(data.message?.content, 4000),
-              status: data.error === undefined ? 'success' : 'error',
+              id: callId,
+              tool: toolName,
+              // 输出上限 16000：App 要把它折进行动行的展开里（保真转发），
+              // 早期 600 字会把报错与回显截掉一半
+              output: shorten(block?.content ?? data.message?.content, 16000),
+              status: failed ? 'error' : 'success',
             })
             break
           }

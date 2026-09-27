@@ -96,8 +96,8 @@ class ChatProvider extends ChangeNotifier {
   /// 以前思考拼成一大段、步骤另列一块，顺序信息是丢的。
   final List<Map<String, dynamic>> _timeline = <Map<String, dynamic>>[];
 
-  /// 落库时每条详情的长度上限（完整参数可能很长，没必要整段进云端）。
-  static const int _stepDetailMaxChars = 1200;
+  /// 落库时每条详情的长度上限（完整参数与工具输出可能很长，但也不能无限进云端）。
+  static const int _stepDetailMaxChars = 16000;
 
   /// 润色阶段（服务端拿主模型总结执行结果）的思考，**不展示**。
   ///
@@ -123,7 +123,7 @@ class ChatProvider extends ChangeNotifier {
   /// [kind] 由桥接显式给出；老版本桥接没有这个字段时，退回按 `💭` 前缀判断。
   /// [detail] 是同一条步骤的完整参数（例如工具调用的原始 JSON），只做折叠展示用。
   void _absorbStep(String raw,
-      {String detail = '', String kind = '', String tool = '', String status = ''}) {
+      {String detail = '', String kind = '', String tool = '', String status = '', String callId = ''}) {
     var text = raw;
     var resolvedKind = kind.trim();
     if (resolvedKind.isEmpty) {
@@ -161,17 +161,35 @@ class ChatProvider extends ChangeNotifier {
 
     // 工具输出：折进**对应的行动行**（DSH 里工具输入与输出是同一行的展开内容），
     // 不新增一行，否则一个工具会占两行、看着比 DSH 还乱。
+    //
+    // 三级配对（越靠前越可靠）：
+    //   1. callId —— DSH 的 `tool/result` 帧里**没有工具名**，只有 callId 能精确对上；
+    //   2. 同名工具里最近一条还没有输出的；
+    //   3. 最近一条还没有输出的行动行（结果在顺序上紧跟着它的调用）。
+    // 第 3 级是兜底：插件在修好字段映射之前，结果帧带回来的工具名是 "tool"。
     if (resolvedKind == 'result') {
-      for (var i = _timeline.length - 1; i >= 0; i--) {
-        final item = _timeline[i];
-        if (item['kind'] != 'action') continue;
-        if (tool.isNotEmpty && item['tool']?.toString() != tool) continue;
-        if ((item['result'] ?? '').toString().isNotEmpty) continue;
-        item['result'] = storedDetail;
-        if (status.isNotEmpty) item['status'] = status;
+      var idx = callId.isNotEmpty
+          ? _timeline.lastIndexWhere((e) =>
+              e['kind'] == 'action' &&
+              (e['callId'] ?? '').toString() == callId &&
+              (e['result'] ?? '').toString().isEmpty)
+          : -1;
+      if (idx < 0 && tool.isNotEmpty && tool != 'tool') {
+        idx = _timeline.lastIndexWhere((e) =>
+            e['kind'] == 'action' &&
+            e['tool']?.toString() == tool &&
+            (e['result'] ?? '').toString().isEmpty);
+      }
+      if (idx < 0) {
+        idx = _timeline.lastIndexWhere(
+            (e) => e['kind'] == 'action' && (e['result'] ?? '').toString().isEmpty);
+      }
+      if (idx >= 0) {
+        _timeline[idx]['result'] = storedDetail;
+        if (status.isNotEmpty) _timeline[idx]['status'] = status;
         return;
       }
-      // 找不到对应行动行（例如工具调用是在旧版本桥接上发生的）：退化成一条提示行
+      // 实在找不到对应行动行（例如工具调用发生在旧版本桥接上）：退化成一条提示行
       _timeline.add({'kind': 'note', 'text': text, 'tool': '', 'detail': ''});
       return;
     }
@@ -183,6 +201,7 @@ class ChatProvider extends ChangeNotifier {
       'text': text,
       'tool': tool.trim(),
       'detail': storedDetail,
+      if (callId.isNotEmpty) 'callId': callId,
     });
   }
 
@@ -1498,6 +1517,7 @@ class ChatProvider extends ChangeNotifier {
                 kind: chunk['kind']?.toString() ?? '',
                 tool: chunk['tool']?.toString() ?? '',
                 status: chunk['status']?.toString() ?? '',
+                callId: chunk['callId']?.toString() ?? '',
               );
               // 思维链只显示宿主真实的思考（💭 流）；派发/工具/完成这些执行步骤
               // 走 agentExecution，不再混进同一个字符串冒充"思考过程"。
@@ -2058,6 +2078,7 @@ class ChatProvider extends ChangeNotifier {
                 kind: chunk['kind']?.toString() ?? '',
                 tool: chunk['tool']?.toString() ?? '',
                 status: chunk['status']?.toString() ?? '',
+                callId: chunk['callId']?.toString() ?? '',
               );
               // 思维链只显示宿主真实的思考（💭 流）；派发/工具/完成这些执行步骤
               // 走 agentExecution，不再混进同一个字符串冒充"思考过程"。

@@ -2343,8 +2343,8 @@ async function startServer() {
     };
 
     const stepHandler = (data: any) => {
-      // detail = 完整工具参数（摘要之外的原文）；kind = thinking/action/note；
-      // tool = 工具名（action 才有）—— App 据此渲染 DSH 那种"思考行 / 行动行"
+      // detail = 完整工具参数（摘要之外的原文）；kind = thinking/action/result/note；
+      // tool = 工具名；status = success/error；callId = 调用与结果精确配对用
       sendEvent("step", {
         step: data.step,
         taskId: data.taskId,
@@ -2352,6 +2352,7 @@ async function startServer() {
         kind: data.kind,
         tool: data.tool,
         status: data.status,
+        callId: data.callId,
       });
     };
 
@@ -3109,7 +3110,7 @@ async function startServer() {
   // Agent task step update
   app.post("/api/agent/step", (req, res) => {
     try {
-      const { taskId, step, token, kind, tool, detail, status } = req.body;
+      const { taskId, step, token, kind, tool, detail, status, callId } = req.body;
       if (token && connectedAgents.has(token)) {
         connectedAgents.get(token)!.lastPing = Date.now();
       }
@@ -3126,6 +3127,7 @@ async function startServer() {
             kind,
             tool,
             status,
+            callId,
           });
         }
       }
@@ -4924,6 +4926,7 @@ if %errorlevel% neq 0 (
                 kind: msg.kind,
                 tool: msg.tool,
                 status: msg.status,
+                callId: msg.callId,
               });
             }
           } else if (msg.type === "agent_content") {
