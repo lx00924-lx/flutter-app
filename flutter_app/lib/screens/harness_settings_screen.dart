@@ -878,6 +878,28 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                       },
                     ),
                     const SizedBox(height: 8),
+                    // 二次润色：给"我就要电脑端原样输出"的用户一个开关。
+                    // 关掉后中继不再调主模型总结，直接把宿主回传的原始输出显示出来。
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('二次润色（用主模型总结执行结果）', style: TextStyle(fontSize: 14)),
+                      subtitle: Text(
+                        s.agentPolish
+                            ? '已开启：电脑端跑完后，由 App 里配置的模型把结果整理成一段回复'
+                            : '已关闭：直接显示电脑端的原始输出（不改写、不压缩；思维链与执行步骤照常显示）',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                      value: s.agentPolish,
+                      onChanged: (val) {
+                        s.agentPolish = val;
+                        sp.updateSettings(s);
+                        _snack(
+                          val ? '已开启二次润色' : '已关闭二次润色：下一条消息直接显示电脑端原始输出',
+                          isError: false,
+                        );
+                      },
+                    ),
+                    const SizedBox(height: 8),
                     // 配对 Token（非文本选取，仅支持纯随机生成，支持长按复制完整真实 Token）
                     Row(
                       children: [

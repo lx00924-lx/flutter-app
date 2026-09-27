@@ -608,8 +608,49 @@ export function apply(ctx) {
     }
 
     let emittedContent = ''
+    let emittedReasoning = ''
     let currentTurn
     let finished = false
+
+    /**
+     * 按"块"推送一条 assistant 消息里的文本。
+     *
+     * DSH 的 `assistant/message` 帧里 `data.message.content` 是**块数组**，块类型有：
+     *   · `reasoning` —— 模型的真实思考（DSH 网页端显示的那份）
+     *   · `text`      —— 给用户看的正文
+     *   · `tool-call` —— 走独立的 `tool/call` 帧，这里不管
+     *
+     * 以前这里用 `firstText(data) ?? textOfMessage(data?.message)` 抓文本，而
+     * `textOfMessage` 是 `blocks.map(b => b.text).join('')` —— 于是**思考被当成正文推
+     * 出去，而 `reasoning` 通道一个事件都没有**：App 那边思维链永远是空的（用户实测
+     * "选择完成前是未思考"），同时宿主思考还被混进"执行结果"里交给润色模型。
+     *
+     * 现在按块类型分流：同一块在后续帧里变长时只推增量，新块之间补一个空行 ——
+     * 消费端（桥接 → App）直接拼接就是正确分段，不需要再做启发式判断。
+     */
+    const emitBlock = (channel, rawText) => {
+      const text = typeof rawText === 'string' ? rawText : ''
+      if (text.trim().length === 0) return
+      const prev = channel === 'reasoning' ? emittedReasoning : emittedContent
+      let payload
+      let next
+      if (prev.length > 0 && text.startsWith(prev)) {
+        // 同一块在后续帧里变长了：只推增量
+        payload = text.slice(prev.length)
+        next = text
+      } else if (prev.includes(text)) {
+        // 这一段已经推过（同一帧重复到达）
+        return
+      } else {
+        payload = prev.length === 0 ? text : `\n\n${text}`
+        next = prev + payload
+      }
+      if (payload.length === 0) return
+      send(channel, { content: payload })
+      if (channel === 'reasoning') emittedReasoning = next
+      else emittedContent = next
+    }
+
     const heartbeat = setInterval(() => {
       try {
         controller.enqueue(encoder.encode(': keep-alive\n\n'))
@@ -636,13 +677,12 @@ export function apply(ctx) {
             break
           }
           case 'assistant/message': {
-            const text = firstText(data) ?? textOfMessage(data?.message)
-            if (text !== undefined && text.length > emittedContent.length && text.startsWith(emittedContent.slice(0, Math.min(24, emittedContent.length)))) {
-              send('content', { content: text.slice(emittedContent.length) })
-              emittedContent = text
-            } else if (text !== undefined && !emittedContent.includes(text)) {
-              send('content', { content: text })
-              emittedContent += text
+            const blocks = data?.message?.content
+            if (Array.isArray(blocks)) {
+              for (const block of blocks) {
+                if (block?.type === 'reasoning') emitBlock('reasoning', block.text)
+                else if (block?.type === 'text') emitBlock('content', block.text)
+              }
             }
             break
           }
@@ -701,13 +741,13 @@ export function apply(ctx) {
     return ''
   }
 
-  /** 从 AssistantMessage 里取文本。 */
-  function textOfMessage(message) {
-    const blocks = message?.content
-    if (!Array.isArray(blocks)) return undefined
-    const text = blocks.map((block) => (typeof block?.text === 'string' ? block.text : '')).join('')
-    return text.trim().length === 0 ? undefined : text
-  }
+  /**
+   * 已删除：`textOfMessage(message)`。
+   *
+   * 它是 `blocks.map(b => b.text).join('')`，会把 `reasoning`（模型思考）和 `text`
+   * （正文）拼成一段一起当正文推出去 —— 既是"思维链永远是空的"的根因，也让宿主思考
+   * 污染了交给润色模型的执行结果。现在改用按块类型分流的 [emitBlock]。
+   */
   //#endregion
 
   //#region 审批桥

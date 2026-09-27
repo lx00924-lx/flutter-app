@@ -168,6 +168,13 @@ class AppSettings {
   String agentPermission; // 'workspace-write' | 'read-only' | 'full-access'
   String agentModel; // 'deepseek-v4-flash'
 
+  /// 是否用主模型对电脑端的执行结果做「二次润色」（默认开）。
+  ///
+  /// 关掉后中继直接回传电脑端的原始输出（`agentExecution.rawOutput`），不再让主模型
+  /// 总结/改写一遍 —— 给"我就要 DSH 原样输出"的用户用：润色会换措辞、压缩细节，
+  /// 有时还会把执行过程里的关键信息丢掉。属于用户设置，跟随云端漫游。
+  bool agentPolish;
+
   /// 启动应用时自动拉起电脑端桥接（默认关：由用户自己决定，见设置页开关）。
   ///
   /// 为什么要有这个开关：实测桌面端 LxAI 启动后桥接**不会**自动起来，必须手动点
@@ -250,6 +257,7 @@ class AppSettings {
     this.agentReasoningEffort = 'high',
     this.agentPermission = 'workspace-write',
     this.agentModel = 'deepseek-v4-flash',
+    this.agentPolish = true,
     // 辅助
     String? githubOwner,
     String? githubRepo,
@@ -333,6 +341,7 @@ class AppSettings {
       'agentReasoningEffort': agentReasoningEffort,
       'agentPermission': agentPermission,
       'agentModel': agentModel,
+      'agentPolish': agentPolish,
       'githubOwner': githubOwner,
       'githubRepo': githubRepo,
       'customDataPath': customDataPath,
@@ -461,6 +470,7 @@ class AppSettings {
       agentReasoningEffort: map['agentReasoningEffort']?.toString() ?? 'high',
       agentPermission: map['agentPermission']?.toString() ?? 'workspace-write',
       agentModel: map['agentModel']?.toString() ?? 'deepseek-v4-flash',
+      agentPolish: map['agentPolish'] as bool? ?? true,
       githubOwner: map['githubOwner']?.toString() ?? 'lx00924-lx',
       githubRepo: map['githubRepo']?.toString() ?? 'flutter-app',
       customDataPath: map['customDataPath']?.toString() ?? '',

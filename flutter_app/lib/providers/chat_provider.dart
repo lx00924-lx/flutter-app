@@ -1228,6 +1228,8 @@ class ChatProvider extends ChangeNotifier {
       'agentReasoningEffort': settingsProvider.settings.agentReasoningEffort,
       'agentPermission': settingsProvider.settings.agentPermission,
       'agentModel': settingsProvider.settings.agentModel,
+      // 中继据此决定是否用主模型"二次润色"：关掉就直接回传电脑端的原始输出
+      'agentPolish': settingsProvider.settings.agentPolish,
       'sessionSummary': _currentSession?.summary,
     };
 
@@ -1756,6 +1758,8 @@ class ChatProvider extends ChangeNotifier {
       'agentReasoningEffort': settingsProvider.settings.agentReasoningEffort,
       'agentPermission': settingsProvider.settings.agentPermission,
       'agentModel': settingsProvider.settings.agentModel,
+      // 中继据此决定是否用主模型"二次润色"：关掉就直接回传电脑端的原始输出
+      'agentPolish': settingsProvider.settings.agentPolish,
       'sessionSummary': _currentSession?.summary,
     };
 

@@ -1259,10 +1259,25 @@ async function runServerSideGeneration({
       return;
     }
 
+    /**
+     * 是否真的走「二次润色」这一步（用 App 配的主模型把电脑端执行结果总结一遍）。
+     *
+     * 两种情况下不走：
+     * 1. App 没配主模型 Key —— 实测过：卡片 apiKey 空着时兜底逻辑会把 Authorization
+     *    写成 `Bearer lm-studio`（见下面 apiKey || "lm-studio"）→ 请求 api.deepseek.com
+     *    直接 401，App 把原始报错追加进气泡（"Your api key: ****udio is invalid" 里
+     *    的 udio 就是 lm-studio 的尾巴）。Agent 那一轮其实已经跑完，不该被污染。
+     * 2. 用户显式关掉了「二次润色」（settings.agentPolish === false）—— 这类用户要的
+     *    就是电脑端的原始输出，再让主模型改写一遍只会换措辞，还可能顺带编内容。
+     */
+    const polishingEnabled = !!settings?.apiKey && settings?.agentPolish !== false;
+    const polishSkippedByUser = isAgentMode && settings?.agentPolish === false;
+
     // 本地执行结束（成功或失败）→ 进入"润色"阶段。
     // 客户端据此判断此刻插话是否安全：执行阶段插话会丢掉正在跑的任务，
     // 润色阶段插话只是掐断一段便宜的文本生成。
-    if (isAgentMode) {
+    // 不润色时**不要**发这个事件，否则界面会白等一段根本不存在的"整理中"。
+    if (isAgentMode && polishingEnabled) {
       genState.phase = 'polishing';
       generationEvents.emit(`phase_${assistantMessageId}`, { phase: 'polishing' });
     }
@@ -1274,20 +1289,13 @@ async function runServerSideGeneration({
     let contextLength = settings?.contextLength || 30000;
     const sessionSummary = settings?.sessionSummary;
 
-    /**
-     * Agent 模式下，如果 App 没配主模型 Key，就不要再去打任何模型接口。
-     *
-     * 实测过：App 的模型卡片 apiKey 空着 → 兜底逻辑把 Authorization 写成
-     * `Bearer lm-studio`（见下面 apiKey || "lm-studio"）→ 请求 https://api.deepseek.com
-     * 直接 401 Authentication Fails，App 把整段原始报错追加到气泡里
-     * （"Your api key: ****udio is invalid" 里的 udio 就是 lm-studio 的尾巴）。
-     * Agent 那一轮其实已经跑完并拿到输出，这种"二次总结"失败不该污染结果。
-     */
-    if (isAgentMode && !settings?.apiKey) {
+    if (isAgentMode && !polishingEnabled) {
       const raw = (agentExecutionResult?.rawOutput ?? '').toString().trim();
       const notice = raw.length > 0
         ? raw
-        : '本地 Agent 已完成本轮执行（未配置主模型 Key，跳过二次总结）。';
+        : (polishSkippedByUser
+            ? '本地 Agent 已完成本轮执行（已关闭二次润色，这一轮没有文本输出）。'
+            : '本地 Agent 已完成本轮执行（未配置主模型 Key，跳过二次总结）。');
       const doneMessage = {
         id: assistantMessageId,
         sessionId: resolvedSessionId,
@@ -1314,7 +1322,11 @@ async function runServerSideGeneration({
       });
       genState.status = 'completed';
       genState.content = notice;
-      console.log('[Server Background Gen] 跳过二次总结：App 未配置主模型 Key（agent 模式直接用 Agent 输出）');
+      console.log(
+        polishSkippedByUser
+          ? '[Server Background Gen] 跳过二次润色：用户已关闭该功能（直接用电脑端输出）'
+          : '[Server Background Gen] 跳过二次总结：App 未配置主模型 Key（agent 模式直接用 Agent 输出）',
+      );
       return;
     }
 
