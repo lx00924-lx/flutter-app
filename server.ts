@@ -100,13 +100,23 @@ generationEvents.setMaxListeners(500);
 
 // 监听端口：默认 3000，可用环境变量 PORT 覆盖（便于本地起隔离实例做安全回归测试）
 const PORT = Number(process.env.PORT) || 3000;
-/** Agent 任务正常超时（300 秒）：这段时间内本地没回结果就认为它不行了。 */
-const AGENT_TASK_TIMEOUT_MS = 300000;
+/**
+ * Agent 任务正常超时（默认 **30 分钟**，可用环境变量 `AGENT_TASK_TIMEOUT_MS` 覆盖）。
+ *
+ * 为什么从 5 分钟提上来：真实的长任务（跑构建、装包、多轮工具调用、等用户拍板）动辄
+ * 十几分钟。实测一次 5 分钟就判死 → 中继回一条"本地 Agent 执行超时 (300秒)"的失败提示，
+ * 而 **DSH 那边其实还在继续跑**（用户截图里过程卡还在长），两端认知完全对不上。
+ * 客户端的 SSE 每 10 秒有心跳，长任务不会因此被掐断，所以这里的上限可以放得很宽。
+ */
+const AGENT_TASK_TIMEOUT_MS = Number(process.env.AGENT_TASK_TIMEOUT_MS) > 0
+  ? Number(process.env.AGENT_TASK_TIMEOUT_MS)
+  : 30 * 60 * 1000;
 /**
  * 若该用户此刻有挂起的选择框/审批（= Agent 正在等用户拍板），超时不是"失败"而是
- * "在等人"，顺延到这段时间再判死。顺延期间**不会**拿主模型替用户作答。
+ * "在等人"，顺延到这段时间再判死（= 再给一个完整窗口）。顺延期间**不会**拿主模型
+ * 替用户作答。
  */
-const AGENT_TASK_PENDING_GRACE_MS = 30 * 60 * 1000;
+const AGENT_TASK_PENDING_GRACE_MS = AGENT_TASK_TIMEOUT_MS;
 /**
  * 本次中继进程的启动标识。
  *
@@ -1122,7 +1132,11 @@ async function runServerSideGeneration({
                 return;
               }
               pendingAgentTasks.delete(taskId);
-              reject(new Error(`本地 Agent 执行超时 (${graceForPendingDecision ? '等待用户确认超时' : '300秒'})`));
+              reject(new Error(
+                `本地 Agent 执行超时（已等待 ${Math.round(
+                  (graceForPendingDecision ? AGENT_TASK_PENDING_GRACE_MS : AGENT_TASK_TIMEOUT_MS) / 60000,
+                )} 分钟）`,
+              ));
             }, graceForPendingDecision ? AGENT_TASK_PENDING_GRACE_MS : AGENT_TASK_TIMEOUT_MS);
           };
           armTimeout(false);

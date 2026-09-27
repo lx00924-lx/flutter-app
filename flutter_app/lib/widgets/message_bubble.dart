@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:markdown/markdown.dart' as md;
 import 'package:provider/provider.dart';
 import '../models/chat_message.dart';
 import '../providers/chat_provider.dart';
@@ -629,9 +630,14 @@ class MessageBubble extends StatelessWidget {
                       else
                         const SizedBox.shrink()
                     else
-                      MarkdownBody(
+                      _CollapsibleMarkdownBody(
                         data: message.content.isEmpty && message.isStreaming ? '正在思考中...' : message.content,
-                        selectable: false,
+                        isDark: isDark,
+                        // 流式期间不折叠：内容还在长，折起来反而看不清进度
+                        collapsible: !message.isStreaming,
+                        // 气泡底色：折起来时底部渐隐要盖在它上面
+                        fadeColor: isDark ? const Color(0xFF1E293B) : Colors.white,
+                        builders: {'pre': _CodeBlockBuilder(isDark: isDark)},
                         styleSheet: MarkdownStyleSheet(
                           p: TextStyle(
                             fontSize: settings.chatFontSize.toDouble(),
@@ -739,6 +745,191 @@ class MessageBubble extends StatelessWidget {
           // 比纯黑更耐看）；暗色模式下纯黑会直接看不见，所以用浅色。
           color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF111827),
         ),
+      ),
+    );
+  }
+}
+
+/// 超长回答先折起来：默认只露前 [collapsedHeight] 像素，底部渐隐 + 一个「展开全文」。
+///
+/// 各家客户端的常见做法：一屏读不完的长回答不让用户一路滑，想看全文点一下即可。
+/// 折叠用"限高 + 裁剪"而不是截断文本，避免把 Markdown 语法从中间切断。
+class _CollapsibleMarkdownBody extends StatefulWidget {
+  const _CollapsibleMarkdownBody({
+    required this.data,
+    required this.styleSheet,
+    required this.isDark,
+    required this.fadeColor,
+    this.builders = const {},
+    this.collapsible = true,
+  });
+
+  final String data;
+  final MarkdownStyleSheet styleSheet;
+  final bool isDark;
+
+  /// 气泡底色：折起来时底部渐隐要盖在它上面
+  final Color fadeColor;
+  final Map<String, MarkdownElementBuilder> builders;
+  final bool collapsible;
+
+  /// 超过这么多字符才折（短回答折起来反而多一次点击）
+  static const int threshold = 1200;
+  static const double collapsedHeight = 340;
+
+  @override
+  State<_CollapsibleMarkdownBody> createState() => _CollapsibleMarkdownBodyState();
+}
+
+class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody> {
+  bool _expanded = false;
+
+  bool get _foldable =>
+      widget.collapsible && widget.data.length > _CollapsibleMarkdownBody.threshold;
+
+  @override
+  Widget build(BuildContext context) {
+    final body = MarkdownBody(
+      data: widget.data,
+      selectable: false,
+      styleSheet: widget.styleSheet,
+      builders: widget.builders,
+    );
+    if (!_foldable || _expanded) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          body,
+          if (_foldable) _toggleButton(expand: false),
+        ],
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Stack(
+          children: [
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: _CollapsibleMarkdownBody.collapsedHeight),
+              child: ClipRect(child: body),
+            ),
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              height: 44,
+              child: IgnorePointer(
+                child: Container(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [widget.fadeColor.withAlpha(0), widget.fadeColor],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        _toggleButton(expand: true),
+      ],
+    );
+  }
+
+  Widget _toggleButton({required bool expand}) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton.icon(
+        style: TextButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          minimumSize: const Size(0, 30),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
+        onPressed: () => setState(() => _expanded = expand),
+        icon: Icon(expand ? Icons.expand_more : Icons.expand_less, size: 16),
+        label: Text(expand ? '展开全文' : '收起', style: const TextStyle(fontSize: 12.5)),
+      ),
+    );
+  }
+}
+
+/// 代码块：等宽、灰底、**横向滚动不换行**，右上角一键复制。
+///
+/// 以前走默认渲染：长命令会被硬换行折断，也没法直接复制。
+class _CodeBlockBuilder extends MarkdownElementBuilder {
+  _CodeBlockBuilder({required this.isDark});
+
+  final bool isDark;
+
+  @override
+  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
+    return _CodeBlockView(code: element.textContent.trimRight(), isDark: isDark);
+  }
+}
+
+class _CodeBlockView extends StatelessWidget {
+  const _CodeBlockView({required this.code, required this.isDark});
+
+  final String code;
+  final bool isDark;
+
+  @override
+  Widget build(BuildContext context) {
+    final muted = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
+    final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0);
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: borderColor),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const SizedBox(width: 10),
+              Text('代码', style: TextStyle(fontSize: 11, color: muted)),
+              const Spacer(),
+              InkWell(
+                borderRadius: BorderRadius.circular(6),
+                onTap: () {
+                  Clipboard.setData(ClipboardData(text: code));
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('代码已复制'), duration: Duration(seconds: 1)),
+                  );
+                },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.copy_all_outlined, size: 13, color: muted),
+                      const SizedBox(width: 4),
+                      Text('复制', style: TextStyle(fontSize: 11.5, color: muted)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          Divider(height: 1, thickness: 0.5, color: borderColor),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+            child: SelectableText(
+              code,
+              style: TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 12.5,
+                height: 1.45,
+                color: isDark ? const Color(0xFFE2E8F0) : const Color(0xFF0F172A),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
