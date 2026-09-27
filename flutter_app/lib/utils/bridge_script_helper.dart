@@ -8,18 +8,40 @@ import 'web_download_stub.dart' if (dart.library.html) 'web_download_helper.dart
 import '../config/app_config.dart';
 
 class BridgeScriptHelper {
-  /// 从应用内置 Assets 中读取完整的工业级生产 lxai_bridge.py
-  static Future<String> getFullBridgeScriptContent() async {
+  /// 从应用内置 Assets 中读取完整的工业级生产 lxai_bridge.py。
+  ///
+  /// 读取失败或内容明显残缺时返回 **null**（调用方必须处理），绝不返回替代品。
+  ///
+  /// 历史教训：这里曾经在读取失败时降级返回一个 `generatePyContent()` 的"空壳脚本"
+  /// —— 148 行、自称 v3.6，实际只探活一次宿主然后 `while True: sleep(5)`，永远不连中继。
+  /// 而 `BridgeProcessManager.ensureScriptUpToDate()` 会拿这个返回值**覆盖磁盘上能用的
+  /// 脚本**，于是"资产读取失败"会静默演变成"桥接进程活着但电脑端永远离线"，
+  /// 用户拿不到任何指向真因的报错。宁可明确失败，也不要这种假成功。
+  static Future<String?> getFullBridgeScriptContent() async {
     try {
       final content = await rootBundle.loadString('assets/scripts/lxai_bridge.py');
-      if (content.trim().isNotEmpty) {
+      if (isPlausibleBridgeScript(content)) {
         return content;
       }
+      debugPrint('[BridgeScriptHelper] 内置 lxai_bridge.py 内容不完整（${content.length} 字符），拒绝使用');
     } catch (e) {
       debugPrint('[BridgeScriptHelper] 读取内置 assets/scripts/lxai_bridge.py 失败: $e');
     }
-    // 降级兜底方案
-    return generatePyContent();
+    return null;
+  }
+
+  /// 内容合理性检查：只认"看起来确实是那份桥接脚本"的文本。
+  ///
+  /// 双重保险 —— 读取侧（本文件）用它挡掉残缺资产，写入侧
+  /// （`BridgeProcessManager.ensureScriptUpToDate`）用它挡掉"用残缺内容覆盖好脚本"。
+  /// 判据取真脚本里稳定的三处特征 + 体积下限（真脚本约 3300 行 / 134KB）。
+  static bool isPlausibleBridgeScript(String content) {
+    if (content.trim().length < 20000) return false;
+    const markers = <String>['def poll_', 'def dsh_headers', 'merge_session_row'];
+    for (final marker in markers) {
+      if (!content.contains(marker)) return false;
+    }
+    return true;
   }
 
   /// 生成适配 Windows 一键启动的 run_bridge.bat 脚本内容
@@ -71,86 +93,6 @@ if %errorlevel% neq 0 (
     pause
 )
 '''.replaceAll('\n', '\r\n');
-  }
-
-  /// 获取标准 Python 桥接守护脚本 (lxai_bridge.py)
-  static String generatePyContent({
-    String? serverUrl,
-    String defaultHarnessUrl = 'http://127.0.0.1:3080',
-  }) {
-    final resolvedServerUrl = (serverUrl != null && serverUrl.trim().isNotEmpty)
-        ? serverUrl.trim()
-        : AppConfig.normalizedServerBaseUrl;
-    return '''#!/usr/bin/env python3
-"""
-本地 Agent 安全反向桥接客户端 (LxAI 本地 Agent 桥接 v3.6 - 工业增强/双模高可用版)
-======================================================================
-核心特性：
-1. 本地主动向上发起连接至 App 调度服务器（免公网 IP，免端口映射）。
-2. 支持 HTTP 智能长轮询 (Long-Polling) 与 WebSocket 双通道自适应。
-3. 严格安全接口白名单：只允许转发 /v1/chat/completions 标准推理，禁止篡改系统。
-4. 全程无状态纯内存转发：不持久化任何对话记录、不缓存密钥、不落盘日志。
-"""
-
-import argparse
-import asyncio
-import json
-import logging
-import os
-import ssl
-import sys
-import time
-import urllib.request
-import urllib.error
-import urllib.parse
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='[%(asctime)s] [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S'
-)
-logger = logging.getLogger("Bridge")
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="本地 Agent 反向桥接")
-    parser.add_argument("--token", type=str, required=True, help="配对通信 Token")
-    parser.add_argument("--server", type=str, default="$resolvedServerUrl", help="中继服务器地址")
-    parser.add_argument("--harness-url", type=str, default="$defaultHarnessUrl", help="本地 Harness API 地址")
-    return parser.parse_args()
-
-def test_harness_connection(harness_url):
-    try:
-        req = urllib.request.Request(f"{harness_url.rstrip('/')}/v1/models")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            if resp.status == 200:
-                logger.info("✅ 成功连接至本地 Harness 实例！")
-                return True
-    except Exception as e:
-        logger.warning(f"⚠️ 本地 Harness 尚未就绪或端口未开放 ({harness_url}): {e}")
-    return False
-
-def main():
-    args = parse_args()
-    logger.info("=" * 60)
-    logger.info(f"🚀 LxAI 本地 Agent 桥接启动中...")
-    logger.info(f"• 调度服务器: {args.server}")
-    logger.info(f"• 本地 Harness: {args.harness_url}")
-    logger.info(f"• 配对 Token: {args.token}")
-    logger.info("=" * 60)
-
-    test_harness_connection(args.harness_url)
-    logger.info("📡 正在向云端调度服务注册反向长连接通道...")
-    
-    # 保持心跳连接轮询
-    try:
-        while True:
-            time.sleep(5)
-    except KeyboardInterrupt:
-        logger.info("正在退出桥接客户端...")
-
-if __name__ == "__main__":
-    main()
-''';
   }
 
   /// 真实触发文件下载与保存：

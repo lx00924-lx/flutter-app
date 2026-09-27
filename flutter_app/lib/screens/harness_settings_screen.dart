@@ -1071,6 +1071,17 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                   ),
                                   onPressed: () async {
                                     final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
+                                    if (pyContent == null) {
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                            content: Text('内置桥接脚本读取失败，请重新安装 App，或改用中继服务器下载'),
+                                            backgroundColor: Colors.redAccent,
+                                          ),
+                                        );
+                                      }
+                                      return;
+                                    }
                                     final savedPath = await BridgeScriptHelper.downloadFile(
                                       fileName: 'lxai_bridge.py',
                                       content: pyContent,
@@ -1193,6 +1204,17 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                               label: const Text('下载 py 脚本', style: TextStyle(fontSize: 13)),
                               onPressed: () async {
                                 final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
+                                if (pyContent == null) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text('内置桥接脚本读取失败，请重新安装 App，或改用中继服务器下载'),
+                                        backgroundColor: Colors.redAccent,
+                                      ),
+                                    );
+                                  }
+                                  return;
+                                }
                                 final savedPath = await BridgeScriptHelper.downloadFile(
                                   fileName: 'lxai_bridge.py',
                                   content: pyContent,

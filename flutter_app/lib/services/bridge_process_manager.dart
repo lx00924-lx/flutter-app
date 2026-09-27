@@ -157,8 +157,22 @@ class BridgeProcessManager extends ChangeNotifier {
   }
 
   /// 保证磁盘上的脚本与 App 内置版本一致（旧版本会导致功能缺失）。
-  Future<void> ensureScriptUpToDate(String scriptPath) async {    try {
+  ///
+  /// 安全约束：**只允许用"确实是那份桥接脚本"的内容覆盖磁盘文件**。
+  /// 这里曾经会因为内置资产读取失败而把一份残缺脚本写下去，把用户电脑上本来能用的
+  /// 桥接脚本换成废物（进程还活着、电脑端却永远离线，且没有任何报错指向真因），
+  /// 所以现在两道闸：读取失败(null)直接放弃；内容过不了合理性检查也放弃。
+  Future<void> ensureScriptUpToDate(String scriptPath) async {
+    try {
       final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
+      if (pyContent == null) {
+        debugPrint('[Bridge] 内置桥接脚本不可用（读取失败或内容残缺），保留磁盘上现有脚本不动');
+        return;
+      }
+      if (!BridgeScriptHelper.isPlausibleBridgeScript(pyContent)) {
+        debugPrint('[Bridge] 内置桥接脚本未通过完整性检查，拒绝覆盖现有脚本');
+        return;
+      }
       final file = File(scriptPath);
       if (await file.exists()) {
         final existing = await file.readAsString();

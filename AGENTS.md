@@ -201,7 +201,22 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 6. 顶号广播只发给被顶的设备类型（`session_<旧id>` + `user_<用户名>_<设备类型>`），
    **不要**发 `user_<用户名>`（会让手机也被误通知）。
 
-## 5. 运行环境事实（排查时容易找错地方）
+## 5. 降级兜底禁止"假成功"（附覆盖用户文件前的完整性检查）
+
+- **反例（已删除）**：App 读取内置 `assets/scripts/lxai_bridge.py` 失败时，曾降级返回一个
+  148 行的"空壳脚本"——自称 v3.6、打印"正在向云端调度服务注册反向长连接通道..."，
+  实际只探活一次宿主就 `while True: sleep(5)`，永远不连中继。
+- **为什么危险**：`BridgeProcessManager.ensureScriptUpToDate()` 会拿这个返回值**覆盖磁盘上
+  能用的脚本**，于是"资产读取失败"静默演变成"桥接进程活着、电脑端永远离线"，
+  用户看不到任何指向真因的报错；导出路径也会把空壳发给用户。
+- **规则**：
+  1. 兜底要么明确失败（返回 null / 报错退出），要么真的可用；**不要返回"长得像在用"的替身**。
+  2. 任何**覆盖用户磁盘文件**的路径，写入前必须做内容合理性检查
+     （见 `BridgeScriptHelper.isPlausibleBridgeScript()`：3 处稳定特征 + 体积下限），
+     读取侧与写入侧各挡一道。
+  3. 调用方一律显式处理失败（提示用户"重新安装 App / 从正规渠道重新下载"），不要静默 continue。
+
+## 6. 运行环境事实（排查时容易找错地方）
 
 - 桌面 App 的本地数据在 **`C:\Users\lx\Documents`**（Hive：`settings_box.hive` / `sessions_box.hive` / `messages_box.hive`），
   **不在安装目录**；清缓存或换机会丢登录态与本地会话。
