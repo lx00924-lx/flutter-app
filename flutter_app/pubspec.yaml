@@ -72,6 +72,9 @@ flutter:
   assets:
     - assets/icon/
     - assets/scripts/
+    # 许可全文与署名：Apache-2.0 §4 要求随分发提供许可副本，
+    # 内容与仓库根目录 LICENSE / NOTICE 保持一致（改动时两边一起改）
+    - assets/legal/
     # Windows 托盘 4 态图标（idle/message/question/offline）
     - assets/icons/tray/
 

@@ -630,6 +630,12 @@ class _GithubReleaseCardState extends State<_GithubReleaseCard> {
                   label: const Text('隐私政策', style: TextStyle(fontSize: 12.5)),
                   style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6)),
                 ),
+                TextButton.icon(
+                  onPressed: () => showLegalDocument(context, LegalDocument.license),
+                  icon: const Icon(Icons.article_outlined, size: 16),
+                  label: const Text('许可全文', style: TextStyle(fontSize: 12.5)),
+                  style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6)),
+                ),
               ],
             ),
           ],

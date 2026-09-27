@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (C) 2026 lx00924-lx  <https://github.com/lx00924-lx/flutter-app>
+#
+# 这个脚本会被单独下载/导出后独立运行，所以在文件头直接标明许可与版权：
+# 可自由使用、修改、分发（含闭源与商业用途），需保留本声明；不授予任何商标权。
+# 完整条款见仓库根目录 LICENSE 与 NOTICE。
 """
 本地 Agent 宿主安全反向桥接客户端 (LxAI Bridge v3.6 - 工业增强/双模高可用版)
 ======================================================================

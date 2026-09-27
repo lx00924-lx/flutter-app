@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 
 /// 需要展示的法律文档。
 enum LegalDocument {
@@ -7,6 +8,13 @@ enum LegalDocument {
 
   /// 隐私政策（仓库根目录 `PRIVACY.md`）。
   privacy,
+
+  /// 开源许可全文 + 署名（仓库根目录 `LICENSE` / `NOTICE`）。
+  ///
+  /// 单独列一项的原因：Apache-2.0 第 4 条要求"随分发提供许可副本"。
+  /// 只给一个 GitHub 链接在离线/未登录时是拿不到正文的，所以把两份文件作为
+  /// assets 打进 App（`assets/legal/`），这里直接读出来展示。
+  license,
 }
 
 /// 文档正文（App 内精简版）。
@@ -17,12 +25,14 @@ enum LegalDocument {
 String legalDocumentTitle(LegalDocument doc) => switch (doc) {
       LegalDocument.terms => '用户协议 / 服务条款',
       LegalDocument.privacy => '隐私政策',
+      LegalDocument.license => '开源许可全文（Apache-2.0）',
     };
 
 /// 仓库里的完整版路径（相对仓库根目录）。
 String legalDocumentPath(LegalDocument doc) => switch (doc) {
       LegalDocument.terms => 'TERMS.md',
       LegalDocument.privacy => 'PRIVACY.md',
+      LegalDocument.license => 'LICENSE / NOTICE',
     };
 
 String legalDocumentBody(LegalDocument doc) => switch (doc) {
@@ -120,10 +130,42 @@ Agent，请立即重置。数据的收集与处理规则见《隐私政策》。
 
 通过仓库 issue 提交隐私相关问题或删除申请。
 ''',
+      // 许可全文不在这里内嵌（11KB 正文没必要进 Dart 常量）：
+      // 由 legalDocumentBodyAsync() 从内置 assets/legal/ 读取。
+      LegalDocument.license => '''
+本项目以 Apache License 2.0 发布：可自由使用、修改、分发（含闭源与商业用途），
+需保留版权与许可声明；该许可不授予任何商标权。
+
+本软件按"现状"提供，不附带任何明示或默示担保；作者不对使用后果承担赔偿责任。
+
+许可正文与署名随 App 内置，打开本页即会显示；仓库地址见"关于"页。
+''',
     };
 
+/// 取文档正文。许可全文从内置 assets 读（可能失败，失败时给可操作提示）；
+/// 协议与隐私是内嵌的精简版，直接返回。
+Future<String> legalDocumentBodyAsync(LegalDocument doc) async {
+  if (doc != LegalDocument.license) return legalDocumentBody(doc);
+  try {
+    final license = await rootBundle.loadString('assets/legal/LICENSE.txt');
+    final notice = await rootBundle.loadString('assets/legal/NOTICE.txt');
+    return '$notice\n\n'
+        '────────────────────────────────────────\n'
+        'Apache License 2.0 全文\n'
+        '────────────────────────────────────────\n\n'
+        '$license';
+  } catch (e) {
+    return '许可全文读取失败（$e）。\n\n'
+        '本项目以 Apache License 2.0 发布：可自由使用、修改、分发（含闭源与商业用途），\n'
+        '需保留版权与许可声明；该许可不授予任何商标权。\n'
+        '完整条款见仓库根目录 LICENSE（许可正文）与 NOTICE（署名与商标声明）。';
+  }
+}
+
 /// 弹出文档阅读框（登录页与设置页共用）。
-Future<void> showLegalDocument(BuildContext context, LegalDocument doc) {
+Future<void> showLegalDocument(BuildContext context, LegalDocument doc) async {
+  final body = await legalDocumentBodyAsync(doc);
+  if (!context.mounted) return;
   return showDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
@@ -132,7 +174,7 @@ Future<void> showLegalDocument(BuildContext context, LegalDocument doc) {
         width: 520,
         child: SingleChildScrollView(
           child: SelectableText(
-            legalDocumentBody(doc),
+            body,
             style: const TextStyle(fontSize: 12.5, height: 1.55),
           ),
         ),

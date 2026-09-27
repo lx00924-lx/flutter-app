@@ -231,7 +231,27 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
     再 `Stop-Process -Id`；
   - 一句话：**不要把"要杀的特征"写成会出现在自己命令行里的字符串**。
 
-## 7. 运行环境事实（排查时容易找错地方）
+## 7. 开源许可：改一处要同步的地方（Apache-2.0）
+
+**许可 = Apache License 2.0**（可闭源商用，只需保留版权与许可声明、说明实质性修改；不授予商标权）。
+以下位置必须保持一致，改许可或改品牌时逐一对齐：
+
+| 位置 | 内容 |
+| --- | --- |
+| 仓库根 `LICENSE` / `NOTICE` | 许可正文 + 署名与商标声明（**唯一正文来源**） |
+| 仓库根 `TERMS.md` / `PRIVACY.md` | 用户协议 / 隐私政策（§六 含许可摘要） |
+| 官网页脚 `src/components/ContactFooter.tsx` | 许可文案 + 三个入口；TERMS/PRIVACY 经 Vite `?raw` **构建时内联**，与根目录同一份 |
+| App `assets/legal/{LICENSE,NOTICE}.txt` + `pubspec.yaml` | 打进包里（Apache-2.0 §4 要求随分发提供许可副本），设置页「许可全文」按钮读取 |
+| App `lib/widgets/legal_documents.dart` | terms / privacy / **license** 三个枚举，switch 必须穷尽 |
+| 插件仓库 `lxai-app-bridge` | `LICENSE` / `NOTICE` / `package.json#license` / README 许可章节 / `lib/index.js` 头部注释 |
+| `lxai_bridge.py` 头部 | SPDX + 版权（脚本会被单独下载运行） |
+| App「开源许可与署名」页 | `showLicensePage` + `applicationLegalese`（本项目摘要 + 免责声明 + 第三方依赖自动汇总） |
+
+历史坑：官网页脚曾长期写 `Released under the MIT License`（改协议时漏改，且在公网生效），
+插件源码头部曾写 `AGPL-3.0-only`（与其仓库的 Apache-2.0 矛盾）。**改许可时用全仓搜索复核**：
+`MIT`、`AGPL`、`Released under`（注意 `.tsx` 容易被漏掉，PowerShell 的 `-match` 默认还不区分大小写）。
+
+## 8. 运行环境事实（排查时容易找错地方）
 
 - 桌面 App 的本地数据在 **`C:\Users\lx\Documents`**（Hive：`settings_box.hive` / `sessions_box.hive` / `messages_box.hive`），
   **不在安装目录**；清缓存或换机会丢登录态与本地会话。

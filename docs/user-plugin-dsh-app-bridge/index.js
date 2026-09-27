@@ -34,7 +34,8 @@
  * 但它们**没有额外的鉴权**：任何能访问 3080 的本机进程都能驱动智能体。
  * 不要把宿主 web 服务绑定到 0.0.0.0 或加入 --trusted-host 后暴露到局域网。
  *
- * License: AGPL-3.0-only（见 LICENSE / NOTICE）
+ * License: Apache-2.0（见 LICENSE / NOTICE）
+ * 可自由使用、修改、分发（含闭源与商业用途），需保留版权与许可声明；不授予任何商标权。
  *
  * @module lxai-app-bridge
  */
