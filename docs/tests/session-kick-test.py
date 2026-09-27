@@ -1,9 +1,32 @@
 # -*- coding: utf-8 -*-
-"""单点互斥 / 顶号语义的对抗性验证（跑在隔离实例 3100 上，不碰生产数据）"""
-import json, time, uuid, urllib.request, urllib.error, threading
+"""单点互斥 / 顶号语义的对抗性验证（13 项断言）。
 
-BASE = "http://127.0.0.1:3100"
-WS   = "ws://127.0.0.1:3100/ws/app"
+为什么要有这个脚本：单点互斥按 clientSessionId **严格相等**判定，而本机 id 会因
+"离线登录兜底"等路径与服务端记录分叉，表现为"每次重启 App 都弹账号已下线"的假顶号。
+修完之后必须能证明三件事：
+
+  1. 活跃槽位不可被陌生 id 抢走（canTakeover=false）；
+  2. 真顶号（另一台同类型设备登录）时，被顶的那台拿到的**也是** canTakeover=false
+     —— 否则两台机器会互相静默重登、来回顶号；
+  3. 只有"槽位 3 分钟无活跃"才放开接管（canTakeover=true）。
+
+另外验证顶号通知的设备隔离：被顶的设备类型收到 force_logout（带 kickedSessionId），
+另一端（如手机）一条都不该收到。
+
+跑法（务必用隔离实例，别拿生产中继做实验）：
+    # 1) 起隔离实例：软链 dist/node_modules，独立 messages_data
+    set NODE_ENV=production & set PORT=3100 & node dist/server.cjs
+    # 2) 跑测试（默认 127.0.0.1:3100，可用 LXAI_TEST_API 覆盖）
+    python docs/tests/session-kick-test.py
+
+依赖：标准库 + websockets（`pip install websockets`）；第 7 段缺 websockets 时跳过。
+"""
+import json, os, time, uuid, urllib.request, urllib.error, threading
+
+BASE = os.environ.get("LXAI_TEST_API", "http://127.0.0.1:3100")
+WS = BASE.replace("http://", "ws://").replace("https://", "wss://") + "/ws/app"
+# 第 5 步要把"对方的槽位"改成 4 分钟无活跃，需要直接改隔离实例的数据文件
+DATA_DIR = os.environ.get("LXAI_TEST_DATA_DIR", r"F:\ai\flutter-app-prodtest\messages_data")
 USER = "zz-kick-test"
 PASS = "test-pass-1234"
 ok_all = True
@@ -60,7 +83,7 @@ expect("A 现在被拒（真顶号）", st == 401, "HTTP %s" % st)
 expect("真顶号 canTakeover=false（B 槽位新鲜，A 不该反抢）", b.get("canTakeover") is False, "canTakeover=%s" % b.get("canTakeover"))
 
 print("\n[5] 让 B 的槽位过期（模拟对方早就不用了 / 本地与服务端分叉）")
-p = r"F:\ai\flutter-app-prodtest\messages_data\active_sessions.json"
+p = os.path.join(DATA_DIR, "active_sessions.json")
 sess = json.load(open(p, encoding="utf-8"))
 sess[USER]["desktop"]["lastActive"] = int(time.time() * 1000) - 4 * 60 * 1000
 json.dump(sess, open(p, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
