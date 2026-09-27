@@ -86,6 +86,13 @@ class ChatProvider extends ChangeNotifier {
   /// 宿主这一轮的执行步骤（派发 / 工具调用 / 完成），单独展示，不混进思考。
   final List<String> _stepLog = <String>[];
 
+  /// 与 [_stepLog] 一一对应的完整工具参数（没有详情的位置是空串）。
+  /// 界面只显示一行摘要，点开才看完整内容；落库时按条截断，避免消息体积失控。
+  final List<String> _stepDetails = <String>[];
+
+  /// 落库时每条详情的长度上限（完整参数可能很长，没必要整段进云端）。
+  static const int _stepDetailMaxChars = 1200;
+
   /// 润色阶段（服务端拿主模型总结执行结果）的思考，**不展示**。
   ///
   /// 它不是宿主那份思考（server.ts 的 reasoning 来自润色的那个模型），混进思维链
@@ -96,6 +103,7 @@ class ChatProvider extends ChangeNotifier {
   void _resetTurnTrace() {
     _harnessThinking.clear();
     _stepLog.clear();
+    _stepDetails.clear();
     _polishThinking.clear();
   }
 
@@ -104,7 +112,10 @@ class ChatProvider extends ChangeNotifier {
 
   /// 把宿主的一条 step 文本分流：`💭` 是模型的思考 delta（直接拼接还原原文），
   /// 其余（🚀 派发 / 🔧 工具 / ✓ 工具完成 / ✅ 执行完成）算执行步骤。
-  void _absorbStep(String raw) {
+  ///
+  /// [detail] 是同一条步骤的完整参数（例如工具调用的原始 JSON）：只做折叠展示用，
+  /// 思考类步骤不带详情。
+  void _absorbStep(String raw, {String detail = ''}) {
     if (raw.startsWith('$_thinkingPrefix ')) {
       _harnessThinking.write(raw.substring(_thinkingPrefix.length + 1));
       return;
@@ -114,11 +125,46 @@ class ChatProvider extends ChangeNotifier {
       return;
     }
     final text = raw.trim();
-    if (text.isNotEmpty) _stepLog.add(text);
+    if (text.isEmpty) return;
+    _stepLog.add(text);
+    final trimmedDetail = detail.trim();
+    _stepDetails.add(
+      trimmedDetail.isEmpty
+          ? ''
+          : (trimmedDetail.length > _stepDetailMaxChars
+              ? '${trimmedDetail.substring(0, _stepDetailMaxChars)}…（已截断）'
+              : trimmedDetail),
+    );
+  }
+
+  /// 组装一条执行记录：步骤优先用宿主回传的那份，详情用本地实时收集的那份
+  /// （只有条数对得上才敢对齐，否则宁可不给详情，也不要把详情错配到别的步骤上）。
+  AgentExecutionRecord _composeExecution({
+    required String status,
+    List<String>? relaySteps,
+    String? rawOutput,
+    String? timestamp,
+  }) {
+    final steps = (relaySteps != null && relaySteps.isNotEmpty)
+        ? relaySteps
+        : List<String>.from(_stepLog);
+    final details = steps.length == _stepDetails.length
+        ? List<String>.from(_stepDetails)
+        : const <String>[];
+    return AgentExecutionRecord(
+      status: status,
+      steps: steps,
+      stepDetails: details,
+      rawOutput: rawOutput,
+      timestamp: timestamp,
+    );
   }
 
   /// 本轮实时收集到的执行步骤（执行中给界面用；结束后以 message.agentExecution 为准）。
   List<String> get liveSteps => List<String>.unmodifiable(_stepLog);
+
+  /// 与 [liveSteps] 一一对应的完整参数（折叠展示用）。
+  List<String> get liveStepDetails => List<String>.unmodifiable(_stepDetails);
 
   /// 把当前会话视图按本地库重建（对账导入新版本后调用）。
   ///
@@ -1306,7 +1352,10 @@ class ChatProvider extends ChangeNotifier {
             }
 
             if (chunk['step'] != null) {
-              _absorbStep(chunk['step'].toString());
+              _absorbStep(
+                chunk['step'].toString(),
+                detail: chunk['detail']?.toString() ?? '',
+              );
               // 思维链只显示宿主真实的思考（💭 流）；派发/工具/完成这些执行步骤
               // 走 agentExecution，不再混进同一个字符串冒充"思考过程"。
               if (_harnessThinking.isNotEmpty) {
@@ -1334,17 +1383,14 @@ class ChatProvider extends ChangeNotifier {
               final result = chunk['result'];
               if (result is Map) {
                 final rec = AgentExecutionRecord.fromMap(result);
-                assistantMsg.agentExecution = AgentExecutionRecord(
+                assistantMsg.agentExecution = _composeExecution(
                   status: rec.status,
-                  steps: rec.steps.isNotEmpty ? rec.steps : List<String>.from(_stepLog),
+                  relaySteps: rec.steps,
                   rawOutput: rec.rawOutput,
                   timestamp: rec.timestamp,
                 );
               } else if (_stepLog.isNotEmpty) {
-                assistantMsg.agentExecution = AgentExecutionRecord(
-                  status: 'completed',
-                  steps: List<String>.from(_stepLog),
-                );
+                assistantMsg.agentExecution = _composeExecution(status: 'completed');
               }
               _turnPhase = TurnPhase.polishing;
               notifyListeners();
@@ -1369,12 +1415,15 @@ class ChatProvider extends ChangeNotifier {
                 assistantMsg.reasoningContent = _polishThinking.toString();
               }
               if (chunk['agentExecution'] is Map) {
-                assistantMsg.agentExecution = AgentExecutionRecord.fromMap(chunk['agentExecution'] as Map<dynamic, dynamic>);
-              } else if (_stepLog.isNotEmpty) {
-                assistantMsg.agentExecution = AgentExecutionRecord(
-                  status: 'completed',
-                  steps: List<String>.from(_stepLog),
+                final rec = AgentExecutionRecord.fromMap(chunk['agentExecution'] as Map<dynamic, dynamic>);
+                assistantMsg.agentExecution = _composeExecution(
+                  status: rec.status,
+                  relaySteps: rec.steps,
+                  rawOutput: rec.rawOutput,
+                  timestamp: rec.timestamp,
                 );
+              } else if (_stepLog.isNotEmpty) {
+                assistantMsg.agentExecution = _composeExecution(status: 'completed');
               }
               _storage.saveMessage(assistantMsg);
               SyncService.instance.pushMessages(
@@ -1834,7 +1883,10 @@ class ChatProvider extends ChangeNotifier {
             }
 
             if (chunk['step'] != null) {
-              _absorbStep(chunk['step'].toString());
+              _absorbStep(
+                chunk['step'].toString(),
+                detail: chunk['detail']?.toString() ?? '',
+              );
               // 思维链只显示宿主真实的思考（💭 流）；派发/工具/完成这些执行步骤
               // 走 agentExecution，不再混进同一个字符串冒充"思考过程"。
               if (_harnessThinking.isNotEmpty) {
@@ -1862,17 +1914,14 @@ class ChatProvider extends ChangeNotifier {
               final result = chunk['result'];
               if (result is Map) {
                 final rec = AgentExecutionRecord.fromMap(result);
-                assistantMsg.agentExecution = AgentExecutionRecord(
+                assistantMsg.agentExecution = _composeExecution(
                   status: rec.status,
-                  steps: rec.steps.isNotEmpty ? rec.steps : List<String>.from(_stepLog),
+                  relaySteps: rec.steps,
                   rawOutput: rec.rawOutput,
                   timestamp: rec.timestamp,
                 );
               } else if (_stepLog.isNotEmpty) {
-                assistantMsg.agentExecution = AgentExecutionRecord(
-                  status: 'completed',
-                  steps: List<String>.from(_stepLog),
-                );
+                assistantMsg.agentExecution = _composeExecution(status: 'completed');
               }
               _turnPhase = TurnPhase.polishing;
               notifyListeners();
@@ -1897,12 +1946,15 @@ class ChatProvider extends ChangeNotifier {
                 assistantMsg.reasoningContent = _polishThinking.toString();
               }
               if (chunk['agentExecution'] is Map) {
-                assistantMsg.agentExecution = AgentExecutionRecord.fromMap(chunk['agentExecution'] as Map<dynamic, dynamic>);
-              } else if (_stepLog.isNotEmpty) {
-                assistantMsg.agentExecution = AgentExecutionRecord(
-                  status: 'completed',
-                  steps: List<String>.from(_stepLog),
+                final rec = AgentExecutionRecord.fromMap(chunk['agentExecution'] as Map<dynamic, dynamic>);
+                assistantMsg.agentExecution = _composeExecution(
+                  status: rec.status,
+                  relaySteps: rec.steps,
+                  rawOutput: rec.rawOutput,
+                  timestamp: rec.timestamp,
                 );
+              } else if (_stepLog.isNotEmpty) {
+                assistantMsg.agentExecution = _composeExecution(status: 'completed');
               }
               _storage.saveMessage(assistantMsg);
               SyncService.instance.pushMessages(
@@ -2114,10 +2166,7 @@ class ChatProvider extends ChangeNotifier {
       // 手动停止也要把这一轮已经跑过的执行步骤固化下来：否则卡片里只剩思考、
       // 看不到"到底做到哪一步了"（实时步骤只在 isStreaming 时展示）。
       if (_messages.last.agentExecution == null && _stepLog.isNotEmpty) {
-        _messages.last.agentExecution = AgentExecutionRecord(
-          status: 'cancelled',
-          steps: List<String>.from(_stepLog),
-        );
+        _messages.last.agentExecution = _composeExecution(status: 'cancelled');
       }
       // 若刚生成气泡尚未吐出任何字且无推理内容，清理空占位
       if (_messages.last.content.isEmpty && (_messages.last.reasoningContent?.isEmpty ?? true)) {

@@ -8,12 +8,22 @@ enum MessageRole { user, assistant, system }
 class AgentExecutionRecord {
   final String status;
   final List<String> steps;
+
+  /// 与 [steps] 一一对应的**完整工具参数**（没有详情的位置是空串）。
+  ///
+  /// 界面上「执行步骤」只显示一行摘要（例如
+  /// `🔧 [执行工具] ask_user_question · 2 个问题：选择题 / 二选一`），点一下才展开
+  /// 这里的完整内容 —— 以前是把参数 JSON 截断后直接糊在步骤列表里，一个
+  /// ask_user_question 就能刷好几行 JSON（用户实测反馈要求精简）。
+  final List<String> stepDetails;
+
   final String? rawOutput;
   final String? timestamp;
 
   AgentExecutionRecord({
     required this.status,
     required this.steps,
+    this.stepDetails = const [],
     this.rawOutput,
     this.timestamp,
   });
@@ -21,6 +31,7 @@ class AgentExecutionRecord {
   Map<String, dynamic> toMap() => {
     'status': status,
     'steps': steps,
+    'stepDetails': stepDetails,
     'rawOutput': rawOutput,
     'timestamp': timestamp,
   };
@@ -29,6 +40,7 @@ class AgentExecutionRecord {
     return AgentExecutionRecord(
       status: map['status']?.toString() ?? 'completed',
       steps: (map['steps'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [],
+      stepDetails: (map['stepDetails'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? const [],
       rawOutput: map['rawOutput']?.toString(),
       timestamp: map['timestamp']?.toString(),
     );

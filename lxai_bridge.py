@@ -1799,6 +1799,68 @@ async def archive_dsh_session(harness_url: str, session_id: str):
             continue
     return False, "归档失败"
 
+# 工具参数摘要按这个顺序找第一个有值的键（不同工具关心的键不一样）
+_TOOL_SUMMARY_KEYS = (
+    "command", "file_path", "filePath", "path", "pattern", "query", "url",
+    "prompt", "title", "sessionId", "session_id",
+)
+
+
+def summarize_tool_input(tool_name: str, tool_input) -> str:
+    """把工具参数压成**一行**摘要，供 App 的「执行步骤」显示。
+
+    以前是把参数 JSON 原样截 120 字符丢给界面 —— `ask_user_question` 那类工具会糊出
+    一整屏 JSON（用户实测反馈："执行步骤里应该精简一下"）。这里改成取一个关键值做摘要；
+    完整参数仍会随同一条 step 的 `detail` 字段发上去，App 里点一下就能展开看。
+
+    返回空串 = 没有可展示的参数（调用方只显示工具名）。
+    """
+    try:
+        data = tool_input
+        if isinstance(data, str):
+            text = data.strip()
+            if not text:
+                return ""
+            try:
+                data = json.loads(text)
+            except Exception:
+                return text.splitlines()[0][:100]
+        if not isinstance(data, dict):
+            return str(data)[:100]
+
+        if tool_name == "ask_user_question" and isinstance(data.get("questions"), list):
+            heads = []
+            for item in data["questions"][:3]:
+                if isinstance(item, dict):
+                    head = str(item.get("header") or item.get("question") or "").strip()
+                    if head:
+                        heads.append(head[:16])
+            suffix = f"：{' / '.join(heads)}" if heads else ""
+            return f"{len(data['questions'])} 个问题{suffix}"
+
+        for key in _TOOL_SUMMARY_KEYS:
+            value = data.get(key)
+            if value is None or value == "":
+                continue
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False)
+            text = " ".join(str(value).split())
+            if not text:
+                continue
+            return text if len(text) <= 96 else text[:96] + "…"
+
+        for key, value in data.items():
+            if value in (None, "", [], {}):
+                continue
+            text = " ".join(str(value).split())
+            if not text:
+                continue
+            return f"{key}={text if len(text) <= 80 else text[:80] + '…'}"
+    except Exception:
+        pass
+    return ""
+
+
 async def execute_dsh_sse_stream(
     harness_base: str,
     target_workspace: str,
@@ -1975,9 +2037,14 @@ async def execute_dsh_sse_stream(
             elif ev_type == "tool_start":
                 tool_name = parsed_json.get("tool", "工具")
                 tool_input = parsed_json.get("input", "")
-                inp_str = str(tool_input)
-                if len(inp_str) > 120: inp_str = inp_str[:120] + "..."
-                await on_step_callback(f"🔧 [执行工具] {tool_name}: {inp_str}")
+                # 摘要进"执行步骤"（一行），完整参数走 detail 随同一条 step 发上去，
+                # 由 App 折叠展示 —— 以前是把 JSON 原样截 120 字符糊在界面上。
+                summary = summarize_tool_input(tool_name, tool_input)
+                detail = tool_input if isinstance(tool_input, str) else json.dumps(tool_input, ensure_ascii=False, indent=2)
+                if len(detail) > 4000:
+                    detail = detail[:4000] + "\n…（已截断）"
+                step_line = f"🔧 [执行工具] {tool_name} · {summary}" if summary else f"🔧 [执行工具] {tool_name}"
+                await on_step_callback(step_line, detail)
             elif ev_type == "tool_end":
                 tool_name = parsed_json.get("tool", "工具")
                 status = parsed_json.get("status", "success")
@@ -2658,17 +2725,20 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
         print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
         steps_collected = []
 
-        async def on_step(step_text: str):
+        async def on_step(step_text: str, detail: str = ""):
             steps_collected.append(step_text)
             print(f"\033[90m  └─ {step_text}\033[0m")
             try:
+                payload = {
+                    "taskId": task_id,
+                    "token": token,
+                    "step": step_text
+                }
+                if detail:
+                    payload["detail"] = detail
                 await loop.run_in_executor(
                     None,
-                    lambda: http_post_json(step_url, {
-                        "taskId": task_id,
-                        "token": token,
-                        "step": step_text
-                    }, timeout=5)
+                    lambda: http_post_json(step_url, payload, timeout=5)
                 )
             except Exception:
                 pass
@@ -3085,16 +3155,20 @@ async def run_bridge_client(args):
                     print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
                     steps_collected = []
 
-                    async def ws_step_cb(step_text: str):
+                    async def ws_step_cb(step_text: str, detail: str = ""):
                         steps_collected.append(step_text)
                         print(f"\033[90m  └─ {step_text}\033[0m")
                         try:
-                            await ws.send(json.dumps({
+                            payload = {
                                 "type": "agent_step",
                                 "taskId": task_id,
                                 "step": step_text,
                                 "timestamp": int(time.time() * 1000)
-                            }))
+                            }
+                            # detail = 完整工具参数（App 折叠展示用），没有就不带这个键
+                            if detail:
+                                payload["detail"] = detail
+                            await ws.send(json.dumps(payload))
                         except Exception:
                             pass
 

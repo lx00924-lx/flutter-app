@@ -2312,7 +2312,8 @@ async function startServer() {
     };
 
     const stepHandler = (data: any) => {
-      sendEvent("step", { step: data.step, taskId: data.taskId });
+      // detail = 完整工具参数（桥接侧的摘要之外的原文），App 折叠展示、点开才看
+      sendEvent("step", { step: data.step, taskId: data.taskId, detail: data.detail });
     };
 
     /**
@@ -4864,6 +4865,7 @@ if %errorlevel% neq 0 (
               generationEvents.emit(`step_${pending.assistantMessageId}`, {
                 taskId: msg.taskId,
                 step: msg.step,
+                detail: msg.detail,
               });
             }
           } else if (msg.type === "agent_content") {

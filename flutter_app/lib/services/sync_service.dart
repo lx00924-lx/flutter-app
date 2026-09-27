@@ -1483,6 +1483,8 @@ class SyncService {
             } else if (eventName == 'step') {
               yield {
                 'step': parsed['step'] ?? '',
+                // 完整工具参数（可空）：界面折叠展示，点一下才看
+                'detail': parsed['detail'] ?? '',
                 'done': false,
               };
             } else if (eventName == 'agent_started') {

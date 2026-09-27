@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 /// Agent 的「思考 / 执行步骤」卡片。
 ///
@@ -15,12 +16,19 @@ class ReasoningView extends StatefulWidget {
   /// 这一轮的执行步骤（电脑端派发 / 工具调用 / 完成）。为空则不显示该区块。
   final List<String> steps;
 
+  /// 与 [steps] 一一对应的**完整工具参数**（没有详情的位置是空串）。
+  ///
+  /// 步骤列表只显示一行摘要，点一下才展开这里 —— 以前是把参数 JSON 截断后直接
+  /// 糊在列表里，一个 ask_user_question 就能刷好几行 JSON（用户要求精简）。
+  final List<String> stepDetails;
+
   const ReasoningView({
     super.key,
     required this.reasoningText,
     this.isStreaming = false,
     this.elapsedSeconds,
     this.steps = const [],
+    this.stepDetails = const [],
   });
 
   @override
@@ -145,17 +153,11 @@ class _ReasoningViewState extends State<ReasoningView> {
                         ],
                       ),
                       const SizedBox(height: 6),
-                      for (final step in steps)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 4),
-                          child: SelectableText(
-                            step,
-                            style: TextStyle(
-                              fontSize: 12.5,
-                              height: 1.5,
-                              color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
-                            ),
-                          ),
+                      for (var i = 0; i < steps.length; i++)
+                        _StepRow(
+                          step: steps[i],
+                          detail: i < widget.stepDetails.length ? widget.stepDetails[i] : '',
+                          isDark: isDark,
                         ),
                     ],
                   ],
@@ -163,6 +165,84 @@ class _ReasoningViewState extends State<ReasoningView> {
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+/// 一条执行步骤：默认只显示一行摘要；带详情时右侧给个展开图标，点开看完整参数。
+class _StepRow extends StatelessWidget {
+  const _StepRow({required this.step, required this.detail, required this.isDark});
+
+  final String step;
+  final String detail;
+  final bool isDark;
+
+  @override
+  Widget build(BuildContext context) {
+    final style = TextStyle(
+      fontSize: 12.5,
+      height: 1.5,
+      color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+    );
+    final hasDetail = detail.trim().isNotEmpty;
+    if (!hasDetail) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 4),
+        child: SelectableText(step, style: style),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        onTap: () => _showDetail(context),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(child: SelectableText(step, style: style)),
+              const SizedBox(width: 6),
+              Icon(
+                Icons.unfold_more,
+                size: 14,
+                color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showDetail(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(step, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520, maxHeight: 420),
+          child: SingleChildScrollView(
+            child: SelectableText(
+              detail,
+              style: const TextStyle(fontSize: 12.5, height: 1.45, fontFamily: 'monospace'),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: detail));
+              Navigator.pop(ctx);
+            },
+            child: const Text('复制'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('关闭'),
+          ),
         ],
       ),
     );

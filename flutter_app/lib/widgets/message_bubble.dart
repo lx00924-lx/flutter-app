@@ -423,8 +423,15 @@ class MessageBubble extends StatelessWidget {
 
     // 执行步骤：已完成的消息用自己那份记录；正在流式的用本轮实时收集的那份
     // （宿主是边跑边推的，agentExecution 要等 done 才有，中间这段时间界面得看得到）。
-    final steps = message.agentExecution?.steps ??
-        (message.isStreaming ? chat.liveSteps : const <String>[]);
+    // 详情（完整工具参数）与步骤一一对应，供点击展开。
+    final liveSteps = message.isStreaming ? chat.liveSteps : const <String>[];
+    final liveDetails = message.isStreaming ? chat.liveStepDetails : const <String>[];
+    final steps = (message.agentExecution?.steps.isNotEmpty ?? false)
+        ? message.agentExecution!.steps
+        : liveSteps;
+    final stepDetails = (message.agentExecution?.stepDetails.isNotEmpty ?? false)
+        ? message.agentExecution!.stepDetails
+        : liveDetails;
 
     final userAvatarBytes = settingsProvider.userAvatarBytes;
     final aiAvatarBytes = settingsProvider.aiAvatarBytes;
@@ -598,6 +605,7 @@ class MessageBubble extends StatelessWidget {
                         isStreaming: message.isStreaming && message.content.isEmpty,
                         elapsedSeconds: message.elapsedSeconds,
                         steps: steps,
+                        stepDetails: stepDetails,
                       ),
 
                     // 正文渲染
