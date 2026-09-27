@@ -1478,13 +1478,17 @@ class SyncService {
                 'reasoning': parsed['reasoning'] ?? '',
                 'fullContent': parsed['fullContent'],
                 'fullReasoning': parsed['fullReasoning'],
+                // 润色阶段的内容属于「回答气泡」（另一个消息框），不是在写过程消息
+                'answerMessageId': parsed['answerMessageId'],
                 'done': false,
               };
             } else if (eventName == 'step') {
               yield {
                 'step': parsed['step'] ?? '',
-                // 完整工具参数（可空）：界面折叠展示，点一下才看
+                // detail = 完整工具参数（折叠展示）；kind = thinking/action/note；tool = 工具名
                 'detail': parsed['detail'] ?? '',
+                'kind': parsed['kind'] ?? '',
+                'tool': parsed['tool'] ?? '',
                 'done': false,
               };
             } else if (eventName == 'agent_started') {
@@ -1502,6 +1506,8 @@ class SyncService {
             } else if (eventName == 'phase') {
               yield {
                 'phase': parsed['phase'] ?? '',
+                // 进入润色阶段时服务端就告诉客户端"回答气泡"的消息 id
+                'answerMessageId': parsed['answerMessageId'],
                 'done': false,
               };
             } else if (eventName == 'approval') {
@@ -1527,6 +1533,8 @@ class SyncService {
                 'fullContent': parsed['fullContent'],
                 'fullReasoning': parsed['fullReasoning'],
                 'agentExecution': parsed['agentExecution'],
+                'answerMessageId': parsed['answerMessageId'],
+                'answerContent': parsed['answerContent'],
                 'interrupted': parsed['interrupted'] == true,
                 'done': true,
               };

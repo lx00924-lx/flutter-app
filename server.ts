@@ -1,7 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import bcrypt from "bcryptjs";
-import { randomBytes, createCipheriv, createDecipheriv } from "crypto";
+import { randomBytes, randomUUID, createCipheriv, createDecipheriv } from "crypto";
 import FormData from "form-data";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -997,6 +997,17 @@ async function runServerSideGeneration({
   let accumulatedContent = "";
   let accumulatedReasoning = "";
 
+  /**
+   * 润色阶段那条「回答气泡」的消息 id。
+   *
+   * 为什么要把过程与回答拆成两条消息：用户明确要求"DSH 的过程"和"主聊天模型润色后的
+   * 回答"是两个消息框 —— 以前润色结果直接覆盖过程消息的正文，App 上只看到一个框，
+   * 而且过程里那些思考/工具步骤会被答案挤掉。现在润色内容落在**另一条消息**上
+   * （独立 id、独立落库），过程消息的正文保留宿主自己说的话。
+   * 只有「Agent 模式 + 真的走润色」时才有值；关润色时连模型都不调，自然也没有这条。
+   */
+  let polishAnswerId: string | undefined;
+
   try {
     // 修复：客户端字段是 harnessToken，此前误读 agentToken 导致永远取空 → 全落默认 token
     const agentToken = readUserAgentToken(settings);
@@ -1005,20 +1016,17 @@ async function runServerSideGeneration({
       if (chunk) accumulatedContent += chunk;
       if (reasoningChunk) accumulatedReasoning += reasoningChunk;
       genState.content = accumulatedContent;
-      io.to(`user_${userId}`).emit("chat_chunk", {
+      // polishAnswerId 有值 = 现在是润色阶段，这段内容属于「回答气泡」而不是过程消息
+      const chunkPayload = {
         messageId: assistantMessageId,
         chunk,
         reasoningChunk: reasoningChunk || "",
         fullContent: accumulatedContent,
         fullReasoning: accumulatedReasoning,
-      });
-      generationEvents.emit(`chunk_${assistantMessageId}`, {
-        messageId: assistantMessageId,
-        chunk,
-        reasoningChunk: reasoningChunk || "",
-        fullContent: accumulatedContent,
-        fullReasoning: accumulatedReasoning,
-      });
+        ...(polishAnswerId ? { answerMessageId: polishAnswerId } : {}),
+      };
+      io.to(`user_${userId}`).emit("chat_chunk", chunkPayload);
+      generationEvents.emit(`chunk_${assistantMessageId}`, chunkPayload);
     };
 
     let workingMessages = [...messages];
@@ -1278,8 +1286,10 @@ async function runServerSideGeneration({
     // 润色阶段插话只是掐断一段便宜的文本生成。
     // 不润色时**不要**发这个事件，否则界面会白等一段根本不存在的"整理中"。
     if (isAgentMode && polishingEnabled) {
+      // 这条消息就是"主模型润色后的回答"，与过程消息分开落库、分开推给 App
+      polishAnswerId = randomUUID();
       genState.phase = 'polishing';
-      generationEvents.emit(`phase_${assistantMessageId}`, { phase: 'polishing' });
+      generationEvents.emit(`phase_${assistantMessageId}`, { phase: 'polishing', answerMessageId: polishAnswerId });
     }
 
     const apiEndpoint = settings?.apiEndpoint?.trim();
@@ -1537,13 +1547,20 @@ async function runServerSideGeneration({
 
     genState.status = 'completed';
     genState.content = accumulatedContent;
+
+    // 过程消息（A）的正文 = 宿主自己说的话（原始输出），不是润色结果；
+    // 润色结果落到另一条消息（B）上，两者在 App 里是两个消息框。
+    const rawAgentOutput = (agentExecutionResult?.rawOutput ?? '').toString().trim();
+    const processContent = isAgentMode ? rawAgentOutput : accumulatedContent;
+    const processReasoning = isAgentMode ? '' : accumulatedReasoning;
+
     const finalAssistantMessage = {
       id: assistantMessageId,
       sessionId: resolvedSessionId,
       role: 'assistant',
-      content: accumulatedContent,
-      reasoningContent: accumulatedReasoning,
-      thought: accumulatedReasoning,
+      content: processContent,
+      reasoningContent: processReasoning,
+      thought: processReasoning,
       timestamp: new Date().toISOString(),
       type: 'text',
       status: 'completed',
@@ -1552,21 +1569,35 @@ async function runServerSideGeneration({
     };
     await upsertMessage(userId, finalAssistantMessage);
 
-    io.to(`user_${userId}`).emit("chat_completed", {
+    // 回答消息（B）：只有 Agent 模式 + 真的润色过才存在
+    if (isAgentMode && polishAnswerId && accumulatedContent.trim().length > 0) {
+      await upsertMessage(userId, {
+        id: polishAnswerId,
+        sessionId: resolvedSessionId,
+        role: 'assistant',
+        content: accumulatedContent,
+        reasoningContent: accumulatedReasoning,
+        thought: accumulatedReasoning,
+        timestamp: new Date().toISOString(),
+        type: 'text',
+        status: 'completed',
+        // 不是"过程"消息：App 不在这条上挂思考/执行步骤卡片
+        isAgentMode: false,
+      });
+    }
+
+    const completedPayload = {
       messageId: assistantMessageId,
-      content: accumulatedContent,
-      reasoningContent: accumulatedReasoning,
+      content: processContent,
+      reasoningContent: processReasoning,
       isAgentMode: isAgentMode || false,
-      agentExecution: agentExecutionResult
-    });
-    generationEvents.emit(`completed_${assistantMessageId}`, {
-      messageId: assistantMessageId,
-      content: accumulatedContent,
-      reasoningContent: accumulatedReasoning,
-      isAgentMode: isAgentMode || false,
-      agentExecution: agentExecutionResult
-    });
-    console.log(`[Server Background Gen] Completed for msg ${assistantMessageId} (${accumulatedContent.length} chars)`);
+      agentExecution: agentExecutionResult,
+      ...(isAgentMode && polishAnswerId ? { answerMessageId: polishAnswerId, answerContent: accumulatedContent } : {}),
+    };
+    io.to(`user_${userId}`).emit("chat_completed", completedPayload);
+    generationEvents.emit(`completed_${assistantMessageId}`, completedPayload);
+    console.log(`[Server Background Gen] Completed for msg ${assistantMessageId} (${accumulatedContent.length} chars)` +
+      (polishAnswerId ? ` + answer ${polishAnswerId}` : ''));
 
   } catch (err: any) {
     // 用户主动插话/停止：保留已经生成的部分，标成"已打断"，不当成错误
@@ -2312,8 +2343,15 @@ async function startServer() {
     };
 
     const stepHandler = (data: any) => {
-      // detail = 完整工具参数（桥接侧的摘要之外的原文），App 折叠展示、点开才看
-      sendEvent("step", { step: data.step, taskId: data.taskId, detail: data.detail });
+      // detail = 完整工具参数（摘要之外的原文）；kind = thinking/action/note；
+      // tool = 工具名（action 才有）—— App 据此渲染 DSH 那种"思考行 / 行动行"
+      sendEvent("step", {
+        step: data.step,
+        taskId: data.taskId,
+        detail: data.detail,
+        kind: data.kind,
+        tool: data.tool,
+      });
     };
 
     /**
@@ -2371,6 +2409,9 @@ async function startServer() {
           fullContent: data.content,
           fullReasoning: data.reasoningContent,
           agentExecution: data.agentExecution,
+          // 润色后的回答是另一条消息（另一个消息框）：交给客户端新建/收尾
+          answerMessageId: data.answerMessageId,
+          answerContent: data.answerContent,
           // 被用户插话/停止打断时告知客户端：保留已生成的部分，不要当成失败
           interrupted: data.interrupted === true,
         });
@@ -4866,6 +4907,8 @@ if %errorlevel% neq 0 (
                 taskId: msg.taskId,
                 step: msg.step,
                 detail: msg.detail,
+                kind: msg.kind,
+                tool: msg.tool,
               });
             }
           } else if (msg.type === "agent_content") {

@@ -1838,6 +1838,12 @@ def summarize_tool_input(tool_name: str, tool_input) -> str:
             suffix = f"：{' / '.join(heads)}" if heads else ""
             return f"{len(data['questions'])} 个问题{suffix}"
 
+        # 工具自己的 description 最贴近"这一步在干什么"（DSH 网页端显示的就是它），
+        # 优先于命令行原文 —— 否则 pwsh 那一行会把整条命令铺满。
+        description = str(data.get("description") or "").strip()
+        if description:
+            return description if len(description) <= 96 else description[:96] + "…"
+
         for key in _TOOL_SUMMARY_KEYS:
             value = data.get(key)
             if value is None or value == "":
@@ -2024,7 +2030,9 @@ async def execute_dsh_sse_stream(
                 txt = parsed_json.get("content", "")
                 if txt:
                     accumulated_reasoning.append(txt)
-                    await on_step_callback(f"💭 {txt}")
+                    # kind=thinking：App 按类型分行渲染（思考行 / 行动行），
+                    # 不再靠 emoji 前缀猜
+                    await on_step_callback(txt, "", "thinking")
             elif ev_type == "content":
                 txt = parsed_json.get("content", "")
                 if txt:
@@ -2044,7 +2052,7 @@ async def execute_dsh_sse_stream(
                 if len(detail) > 4000:
                     detail = detail[:4000] + "\n…（已截断）"
                 step_line = f"🔧 [执行工具] {tool_name} · {summary}" if summary else f"🔧 [执行工具] {tool_name}"
-                await on_step_callback(step_line, detail)
+                await on_step_callback(step_line, detail, "action", tool_name)
             elif ev_type == "tool_end":
                 tool_name = parsed_json.get("tool", "工具")
                 status = parsed_json.get("status", "success")
@@ -2725,17 +2733,20 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
         print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
         steps_collected = []
 
-        async def on_step(step_text: str, detail: str = ""):
+        async def on_step(step_text: str, detail: str = "", kind: str = "note", tool: str = ""):
             steps_collected.append(step_text)
             print(f"\033[90m  └─ {step_text}\033[0m")
             try:
                 payload = {
                     "taskId": task_id,
                     "token": token,
-                    "step": step_text
+                    "step": step_text,
+                    "kind": kind
                 }
                 if detail:
                     payload["detail"] = detail
+                if tool:
+                    payload["tool"] = tool
                 await loop.run_in_executor(
                     None,
                     lambda: http_post_json(step_url, payload, timeout=5)
@@ -3155,7 +3166,7 @@ async def run_bridge_client(args):
                     print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
                     steps_collected = []
 
-                    async def ws_step_cb(step_text: str, detail: str = ""):
+                    async def ws_step_cb(step_text: str, detail: str = "", kind: str = "note", tool: str = ""):
                         steps_collected.append(step_text)
                         print(f"\033[90m  └─ {step_text}\033[0m")
                         try:
@@ -3163,11 +3174,16 @@ async def run_bridge_client(args):
                                 "type": "agent_step",
                                 "taskId": task_id,
                                 "step": step_text,
+                                # kind: thinking（思考）/ action（工具调用）/ note（进度提示）
+                                # tool: 工具名（action 才有）—— App 据此渲染"Pwsh · 说明"这种行
+                                "kind": kind,
                                 "timestamp": int(time.time() * 1000)
                             }
                             # detail = 完整工具参数（App 折叠展示用），没有就不带这个键
                             if detail:
                                 payload["detail"] = detail
+                            if tool:
+                                payload["tool"] = tool
                             await ws.send(json.dumps(payload))
                         except Exception:
                             pass

@@ -426,12 +426,17 @@ class MessageBubble extends StatelessWidget {
     // 详情（完整工具参数）与步骤一一对应，供点击展开。
     final liveSteps = message.isStreaming ? chat.liveSteps : const <String>[];
     final liveDetails = message.isStreaming ? chat.liveStepDetails : const <String>[];
+    final liveTimeline = message.isStreaming ? chat.liveTimeline : const <Map<String, dynamic>>[];
     final steps = (message.agentExecution?.steps.isNotEmpty ?? false)
         ? message.agentExecution!.steps
         : liveSteps;
     final stepDetails = (message.agentExecution?.stepDetails.isNotEmpty ?? false)
         ? message.agentExecution!.stepDetails
         : liveDetails;
+    // 有序时间线（思考/行动/原话交错）：优先用它渲染，旧消息退回步骤列表
+    final timeline = (message.agentExecution?.timeline.isNotEmpty ?? false)
+        ? message.agentExecution!.timeline
+        : liveTimeline;
 
     final userAvatarBytes = settingsProvider.userAvatarBytes;
     final aiAvatarBytes = settingsProvider.aiAvatarBytes;
@@ -596,16 +601,18 @@ class MessageBubble extends StatelessWidget {
                         ],
                       ),
 
-                    // 思考链 + 执行步骤（两者分开：思考是宿主原话，步骤是工具/派发记录）
+                    // 思考链 + 执行步骤（DSH 式：思考/行动按时间交错）
                     if ((message.reasoningContent != null &&
                             message.reasoningContent!.isNotEmpty) ||
-                        steps.isNotEmpty)
+                        steps.isNotEmpty ||
+                        timeline.isNotEmpty)
                       ReasoningView(
                         reasoningText: message.reasoningContent ?? '',
                         isStreaming: message.isStreaming && message.content.isEmpty,
                         elapsedSeconds: message.elapsedSeconds,
                         steps: steps,
                         stepDetails: stepDetails,
+                        timeline: timeline,
                       ),
 
                     // 正文渲染

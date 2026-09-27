@@ -20,10 +20,21 @@ class AgentExecutionRecord {
   final String? rawOutput;
   final String? timestamp;
 
+  /// **有序**的过程时间线：思考 / 行动 / 提示 / 宿主原话，按发生顺序排列。
+  ///
+  /// 每一项形如：
+  /// `{'kind': 'thinking'|'action'|'note'|'text', 'text': 展示文本, 'tool': 工具名, 'detail': 完整参数}`
+  ///
+  /// 为什么要有它：DSH 网页端是"思考一行 / 行动一行"交错着往下排，而 App 以前是把
+  /// 思考拼成一大段、步骤另列一块，顺序信息丢了。用户要求照 DSH 的样子展示。
+  /// 旧消息没有这个字段时，[steps] 仍能兜底渲染。
+  final List<Map<String, dynamic>> timeline;
+
   AgentExecutionRecord({
     required this.status,
     required this.steps,
     this.stepDetails = const [],
+    this.timeline = const [],
     this.rawOutput,
     this.timestamp,
   });
@@ -32,6 +43,7 @@ class AgentExecutionRecord {
     'status': status,
     'steps': steps,
     'stepDetails': stepDetails,
+    'timeline': timeline,
     'rawOutput': rawOutput,
     'timestamp': timestamp,
   };
@@ -41,6 +53,11 @@ class AgentExecutionRecord {
       status: map['status']?.toString() ?? 'completed',
       steps: (map['steps'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [],
       stepDetails: (map['stepDetails'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? const [],
+      timeline: (map['timeline'] as List<dynamic>?)
+              ?.whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList() ??
+          const [],
       rawOutput: map['rawOutput']?.toString(),
       timestamp: map['timestamp']?.toString(),
     );

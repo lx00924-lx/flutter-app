@@ -90,6 +90,12 @@ class ChatProvider extends ChangeNotifier {
   /// 界面只显示一行摘要，点开才看完整内容；落库时按条截断，避免消息体积失控。
   final List<String> _stepDetails = <String>[];
 
+  /// 本轮的**有序**过程时间线：思考 / 行动 / 提示 / 宿主原话，按发生顺序排列。
+  ///
+  /// 用户要求照 DSH 网页端的样子展示：思考一行、行动一行交错往下排，行动行可展开。
+  /// 以前思考拼成一大段、步骤另列一块，顺序信息是丢的。
+  final List<Map<String, dynamic>> _timeline = <Map<String, dynamic>>[];
+
   /// 落库时每条详情的长度上限（完整参数可能很长，没必要整段进云端）。
   static const int _stepDetailMaxChars = 1200;
 
@@ -104,36 +110,142 @@ class ChatProvider extends ChangeNotifier {
     _harnessThinking.clear();
     _stepLog.clear();
     _stepDetails.clear();
+    _timeline.clear();
     _polishThinking.clear();
   }
 
   /// 宿主思考在 step 通道里的前缀（桥接侧 `f"💭 {txt}"`）。
   static const String _thinkingPrefix = '💭';
 
-  /// 把宿主的一条 step 文本分流：`💭` 是模型的思考 delta（直接拼接还原原文），
-  /// 其余（🚀 派发 / 🔧 工具 / ✓ 工具完成 / ✅ 执行完成）算执行步骤。
+  /// 把宿主的一条 step 分流进时间线：`thinking` 是模型思考、`action` 是工具调用、
+  /// `note` 是进度提示（🚀 派发 / ✓ 完成 / ❌ 报错）。
   ///
-  /// [detail] 是同一条步骤的完整参数（例如工具调用的原始 JSON）：只做折叠展示用，
-  /// 思考类步骤不带详情。
-  void _absorbStep(String raw, {String detail = ''}) {
-    if (raw.startsWith('$_thinkingPrefix ')) {
-      _harnessThinking.write(raw.substring(_thinkingPrefix.length + 1));
-      return;
+  /// [kind] 由桥接显式给出；老版本桥接没有这个字段时，退回按 `💭` 前缀判断。
+  /// [detail] 是同一条步骤的完整参数（例如工具调用的原始 JSON），只做折叠展示用。
+  void _absorbStep(String raw, {String detail = '', String kind = '', String tool = ''}) {
+    var text = raw;
+    var resolvedKind = kind.trim();
+    if (resolvedKind.isEmpty) {
+      if (text.startsWith('$_thinkingPrefix ')) {
+        resolvedKind = 'thinking';
+        text = text.substring(_thinkingPrefix.length + 1);
+      } else if (text.startsWith(_thinkingPrefix)) {
+        resolvedKind = 'thinking';
+        text = text.substring(_thinkingPrefix.length);
+      } else {
+        resolvedKind = 'note';
+      }
     }
-    if (raw.startsWith(_thinkingPrefix)) {
-      _harnessThinking.write(raw.substring(_thinkingPrefix.length));
-      return;
-    }
-    final text = raw.trim();
+    text = text.trim();
     if (text.isEmpty) return;
-    _stepLog.add(text);
+
+    if (resolvedKind == 'thinking') {
+      // 桥接一个 reasoning 事件 = 一段完整思考，段间补空行还原原文分段
+      if (_harnessThinking.isNotEmpty) _harnessThinking.write('\n\n');
+      _harnessThinking.write(text);
+      if (_timeline.isNotEmpty && _timeline.last['kind'] == 'thinking') {
+        _timeline.last['text'] = '${_timeline.last['text']}\n\n$text';
+      } else {
+        _timeline.add({'kind': 'thinking', 'text': text, 'tool': '', 'detail': ''});
+      }
+      return;
+    }
+
     final trimmedDetail = detail.trim();
-    _stepDetails.add(
-      trimmedDetail.isEmpty
-          ? ''
-          : (trimmedDetail.length > _stepDetailMaxChars
-              ? '${trimmedDetail.substring(0, _stepDetailMaxChars)}…（已截断）'
-              : trimmedDetail),
+    final storedDetail = trimmedDetail.isEmpty
+        ? ''
+        : (trimmedDetail.length > _stepDetailMaxChars
+            ? '${trimmedDetail.substring(0, _stepDetailMaxChars)}…（已截断）'
+            : trimmedDetail);
+    _stepLog.add(text);
+    _stepDetails.add(storedDetail);
+    _timeline.add({
+      'kind': resolvedKind, // action / note
+      'text': text,
+      'tool': tool.trim(),
+      'detail': storedDetail,
+    });
+  }
+
+  /// 宿主正在产出的**正文**（它对我们说的话）也进时间线，和思考/行动按顺序排在一起。
+  void _absorbAgentText(String delta) {
+    if (delta.isEmpty) return;
+    if (_timeline.isNotEmpty && _timeline.last['kind'] == 'text') {
+      _timeline.last['text'] = '${_timeline.last['text']}$delta';
+    } else {
+      _timeline.add({'kind': 'text', 'text': delta, 'tool': '', 'detail': ''});
+    }
+  }
+
+  /// 把润色阶段的内容写进**回答气泡**（与过程消息分开的第二条消息，独立 id）。
+  ///
+  /// 为什么分开：用户要求"DSH 的过程"和"主聊天模型润色后的回答"是两个消息框 ——
+  /// 以前润色结果直接覆盖过程消息的正文，答案会把过程顶掉，也看不到宿主原话。
+  void _absorbAnswerDelta(String answerId, String contentDelta, String reasoningDelta) {
+    if (answerId.isEmpty || (contentDelta.isEmpty && reasoningDelta.isEmpty)) return;
+    ChatMessage? answer;
+    for (final m in _messages) {
+      if (m.id == answerId) {
+        answer = m;
+        break;
+      }
+    }
+    if (answer == null) {
+      answer = ChatMessage(
+        id: answerId,
+        sessionId: _currentSession?.id ?? '',
+        role: MessageRole.assistant,
+        content: '',
+        isStreaming: true,
+        // 回答气泡不是"过程"：不挂思考/执行步骤卡片
+        isAgentMode: false,
+      );
+      _messages.add(answer);
+      // 过程气泡到这里就写完了：让它的流式光标停下
+      for (final m in _messages) {
+        if (m.isStreaming && m.id != answerId) m.isStreaming = false;
+      }
+    }
+    if (contentDelta.isNotEmpty) answer.content += contentDelta;
+    if (reasoningDelta.isNotEmpty) {
+      answer.reasoningContent = (answer.reasoningContent ?? '') + reasoningDelta;
+    }
+    notifyListeners();
+  }
+
+  /// 回答气泡收尾：内容以服务端给的最终版本为准，落库并推云端。
+  void _finalizeAnswerMessage({
+    required String answerId,
+    required String answerContent,
+    required String sessionId,
+    int? elapsedSeconds,
+    DateTime? startTime,
+  }) {
+    if (answerId.isEmpty) return;
+    ChatMessage? answer;
+    for (final m in _messages) {
+      if (m.id == answerId) {
+        answer = m;
+        break;
+      }
+    }
+    answer ??= ChatMessage(
+      id: answerId,
+      sessionId: sessionId,
+      role: MessageRole.assistant,
+      content: '',
+      isAgentMode: false,
+    );
+    if (answerContent.trim().isNotEmpty) answer.content = answerContent;
+    answer.isStreaming = false;
+    answer.elapsedSeconds ??=
+        (startTime != null ? DateTime.now().difference(startTime).inSeconds : null);
+    if (!_messages.any((m) => m.id == answerId)) _messages.add(answer);
+    _storage.saveMessage(answer);
+    SyncService.instance.pushMessages(
+      userId: settingsProvider.syncUserId,
+      messages: [answer],
+      clientSessionId: settingsProvider.clientSessionId,
     );
   }
 
@@ -155,6 +267,8 @@ class ChatProvider extends ChangeNotifier {
       status: status,
       steps: steps,
       stepDetails: details,
+      // 时间线只可能是本地实时收集的（服务端没有这份顺序信息）
+      timeline: _timeline.map((e) => Map<String, dynamic>.from(e)).toList(),
       rawOutput: rawOutput,
       timestamp: timestamp,
     );
@@ -165,6 +279,10 @@ class ChatProvider extends ChangeNotifier {
 
   /// 与 [liveSteps] 一一对应的完整参数（折叠展示用）。
   List<String> get liveStepDetails => List<String>.unmodifiable(_stepDetails);
+
+  /// 本轮实时收集的过程时间线（思考/行动/提示/宿主原话，按顺序）。
+  List<Map<String, dynamic>> get liveTimeline =>
+      _timeline.map((e) => Map<String, dynamic>.from(e)).toList();
 
   /// 把当前会话视图按本地库重建（对账导入新版本后调用）。
   ///
@@ -1355,6 +1473,8 @@ class ChatProvider extends ChangeNotifier {
               _absorbStep(
                 chunk['step'].toString(),
                 detail: chunk['detail']?.toString() ?? '',
+                kind: chunk['kind']?.toString() ?? '',
+                tool: chunk['tool']?.toString() ?? '',
               );
               // 思维链只显示宿主真实的思考（💭 流）；派发/工具/完成这些执行步骤
               // 走 agentExecution，不再混进同一个字符串冒充"思考过程"。
@@ -1403,16 +1523,20 @@ class ChatProvider extends ChangeNotifier {
               if (chunk['fullContent'] != null && chunk['fullContent'].toString().isNotEmpty) {
                 assistantMsg.content = chunk['fullContent'].toString();
               }
-              // 思维链优先用宿主那份**真实思考**（💭 流）。fullReasoning 是"润色"
-              // 那一步的模型（App 自己配的主模型）的思考，和宿主不是一回事 ——
-              // 以前无条件用它覆盖，卡片会在收尾瞬间整段换一次内容（用户看到的
-              // 就是"闪一下"），而且内容也不再是 DSH 里那份思考了。
+              // 过程气泡的思考只用**宿主那份真实思考**。润色模型的思考属于回答气泡
+              // （服务端现在把润色内容放在另一条消息上，见 answerMessageId）——
+              // 以前无条件用 fullReasoning 覆盖，卡片会在收尾瞬间整段换内容。
+              final doneAnswerId = chunk['answerMessageId']?.toString() ?? '';
               if (_harnessThinking.isNotEmpty) {
                 assistantMsg.reasoningContent = _harnessThinking.toString();
-              } else if (chunk['fullReasoning'] != null && chunk['fullReasoning'].toString().isNotEmpty) {
-                assistantMsg.reasoningContent = chunk['fullReasoning'].toString();
-              } else if (_polishThinking.isNotEmpty) {
-                assistantMsg.reasoningContent = _polishThinking.toString();
+              } else if (doneAnswerId.isEmpty) {
+                // 老版本中继（没有回答气泡）才回退用润色模型的思考
+                final fallbackReasoning = (chunk['fullReasoning']?.toString() ?? '').trim();
+                if (fallbackReasoning.isNotEmpty) {
+                  assistantMsg.reasoningContent = fallbackReasoning;
+                } else if (_polishThinking.isNotEmpty) {
+                  assistantMsg.reasoningContent = _polishThinking.toString();
+                }
               }
               if (chunk['agentExecution'] is Map) {
                 final rec = AgentExecutionRecord.fromMap(chunk['agentExecution'] as Map<dynamic, dynamic>);
@@ -1425,6 +1549,18 @@ class ChatProvider extends ChangeNotifier {
               } else if (_stepLog.isNotEmpty) {
                 assistantMsg.agentExecution = _composeExecution(status: 'completed');
               }
+
+              // 回答气泡收尾：即使整轮一个 chunk 都没收到（断线/切换设备），
+              // 服务端给的 answerContent 也能把内容补齐
+              if (doneAnswerId.isNotEmpty) {
+                _finalizeAnswerMessage(
+                  answerId: doneAnswerId,
+                  answerContent: chunk['answerContent']?.toString() ?? '',
+                  sessionId: assistantMsg.sessionId,
+                  elapsedSeconds: assistantMsg.elapsedSeconds,
+                  startTime: startTime,
+                );
+              }
               _storage.saveMessage(assistantMsg);
               SyncService.instance.pushMessages(
                 userId: settingsProvider.syncUserId,
@@ -1435,24 +1571,34 @@ class ChatProvider extends ChangeNotifier {
               _cancelToken = null;
               notifyListeners();
 
-              // 若开启了自动朗读，自动朗读本次回复内容
-              if (settingsProvider.settings.autoSpeakResponse && assistantMsg.content.trim().isNotEmpty) {
-                TtsService.instance.speak(assistantMsg.content.trim(), settingsProvider.settings);
+              // 自动朗读：有回答气泡时读**回答**（润色后的版本），没有才读过程正文
+              final spokenText = doneAnswerId.isNotEmpty
+                  ? (chunk['answerContent']?.toString() ?? '').trim()
+                  : assistantMsg.content.trim();
+              if (settingsProvider.settings.autoSpeakResponse && spokenText.isNotEmpty) {
+                TtsService.instance.speak(spokenText, settingsProvider.settings);
               }
               return;
             }
 
             final contentDelta = chunk['content'] as String? ?? '';
             final reasoningDelta = chunk['reasoning'] as String? ?? '';
+            final answerId = chunk['answerMessageId']?.toString() ?? '';
 
-            if (reasoningDelta.isNotEmpty) {
-              // Agent 模式的这段 reasoning 来自"润色"那一步的模型（中继是用 App
-              // 配的主模型去总结执行结果的），**不是宿主的思考** —— 只暂存不显示，
-              // 否则会混进思维链、让人以为是电脑端在想。
-              _polishThinking.write(reasoningDelta);
+            if (answerId.isNotEmpty) {
+              // 润色阶段：这段内容属于**回答气泡**（第二条消息），不写进过程气泡
+              _absorbAnswerDelta(answerId, contentDelta, reasoningDelta);
+              return;
             }
             if (contentDelta.isNotEmpty) {
+              // 宿主自己说的话：既进过程气泡正文，也按顺序进时间线（DSH 那种排布）
               assistantMsg.content += contentDelta;
+              _absorbAgentText(contentDelta);
+            }
+            if (reasoningDelta.isNotEmpty) {
+              // 兜底（老版本中继）：没有 answerMessageId 的 reasoning 只可能是润色模型
+              // 的思考，先暂存不显示，避免混进宿主的思维链
+              _polishThinking.write(reasoningDelta);
             }
             notifyListeners();
           },
@@ -1886,6 +2032,8 @@ class ChatProvider extends ChangeNotifier {
               _absorbStep(
                 chunk['step'].toString(),
                 detail: chunk['detail']?.toString() ?? '',
+                kind: chunk['kind']?.toString() ?? '',
+                tool: chunk['tool']?.toString() ?? '',
               );
               // 思维链只显示宿主真实的思考（💭 流）；派发/工具/完成这些执行步骤
               // 走 agentExecution，不再混进同一个字符串冒充"思考过程"。
@@ -1934,16 +2082,20 @@ class ChatProvider extends ChangeNotifier {
               if (chunk['fullContent'] != null && chunk['fullContent'].toString().isNotEmpty) {
                 assistantMsg.content = chunk['fullContent'].toString();
               }
-              // 思维链优先用宿主那份**真实思考**（💭 流）。fullReasoning 是"润色"
-              // 那一步的模型（App 自己配的主模型）的思考，和宿主不是一回事 ——
-              // 以前无条件用它覆盖，卡片会在收尾瞬间整段换一次内容（用户看到的
-              // 就是"闪一下"），而且内容也不再是 DSH 里那份思考了。
+              // 过程气泡的思考只用**宿主那份真实思考**。润色模型的思考属于回答气泡
+              // （服务端现在把润色内容放在另一条消息上，见 answerMessageId）——
+              // 以前无条件用 fullReasoning 覆盖，卡片会在收尾瞬间整段换内容。
+              final doneAnswerId = chunk['answerMessageId']?.toString() ?? '';
               if (_harnessThinking.isNotEmpty) {
                 assistantMsg.reasoningContent = _harnessThinking.toString();
-              } else if (chunk['fullReasoning'] != null && chunk['fullReasoning'].toString().isNotEmpty) {
-                assistantMsg.reasoningContent = chunk['fullReasoning'].toString();
-              } else if (_polishThinking.isNotEmpty) {
-                assistantMsg.reasoningContent = _polishThinking.toString();
+              } else if (doneAnswerId.isEmpty) {
+                // 老版本中继（没有回答气泡）才回退用润色模型的思考
+                final fallbackReasoning = (chunk['fullReasoning']?.toString() ?? '').trim();
+                if (fallbackReasoning.isNotEmpty) {
+                  assistantMsg.reasoningContent = fallbackReasoning;
+                } else if (_polishThinking.isNotEmpty) {
+                  assistantMsg.reasoningContent = _polishThinking.toString();
+                }
               }
               if (chunk['agentExecution'] is Map) {
                 final rec = AgentExecutionRecord.fromMap(chunk['agentExecution'] as Map<dynamic, dynamic>);
@@ -1955,6 +2107,18 @@ class ChatProvider extends ChangeNotifier {
                 );
               } else if (_stepLog.isNotEmpty) {
                 assistantMsg.agentExecution = _composeExecution(status: 'completed');
+              }
+
+              // 回答气泡收尾：即使整轮一个 chunk 都没收到（断线/切换设备），
+              // 服务端给的 answerContent 也能把内容补齐
+              if (doneAnswerId.isNotEmpty) {
+                _finalizeAnswerMessage(
+                  answerId: doneAnswerId,
+                  answerContent: chunk['answerContent']?.toString() ?? '',
+                  sessionId: assistantMsg.sessionId,
+                  elapsedSeconds: assistantMsg.elapsedSeconds,
+                  startTime: startTime,
+                );
               }
               _storage.saveMessage(assistantMsg);
               SyncService.instance.pushMessages(
@@ -1974,15 +2138,22 @@ class ChatProvider extends ChangeNotifier {
 
             final contentDelta = chunk['content'] as String? ?? '';
             final reasoningDelta = chunk['reasoning'] as String? ?? '';
+            final answerId = chunk['answerMessageId']?.toString() ?? '';
 
-            if (reasoningDelta.isNotEmpty) {
-              // Agent 模式的这段 reasoning 来自"润色"那一步的模型（中继是用 App
-              // 配的主模型去总结执行结果的），**不是宿主的思考** —— 只暂存不显示，
-              // 否则会混进思维链、让人以为是电脑端在想。
-              _polishThinking.write(reasoningDelta);
+            if (answerId.isNotEmpty) {
+              // 润色阶段：这段内容属于**回答气泡**（第二条消息），不写进过程气泡
+              _absorbAnswerDelta(answerId, contentDelta, reasoningDelta);
+              return;
             }
             if (contentDelta.isNotEmpty) {
+              // 宿主自己说的话：既进过程气泡正文，也按顺序进时间线（DSH 那种排布）
               assistantMsg.content += contentDelta;
+              _absorbAgentText(contentDelta);
+            }
+            if (reasoningDelta.isNotEmpty) {
+              // 兜底（老版本中继）：没有 answerMessageId 的 reasoning 只可能是润色模型
+              // 的思考，先暂存不显示，避免混进宿主的思维链
+              _polishThinking.write(reasoningDelta);
             }
             notifyListeners();
           },

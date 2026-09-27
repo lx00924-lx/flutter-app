@@ -1,26 +1,34 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-/// Agent 的「思考 / 执行步骤」卡片。
+/// Agent 的「过程」卡片：思考 / 行动按时间顺序交错排列（对齐 DSH 网页端）。
 ///
-/// 排版对齐 DSH（用户拿来对照的就是它）：
-/// - **思考**显示宿主那份真实思考，纯文本原样展示：不加 `>` 引用前缀、**不用斜体**
-///   （中文斜体发飘，而且"模型原话"用斜体也不符合语义 —— 用户点名要去掉）；
-/// - **执行步骤**（派发 / 工具调用 / 完成）单独列一块，不再和思考拼进同一个字符串。
-///   以前两者混在一起，看上去就像"思维链 = 一串工具调用"。
+/// 用户要求的样子（原话）：
+/// ```
+/// 总思维链 {
+///    {dsh思考}
+///    {dsh行动 … 可展开}
+///    {dsh行动}
+/// }
+/// 提供给用户的消息（宿主自己说的话）
+/// ```
+/// 所以这里：**思考一行、行动一行**按发生顺序往下排；行动行只显示一行摘要
+/// （优先用工具自己的 description），点一下弹出完整参数；宿主对我们说的原话
+/// 作为正文样式的段落穿插其中。
+///
+/// 思考文本保持纯文本正体 —— 中文斜体发飘，而且那是"模型原话"，不该用斜体。
 class ReasoningView extends StatefulWidget {
   final String reasoningText;
   final bool isStreaming;
   final int? elapsedSeconds;
 
-  /// 这一轮的执行步骤（电脑端派发 / 工具调用 / 完成）。为空则不显示该区块。
+  /// 旧消息的兜底：只有步骤列表、没有时间线时用它渲染。
   final List<String> steps;
-
-  /// 与 [steps] 一一对应的**完整工具参数**（没有详情的位置是空串）。
-  ///
-  /// 步骤列表只显示一行摘要，点一下才展开这里 —— 以前是把参数 JSON 截断后直接
-  /// 糊在列表里，一个 ask_user_question 就能刷好几行 JSON（用户要求精简）。
   final List<String> stepDetails;
+
+  /// **有序**过程时间线（优先使用）。每项：
+  /// `{'kind': 'thinking'|'action'|'note'|'text', 'text': 展示文本, 'tool': 工具名, 'detail': 完整参数}`
+  final List<Map<String, dynamic>> timeline;
 
   const ReasoningView({
     super.key,
@@ -29,6 +37,7 @@ class ReasoningView extends StatefulWidget {
     this.elapsedSeconds,
     this.steps = const [],
     this.stepDetails = const [],
+    this.timeline = const [],
   });
 
   @override
@@ -39,17 +48,32 @@ class _ReasoningViewState extends State<ReasoningView> {
   bool _isExpanded = false;
 
   /// 展开区的最大高度：思考可以很长，不能把正文顶出屏幕外。
-  static const double _maxExpandedHeight = 360;
+  static const double _maxExpandedHeight = 380;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
-    final hasThinking = widget.reasoningText.trim().isNotEmpty;
-    final steps = widget.steps.where((s) => s.trim().isNotEmpty).toList();
+
+    // 有时间线用时间线；旧消息退回"步骤列表"（当作 note 项）
+    final items = widget.timeline.isNotEmpty
+        ? widget.timeline
+        : <Map<String, dynamic>>[
+            for (var i = 0; i < widget.steps.length; i++)
+              {
+                'kind': 'note',
+                'text': widget.steps[i],
+                'tool': '',
+                'detail': i < widget.stepDetails.length ? widget.stepDetails[i] : '',
+              },
+          ];
+
+    final thinkingCount = items.where((e) => e['kind'] == 'thinking').length;
+    final actionCount = items.where((e) => e['kind'] == 'action').length;
+    final hasThinking = widget.reasoningText.trim().isNotEmpty || thinkingCount > 0;
 
     final String title;
-    if (!hasThinking && steps.isNotEmpty) {
+    if (!hasThinking && actionCount > 0) {
       title = widget.isStreaming ? '正在电脑端执行…' : '电脑端执行记录';
     } else if (widget.isStreaming) {
       title = '正在深度思考中...';
@@ -93,11 +117,11 @@ class _ReasoningViewState extends State<ReasoningView> {
                       ),
                     ),
                   ),
-                  if (steps.isNotEmpty)
+                  if (actionCount > 0)
                     Padding(
                       padding: const EdgeInsets.only(right: 6),
                       child: Text(
-                        '${steps.length} 步',
+                        '$actionCount 步',
                         style: TextStyle(
                           fontSize: 11,
                           color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
@@ -122,44 +146,17 @@ class _ReasoningViewState extends State<ReasoningView> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // 思考正文：纯文本、无斜体。中文斜体在手机上可读性差，且这里是
-                    // "模型原话"，应当和正文一样的正体排版。
-                    SelectableText(
-                      hasThinking ? widget.reasoningText : '（本轮没有思考内容）',
-                      style: TextStyle(
-                        fontSize: 13.5,
-                        height: 1.65,
-                        color: isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569),
-                      ),
-                    ),
-                    if (steps.isNotEmpty) ...[
-                      const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.checklist_rtl_outlined,
-                            size: 14,
-                            color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            '执行步骤',
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      for (var i = 0; i < steps.length; i++)
-                        _StepRow(
-                          step: steps[i],
-                          detail: i < widget.stepDetails.length ? widget.stepDetails[i] : '',
-                          isDark: isDark,
+                    if (items.isEmpty && hasThinking)
+                      SelectableText(
+                        widget.reasoningText,
+                        style: TextStyle(
+                          fontSize: 13.5,
+                          height: 1.65,
+                          color: isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569),
                         ),
-                    ],
+                      )
+                    else
+                      for (final item in items) _TimelineRow(item: item, isDark: isDark),
                   ],
                 ),
               ),
@@ -171,70 +168,158 @@ class _ReasoningViewState extends State<ReasoningView> {
   }
 }
 
-/// 一条执行步骤：默认只显示一行摘要；带详情时右侧给个展开图标，点开看完整参数。
-class _StepRow extends StatelessWidget {
-  const _StepRow({required this.step, required this.detail, required this.isDark});
+/// 时间线里的一项：思考 / 行动 / 提示 / 宿主原话。
+class _TimelineRow extends StatelessWidget {
+  const _TimelineRow({required this.item, required this.isDark});
 
-  final String step;
-  final String detail;
+  final Map<String, dynamic> item;
   final bool isDark;
+
+  String get _kind => (item['kind'] ?? 'note').toString();
+  String get _rawText => (item['text'] ?? '').toString();
+  String get _detail => (item['detail'] ?? '').toString();
+  String get _tool => (item['tool'] ?? '').toString();
+
+  /// `🔧 [执行工具] pwsh · 摘要` → `摘要`
+  String get _actionSummary {
+    final idx = _rawText.indexOf('· ');
+    return idx >= 0 ? _rawText.substring(idx + 2).trim() : '';
+  }
+
+  /// 行动行左侧的工具名（首字母大写），取不到就写"行动"
+  String get _actionLabel {
+    final tool = _tool.trim();
+    if (tool.isEmpty) return '行动';
+    return tool[0].toUpperCase() + tool.substring(1);
+  }
+
+  String get _displayText {
+    if (_kind == 'action') {
+      final summary = _actionSummary;
+      return summary.isNotEmpty ? summary : _rawText;
+    }
+    return _rawText;
+  }
+
+  /// 点开能看到的东西：行动看完整参数，思考看全文
+  String get _expandableContent {
+    if (_detail.trim().isNotEmpty) return _detail;
+    if (_kind == 'thinking') return _rawText;
+    return '';
+  }
 
   @override
   Widget build(BuildContext context) {
-    final style = TextStyle(
-      fontSize: 12.5,
-      height: 1.5,
-      color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
-    );
-    final hasDetail = detail.trim().isNotEmpty;
-    if (!hasDetail) {
+    final muted = isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B);
+    final strong = isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569);
+
+    // 宿主对我们说的话：按正文排版，不当作步骤行
+    if (_kind == 'text') {
       return Padding(
-        padding: const EdgeInsets.only(bottom: 4),
-        child: SelectableText(step, style: style),
+        padding: const EdgeInsets.only(top: 2, bottom: 10),
+        child: SelectableText(
+          _rawText,
+          style: TextStyle(fontSize: 13.5, height: 1.6, color: strong),
+        ),
       );
     }
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 2),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(6),
-        onTap: () => _showDetail(context),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(child: SelectableText(step, style: style)),
-              const SizedBox(width: 6),
-              Icon(
-                Icons.unfold_more,
-                size: 14,
-                color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
-              ),
-            ],
+
+    final expandable = _expandableContent.trim().isNotEmpty;
+    final isAction = _kind == 'action';
+    final isThinking = _kind == 'thinking';
+
+    final row = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 1),
+          child: Icon(
+            isAction
+                ? Icons.terminal
+                : isThinking
+                    ? Icons.psychology_outlined
+                    : Icons.chevron_right,
+            size: 14,
+            color: isAction
+                ? (isDark ? const Color(0xFF38BDF8) : const Color(0xFF0284C7))
+                : muted,
           ),
         ),
-      ),
+        const SizedBox(width: 6),
+        if (isAction || isThinking)
+          Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: Text(
+              isAction ? _actionLabel : '思考',
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.5,
+                fontWeight: FontWeight.w600,
+                color: isAction
+                    ? (isDark ? const Color(0xFF7DD3FC) : const Color(0xFF0369A1))
+                    : muted,
+              ),
+            ),
+          ),
+        Expanded(
+          child: Text(
+            _displayText,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: 12.5, height: 1.5, color: muted),
+          ),
+        ),
+        if (expandable)
+          Padding(
+            padding: const EdgeInsets.only(left: 6, top: 1),
+            child: Icon(
+              Icons.unfold_more,
+              size: 14,
+              color: isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8),
+            ),
+          ),
+      ],
+    );
+
+    final content = Padding(
+      padding: EdgeInsets.only(bottom: isThinking ? 8 : 4, top: 1),
+      child: row,
+    );
+
+    if (!expandable) return content;
+    return InkWell(
+      borderRadius: BorderRadius.circular(6),
+      onTap: () => _showDetail(context),
+      child: content,
     );
   }
 
   void _showDetail(BuildContext context) {
+    final body = _expandableContent;
     showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(step, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+        title: Text(
+          _kind == 'action' ? '${_actionLabel} · 完整参数' : '思考全文',
+          style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+        ),
         content: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 520, maxHeight: 420),
           child: SingleChildScrollView(
             child: SelectableText(
-              detail,
-              style: const TextStyle(fontSize: 12.5, height: 1.45, fontFamily: 'monospace'),
+              body,
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.5,
+                fontFamily: _kind == 'action' ? 'monospace' : null,
+              ),
             ),
           ),
         ),
         actions: [
           TextButton(
             onPressed: () {
-              Clipboard.setData(ClipboardData(text: detail));
+              Clipboard.setData(ClipboardData(text: body));
               Navigator.pop(ctx);
             },
             child: const Text('复制'),
