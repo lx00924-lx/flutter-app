@@ -2767,9 +2767,31 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
 
     poll_fail_count = 0
     while True:
+        # 冷却期一过就**立刻**切回长连接。
+        #
+        # 关键点：长轮询会阻塞 25 秒，所以"只在循环里判断"是不够的 —— 实测中继重启后
+        # 恢复要 35.8 秒，其中约 20 秒就是干等这次长轮询返回（`timeout=25`）。
+        # 因此冷却窗口内主动改用**短轮询**（见下面的 poll_wait），让循环转起来，
+        # 冷却一到就能在下一次迭代开头切回，而不是等长轮询自然返回。
+        # `_last_ws_failure_at > 0` 不能省：没失败过时它是 0.0，
+        # 不加会把"刚进轮询"误判成"冷却已过"，立刻返回 True 造成来回切换。
+        _ws_cooldown = WS_RETRY_COOLDOWN_TRANSIENT_SEC if _last_ws_failure_transient else WS_RETRY_COOLDOWN_SEC
+        _since_failure = time.time() - _last_ws_failure_at if _last_ws_failure_at > 0 else float("inf")
+        if (args.transport != "polling"
+                and _last_ws_failure_at > 0
+                and _since_failure > _ws_cooldown):
+            print("\033[92m[↻ 恢复] 冷却已过，立即切回 WebSocket 长连接...\033[0m")
+            if question_task:
+                question_task.cancel()
+            if approval_task:
+                approval_task.cancel()
+            return True
+        # 还在冷却窗口内：短轮询（临时失败 2 秒、其它失败 8 秒），
+        # 免得长轮询把"冷却已过"的时机一直堵到 25 秒之后。
+        poll_wait = 25 if _since_failure > _ws_cooldown else (2 if _last_ws_failure_transient else 8)
         try:
-            target_poll_url = f"{poll_url}?token={urllib.parse.quote(token)}&timeout=25"
-            resp = await loop.run_in_executor(None, lambda: http_get_json(target_poll_url, timeout=30))
+            target_poll_url = f"{poll_url}?token={urllib.parse.quote(token)}&timeout={poll_wait}"
+            resp = await loop.run_in_executor(None, lambda: http_get_json(target_poll_url, timeout=poll_wait + 5))
             poll_fail_count = 0
             # 中继每次启动都会带上新的 bootId：发现变了就说明它重启过 ——
             # 长轮询只是兜底通道（会话不同步、能力更弱），此时应当切回 WebSocket。
@@ -2777,9 +2799,6 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
             # WebSocket 是主通道：只要轮询通了、且距上次 WS 失败已过冷却期，就尝试切回。
             # **每次轮询都判断**（不是只在第一次），否则第一次轮询正好撞上冷却期，
             # 就再也不会切回、永久停在轮询模式（表现为会话列表一直是 0 条）。
-            # 冷却时长分两种：临时失败（中继启动中，503）15 秒即可重试；
-            # 其它失败（例如代理封 WS）仍等 60 秒，避免两条通道来回弹。
-            _ws_cooldown = WS_RETRY_COOLDOWN_TRANSIENT_SEC if _last_ws_failure_transient else WS_RETRY_COOLDOWN_SEC
             if args.transport != "polling" and time.time() - _last_ws_failure_at > _ws_cooldown:
                 print("\033[92m[↻ 恢复] 轮询通道正常，尝试切回 WebSocket 长连接...\033[0m")
                 if question_task:
