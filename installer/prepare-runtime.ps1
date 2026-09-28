@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     备料：组装安装器用的【私有 Python 运行时】（installer\runtime\python）。
 

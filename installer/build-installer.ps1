@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     一键构建 LxAI Windows 安装器。
 
