@@ -257,7 +257,24 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
   **不在安装目录**；清缓存或换机会丢登录态与本地会话。
 - 中继按 `NODE_ENV` 决定官网前端走 Vite 开发中间件还是 `dist/` 静态文件；`start-relay.bat` 已设 `NODE_ENV=production`，
   改完前端要 `npm run build`（`vite build` 出 `dist/`，`esbuild` 出 `dist/server.cjs`）。
-- 干净的 cmd 环境里 `node` **不在 PATH** 上：启动脚本用绝对路径 `C:\nvm4w\nodejs\node.exe`；桥接用 `C:\Python314\python.exe`。
+- 干净的 cmd 环境里 `node` **不在 PATH** 上：启动脚本用绝对路径 `C:\nvm4w\nodejs\node.exe`。
+- **桥接用哪个 Python**（2026-09-29 起，别再用旧结论排查）：`BridgeProcessManager._resolvePythonExecutable()`
+  的顺序是 ① `{应用目录}\python\python.exe`（**安装器自带的私有运行时**，装了安装版就走这个）
+  ② PATH 里的 `python`（开发机直跑构建产物 / 免安装绿色版）③ 都没有才报错。
+  所以「桥接用 `C:\Python314\python.exe`」**只是开发机的情形，不是通用事实** ——
+  排查「桥接起不来」时先确认这两条路径；改 Python 相关逻辑时**不要**删掉 ①，否则内置运行时白带。
+- **Windows 分发走安装器**（2026-09-29 新增，位于 `installer/`）：
+  - 一键构建 `pwsh -File installer/build-installer.ps1`（先校验 Flutter Release 产物，版本号自动读 `pubspec.yaml`）；
+    产物在 `installer\output\LxAI-Setup-<版本>.exe`（约 22 MB）。
+  - **捆绑私有 Python 运行时**到 `{app}\python`（Python 3.13 embeddable + websockets），
+    所以用户**不需要自己装 Python**；依赖只落在该私有目录，**不进用户的全局环境**。
+  - 安装目录由向导让用户选（默认 `{autopf}\LxAI`），并可切换「为所有用户 / 仅为我」（后者免管理员、不弹 UAC）。
+  - ⚠️ `.iss` 里的 **`AppId` GUID 永远不要改**：卸载程序靠它识别同一个应用，改了会在控制面板留下删不掉的旧版本。
+  - 卸载**刻意保留用户数据**（`Documents` 里的 Hive），只清安装目录里运行时生成的文件。
+  - ⚠️ **改了 App 代码后必须重新 `flutter build windows --release` 再编译安装器** ——
+    安装器打包的是 Release 目录的产物，曾出现「源码比 app.so 新」导致装出来的 App 不含最新改动。
+  - 仓库只入库脚本 + `.iss` + 语言包（合计约 40 KB）；`cache/` `runtime/` `output/` 已在 `.gitignore`，
+    clone 后跑一次构建脚本即可重建。细节与注意事项见 `installer/README.md`。
 - 生产中继目录 `F:\ai\flutter-app` **是同仓库的一份老旧克隆，但日常只能手工同步**（2026-09-29 核实）：
   - 它确实是 `https://github.com/lx00924-lx/flutter-app` 的 clone，但 **HEAD 停在 `3e3f2a5`（2026-09-20），落后远端 19 个提交**，
     而且有 **27 处本地改动/删除** —— 就是这一路手工覆盖上去的 `server.ts`、`docs/`、`AGENTS.md`、`package.json` 等；
@@ -320,9 +337,14 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 
 - `AGENT_TASK_TIMEOUT_MS` 默认 **30 分钟**（同名环境变量可覆盖）；等用户拍板时**再顺延一个完整窗口**。
   历史值是 5 分钟 —— 会把 9 分钟就能成功的任务判死，而 DSH 那边还在跑（用户看到"执行超时"却发现过程还在长）。
-- 设置负载 **2 MB 硬上限**（超了 413）。所以图像字段必须先在客户端压进预算：
-  头像 512px/128KB、聊天背景 1440px/480KB、启动图 1080px/320KB。
-- 图像字段**内容没变就不重传**（`omitMediaOnCloudPush` + FNV-1a 指纹，同会话内生效）；
+- 设置负载 **2 MB 硬上限**（超了 413，`server.ts` 的 `settingsPayloadGuard`）。所以图像字段必须先在客户端压进预算：
+  头像 512px/128KB、聊天背景 **1920px/640KB**、启动图 **1440px/400KB**（2026-09-29 调整，原为 1440/480 与 1080/320）。
+  ⚠️ **这几个数是受 2 MB 上限反推出来的**：base64 长度 = 字节数 × 4/3，四者之和 × 4/3 + 其余字段必须 < 2 MB
+  （即四者之和 ≤ 约 1.5 MB）。**要调大任何一项前先重算总和**，否则整次设置推送会被 413 打回、图片再也同步不上去；
+  推导过程写在 `settings_provider.dart` 的 `_mediaBudgetBytes` 注释里。
+- 图像字段**内容没变就不重传**（`omitMediaOnCloudPush` + FNV-1a 指纹），且**该判断跨 App 重启依然有效** ——
+  推送成功时记指纹，另外 `pullCloudSettings()` 会用云端实际返回的内容重新校准（2026-09-29 修：此前指纹是
+  实例字段，冷启动后的第一次推送会把四个字段全量重传，实测 525 KB，占云端设置 99.6%）；
   启动时会把历史遗留的超大图像**就地压缩**（实测把一个 6.14 MB 的头像压到 52 KB，
   云端设置从 6.59 MB 降到 0.50 MB）。
 
@@ -332,4 +354,22 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - 语言要求写在 `agent.cordis.yml` 的 **`persona.config.prefix`**（系统提示的真正落点）；
 - 默认 preset：`<dshHome>/settings.yaml` 的 `agent-presets.default`（**创建会话时**读取）；
 - **只有空会话能切 preset** —— 改完要在**新会话**里才生效，老会话永远保持创建时的组装。
+
+## 10. PowerShell 脚本必须带 UTF-8 BOM（本机只有 PS 5.1）
+
+- **现象**：脚本在别处直接语法报错，错误信息里夹着乱码 ——
+  `Unexpected token '缂栬瘧'`、`Missing closing '}' in statement block or type definition.`。
+- **根因**：本机 PATH 里**没有 `pwsh`**（只有 Windows PowerShell **5.1**，`$PSVersionTable.PSEdition` = `Desktop`），
+  而 5.1 读取**无 BOM 的 UTF-8** 脚本时按系统 ANSI（**936 / GBK**）解码 —— 中文注释与字符串被解成乱码字节，
+  直接破坏语法（实测：`build-installer.ps1` 报 1 个错、`prepare-runtime.ps1` 报 6 个）。
+- **判据**：文件前 3 字节是否为 `EF BB BF`；不是就必须加。
+- **做法**（先按无 BOM 正确读出，再带 BOM 写回）：
+  `$t = [IO.File]::ReadAllText($p, (New-Object Text.UTF8Encoding($false)))`；
+  `[IO.File]::WriteAllText($p, $t, (New-Object Text.UTF8Encoding($true)))`。
+- **写完必须用 5.1 的解析器复验**（别等运行时才发现）：
+  `$errs = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errs)`，
+  然后检查 `$errs` 是否为空。
+- 含非 ASCII 的 **`.iss`（Inno Setup）同理**，也要求带 BOM。
+- 与 **§1**（`.bat` 必须 CRLF + 注意编码）属同一类问题：**给 Windows 的脚本，编码与换行都要显式处理**，
+  不能依赖「在我机器上能跑」。
 
