@@ -37,3 +37,10 @@ flutter_app/windows/flutter/ephemeral/
 flutter_app/windows/flutter/generated_plugins.cmake
 flutter_app/windows/flutter/generated_plugin_registrant.cc
 flutter_app/windows/flutter/generated_plugin_registrant.h
+
+# Inno Setup 安装器：备料缓存、私有 Python 运行时与编译产物都不入库。
+# 仓库只保留脚本、.iss 与语言包（installer/languages/ChineseSimplified.isl）——
+# 任何机器 clone 后执行 `pwsh -File installer/build-installer.ps1` 即可重建全部产物。
+installer/cache/
+installer/runtime/
+installer/output/

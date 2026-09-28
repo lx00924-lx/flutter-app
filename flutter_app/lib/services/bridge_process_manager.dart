@@ -71,7 +71,7 @@ class BridgeProcessManager extends ChangeNotifier {
         await _killStaleBridges(scriptPath);
       }
 
-      final executable = Platform.isWindows ? 'python' : 'python3';
+      final executable = _resolvePythonExecutable();
       // 让桥接把输出同时落盘：App 这边只能滚动显示最近几行，进程一崩（异常/硬崩溃）
       // 现场就随管道散了 —— 之前"桥接凭空掉线"查不下去就是这个原因。
       // 日志落在脚本同一目录（= App 工作目录），桥接侧会自动轮转并打码 token。
@@ -100,10 +100,36 @@ class BridgeProcessManager extends ChangeNotifier {
       notifyListeners();
       return true;
     } catch (e) {
-      _setMessage('启动失败: $e（请确认电脑已安装 Python 并加入 PATH）', isError: true);
+      _setMessage(
+        '启动失败: $e（未找到可用的 Python 运行时 —— 请重新安装本应用，'
+        '或自行安装 Python 并加入 PATH）',
+        isError: true,
+      );
       notifyListeners();
       return false;
     }
+  }
+
+  /// 解析用哪个 Python 来跑桥接。
+  ///
+  /// 优先用**安装包自带的私有运行时**（`{应用目录}\python\python.exe`）：
+  /// 这样用户不必自己装 Python，也不会因为各人系统的 Python 版本 / 缺库而行为不一致；
+  /// 而且依赖只装进这个私有目录（websockets），**不污染用户的全局 Python 环境**
+  /// （此前只能靠 `python -m pip install websockets` 装到用户环境里）。
+  ///
+  /// 找不到内置的才回退 PATH 里的 `python` —— 覆盖"开发机直接跑构建产物"与
+  /// "免安装绿色版解压即用"这两种场景。
+  String _resolvePythonExecutable() {
+    if (!Platform.isWindows) return 'python3';
+    try {
+      final sep = Platform.pathSeparator;
+      final appDir = File(Platform.resolvedExecutable).parent.path;
+      final bundled = File('$appDir${sep}python${sep}python.exe');
+      if (bundled.existsSync()) return bundled.path;
+    } catch (_) {
+      // 解析失败就按老路子走，不要因为这里抛错而挡住启动流程
+    }
+    return 'python';
   }
 
   /// 停止：用户主动停止时不再自动重启。
