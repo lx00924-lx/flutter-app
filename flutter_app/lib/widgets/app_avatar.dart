@@ -14,11 +14,18 @@ class AppAvatar extends StatelessWidget {
   final Color? fallbackIconColor;
   final String? semanticLabel;
 
-  static final Map<int, MemoryImage> _providerCache = {};
+  /// 以 bytes 的【实例身份】为键。
+  ///
+  /// 原键是"长度 + 首字节 + 尾字节"，但 JPEG/PNG 的首尾字节是格式固定的
+  /// （JPEG `FF…D9`、PNG `89…82`），键实际退化成"只有长度" —— 两张压缩后
+  /// 等长的不同头像会互相命中，用户换完头像仍显示旧图。
+  ///
+  /// 改用实例身份是安全的：SettingsProvider 已保证"源串没变就复用同一个
+  /// Uint8List"，而本缓存强引用着这些 bytes（不会被 GC，身份不会被复用）。
+  static final Map<Uint8List, MemoryImage> _providerCache = {};
 
   static MemoryImage _getProvider(Uint8List bytes) {
-    final key = Object.hash(bytes.length, bytes.isNotEmpty ? bytes[0] : 0, bytes.isNotEmpty ? bytes[bytes.length - 1] : 0);
-    return _providerCache.putIfAbsent(key, () => MemoryImage(bytes));
+    return _providerCache.putIfAbsent(bytes, () => MemoryImage(bytes));
   }
 
   const AppAvatar({

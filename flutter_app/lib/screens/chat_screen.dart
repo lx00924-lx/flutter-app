@@ -1,13 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:provider/provider.dart';
-import '../models/app_settings.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/tts_service.dart';
-import '../utils/image_picker_helper.dart';
 import '../widgets/chat_input_bar.dart';
 import '../widgets/message_bubble.dart';
 import 'log_console_screen.dart';
@@ -428,6 +426,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   child: Image.memory(
                     settingsProvider.customBackgroundBytes!,
                     fit: BoxFit.cover,
+                    // 解码期间保持上一帧（与 AppAvatar 对齐）：背景铺满全屏，
+                    // 默认行为会在重新解码时把整屏露成底色。
+                    gaplessPlayback: true,
                   ),
                 ),
               ),

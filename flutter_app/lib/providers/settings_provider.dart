@@ -20,6 +20,18 @@ class SettingsProvider extends ChangeNotifier {
   Uint8List? _userAvatarBytes;
   Uint8List? _aiAvatarBytes;
   Uint8List? _customBackgroundBytes;
+  Uint8List? _splashImageBytes;
+
+  // 上一次解码所用的源串。_save() 会被会话轮询每 30 秒调到一次（在线状态翻转等），
+  // 而 _save() 内部会调 _updateImageCache()。若每次都重新 base64Decode，产出的
+  // Uint8List 就是【新实例】，Image/Image.memory 内部的 MemoryImage 按引用比较 →
+  // 判定"换图了" → 重新解码位图再上屏；背景图铺满全屏又没有 gaplessPlayback，
+  // 解码期间整屏露白 —— 用户看到的就是"App 时不时闪一下"。
+  // 源串没变就不动实例：引用不变 → 比较结果不变 → 第二级解码根本不会被触发。
+  String _decodedUserAvatarSrc = '';
+  String _decodedAiAvatarSrc = '';
+  String _decodedBackgroundSrc = '';
+  String _decodedSplashSrc = '';
 
   SettingsProvider() {
     _settings = StorageService.instance.loadSettings();
@@ -72,11 +84,26 @@ class SettingsProvider extends ChangeNotifier {
   Uint8List? get userAvatarBytes => _userAvatarBytes;
   Uint8List? get aiAvatarBytes => _aiAvatarBytes;
   Uint8List? get customBackgroundBytes => _customBackgroundBytes;
+  Uint8List? get splashImageBytes => _splashImageBytes;
 
+  /// 重新解码各图像字段 —— **只在源串真的变了时才解**（原因见字段区注释）。
   void _updateImageCache() {
-    _userAvatarBytes = ImagePickerHelper.decodeBase64Image(_settings.userAvatar);
-    _aiAvatarBytes = ImagePickerHelper.decodeBase64Image(_settings.aiAvatar);
-    _customBackgroundBytes = ImagePickerHelper.decodeBase64Image(_settings.customBackground);
+    if (_settings.userAvatar != _decodedUserAvatarSrc) {
+      _decodedUserAvatarSrc = _settings.userAvatar;
+      _userAvatarBytes = ImagePickerHelper.decodeBase64Image(_settings.userAvatar);
+    }
+    if (_settings.aiAvatar != _decodedAiAvatarSrc) {
+      _decodedAiAvatarSrc = _settings.aiAvatar;
+      _aiAvatarBytes = ImagePickerHelper.decodeBase64Image(_settings.aiAvatar);
+    }
+    if (_settings.customBackground != _decodedBackgroundSrc) {
+      _decodedBackgroundSrc = _settings.customBackground;
+      _customBackgroundBytes = ImagePickerHelper.decodeBase64Image(_settings.customBackground);
+    }
+    if (_settings.splashImage != _decodedSplashSrc) {
+      _decodedSplashSrc = _settings.splashImage;
+      _splashImageBytes = ImagePickerHelper.decodeBase64Image(_settings.splashImage);
+    }
   }
 
   /// 各图像字段的"上云预算"（与选择图片时的参数保持一致）。
@@ -1116,6 +1143,23 @@ class SettingsProvider extends ChangeNotifier {
         final keepHarnessOnline = _settings.isHarnessOnline;
         _settings = cloud;
         _settings.isHarnessOnline = keepHarnessOnline;
+
+        // 用云端**实际持有**的图像内容校准"已上云指纹"。
+        //
+        // _pushedMediaHashes 是实例字段，App 一重启就清空；此前冷启动后的第一次推送
+        // 会把全部图像字段原样重传（实测四个字段合计 525 KB，占云端设置的 99.6%）。
+        // 而这次 pull 到的 cloud 里正好带着云端持有的那些 base64 —— 按它记指纹，
+        // 后续推送即可正确省略，不需要服务端配合；也不会误判：云端真被清空时
+        // 这里读到空值，指纹不记录，图片照常重传。
+        for (final key in AppSettings.mediaSettingKeys) {
+          final value = _mediaValueOf(key);
+          if (value.isNotEmpty) {
+            _pushedMediaHashes[key] = _contentFingerprint(value);
+          } else {
+            _pushedMediaHashes.remove(key);
+          }
+        }
+
         _save(pushToCloud: false);
       }
     } catch (e) {
@@ -1131,13 +1175,17 @@ class SettingsProvider extends ChangeNotifier {
     });
   }
 
-  /// 本会话内**已经成功推上云**的图像字段指纹（key → 内容哈希）。
+  /// 「云端**当前持有**这份内容」的图像字段指纹（key → 内容哈希）。
   ///
   /// 图像字段（头像/背景/启动图）几十到几百 KB，而设置推送是每次改动都整包发的；
   /// 没有这层闸门时，"改一个开关"也会顺带把图片重传一遍（历史事故：一张 6.14 MB
   /// 的头像让每次推送变成 6.6 MB 上传，把中继设置写锁占死 → 桥接归属反查 403、
-  /// App 推送 2 分钟超时、SSE 被拖断）。这里记住已推过的内容，没变就省略该字段
+  /// App 推送 2 分钟超时、SSE 被拖断）。这里记住云端已有的内容，没变就省略该字段
   /// （中继按键合并，省略 = 保留服务端那份）。
+  ///
+  /// 两个写入点：推送成功时记下刚推上去的那份（[_pushSettingsGated]）；以及
+  /// [pullCloudSettings] 时按云端返回的内容**重新校准** —— 后者让这份指纹跨
+  /// App 重启依然有效，避免每次冷启动都把几百 KB 图片全量重传一遍。
   final Map<String, String> _pushedMediaHashes = <String, String>{};
 
   /// 轻量稳定哈希（FNV-1a）：只用于"内容有没有变"，不需要密码学强度，

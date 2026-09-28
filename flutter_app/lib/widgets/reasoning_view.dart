@@ -159,22 +159,35 @@ class _ReasoningViewState extends State<ReasoningView> {
                   else
                     for (final item in items)
                       _TimelineRow(item: item, isDark: isDark, onOpenDetail: widget.onOpenDetail),
-                  if (widget.onOpenDetail != null && items.isNotEmpty) ...[
-                    const SizedBox(height: 6),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: TextButton.icon(
+                  const SizedBox(height: 6),
+                  // 底部固定一行：左边「查看执行详情」、右边「收起」。
+                  // 思维链一长，收起入口只留在标题栏就得往回划（用户要求底部也能收起）。
+                  Row(
+                    children: [
+                      if (widget.onOpenDetail != null && items.isNotEmpty)
+                        TextButton.icon(
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 6),
+                            minimumSize: const Size(0, 30),
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          onPressed: widget.onOpenDetail,
+                          icon: const Icon(Icons.open_in_new, size: 15),
+                          label: const Text('查看执行详情', style: TextStyle(fontSize: 12.5)),
+                        ),
+                      const Spacer(),
+                      TextButton.icon(
                         style: TextButton.styleFrom(
                           padding: const EdgeInsets.symmetric(horizontal: 6),
                           minimumSize: const Size(0, 30),
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                         ),
-                        onPressed: widget.onOpenDetail,
-                        icon: const Icon(Icons.open_in_new, size: 15),
-                        label: const Text('查看执行详情', style: TextStyle(fontSize: 12.5)),
+                        onPressed: () => setState(() => _isExpanded = false),
+                        icon: const Icon(Icons.keyboard_arrow_up, size: 15),
+                        label: const Text('收起', style: TextStyle(fontSize: 12.5)),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ],
               ),
             ),

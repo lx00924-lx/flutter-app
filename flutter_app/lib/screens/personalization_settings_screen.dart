@@ -1,5 +1,4 @@
 import 'dart:io' show Platform;
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -135,14 +134,18 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
                           color: Colors.grey.withOpacity(0.15),
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(color: Colors.grey.withOpacity(0.3)),
-                          image: ImagePickerHelper.decodeBase64Image(s.customBackground) != null
+                          // 复用 Provider 已解码好的缓存：这里原来在同一个 Container 里
+                          // 调了 3 次 decodeBase64Image（480 KB 的图每次 build 解码 3 遍），
+                          // 且每次 new 一个 MemoryImage。缓存实例稳定后，MemoryImage
+                          // 按引用比较相等，不会触发重复解码。
+                          image: sp.customBackgroundBytes != null
                               ? DecorationImage(
-                                  image: MemoryImage(ImagePickerHelper.decodeBase64Image(s.customBackground)!),
+                                  image: MemoryImage(sp.customBackgroundBytes!),
                                   fit: BoxFit.cover,
                                 )
                               : null,
                         ),
-                        child: ImagePickerHelper.decodeBase64Image(s.customBackground) == null
+                        child: sp.customBackgroundBytes == null
                             ? const Icon(Icons.wallpaper, color: Color(0xFF0284C7))
                             : null,
                       ),
@@ -289,14 +292,15 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
                           color: Colors.grey.withOpacity(0.15),
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(color: Colors.grey.withOpacity(0.3)),
-                          image: ImagePickerHelper.decodeBase64Image(s.splashImage) != null
+                          // 同上：改用 Provider 的启动图缓存，不再每次 build 解码 3 遍。
+                          image: sp.splashImageBytes != null
                               ? DecorationImage(
-                                  image: MemoryImage(ImagePickerHelper.decodeBase64Image(s.splashImage)!),
+                                  image: MemoryImage(sp.splashImageBytes!),
                                   fit: BoxFit.cover,
                                 )
                               : null,
                         ),
-                        child: ImagePickerHelper.decodeBase64Image(s.splashImage) == null
+                        child: sp.splashImageBytes == null
                             ? const Icon(Icons.rocket_launch_outlined, color: Color(0xFF0284C7))
                             : null,
                       ),
