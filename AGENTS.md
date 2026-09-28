@@ -243,7 +243,7 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 | 官网页脚 `src/components/ContactFooter.tsx` | 许可文案 + 三个入口；TERMS/PRIVACY 经 Vite `?raw` **构建时内联**，与根目录同一份 |
 | App `assets/legal/{LICENSE,NOTICE}.txt` + `pubspec.yaml` | 打进包里（Apache-2.0 §4 要求随分发提供许可副本），设置页「许可全文」按钮读取 |
 | App `lib/widgets/legal_documents.dart` | terms / privacy / **license** 三个枚举，switch 必须穷尽 |
-| 插件仓库 `lxai-app-bridge` | `LICENSE` / `NOTICE` / `package.json#license` / README 许可章节 / `lib/index.js` 头部注释 |
+| 插件仓库 `lxai-app-bridge`（GitHub 名；**本地安装目录叫 `dsh-app-bridge`**，别混） | `LICENSE` / `NOTICE` / `package.json#license` / README 许可章节 / `lib/index.js` 头部注释 |
 | `lxai_bridge.py` 头部 | SPDX + 版权（脚本会被单独下载运行） |
 | App「开源许可与署名」页 | `showLicensePage` + `applicationLegalese`（本项目摘要 + 免责声明 + 第三方依赖自动汇总） |
 
@@ -258,8 +258,14 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - 中继按 `NODE_ENV` 决定官网前端走 Vite 开发中间件还是 `dist/` 静态文件；`start-relay.bat` 已设 `NODE_ENV=production`，
   改完前端要 `npm run build`（`vite build` 出 `dist/`，`esbuild` 出 `dist/server.cjs`）。
 - 干净的 cmd 环境里 `node` **不在 PATH** 上：启动脚本用绝对路径 `C:\nvm4w\nodejs\node.exe`；桥接用 `C:\Python314\python.exe`。
-- 生产中继目录 `F:\ai\flutter-app` **不是 Git 仓库**，源码靠手工同步：
-  改完仓库要同步 `server.ts` / `lxai_bridge.py` / `docs/`，再 `npm run build` 并重启中继。
+- 生产中继目录 `F:\ai\flutter-app` **是同仓库的一份老旧克隆，但日常只能手工同步**（2026-09-29 核实）：
+  - 它确实是 `https://github.com/lx00924-lx/flutter-app` 的 clone，但 **HEAD 停在 `3e3f2a5`（2026-09-20），落后远端 19 个提交**，
+    而且有 **27 处本地改动/删除** —— 就是这一路手工覆盖上去的 `server.ts`、`docs/`、`AGENTS.md`、`package.json` 等；
+  - 所以改完仓库要**手工同步文件**（`server.ts` / `lxai_bridge.py` / `docs/`）→ `npm run build` → 重启中继；
+  - ⚠️ **绝不要在那里 `git pull` / `reset --hard` / `checkout -f`**：会把手工同步的（更新的）内容回退到 9-20 的老版本，
+    而生产跑的正是这份目录（`dist/server.cjs` + 老 `server.ts` 曾长期不一致也会混淆排查）；
+  - 它的 `messages_data/`（消息/设置/会话数据）在 `.gitignore` 里，git 操作不会动它，但也不要挪动。
+  - ⚠️ 别和**打包目录** `F:\ai\flutter\flutter-app` 搞混（不同目录，一个 `flutter-app`、一个 `flutter\flutter-app`）。
 - 用户插件**没有热重载**：`lib/index.js` 改完必须重启宿主 web 服务才生效（`dsh plugin` 子命令只管安装）。
 - 桥接「注册成功 → 推出第一份目录」约 **4 秒**（40 余次重启实测）。这期间 `/api/agent/sessions`
   的 `online=true` 但 `workspaces/sessions/models` 全是空数组 —— 用户此时点刷新会看到
