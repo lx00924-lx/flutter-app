@@ -165,10 +165,12 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
                         icon: const Icon(Icons.image_outlined, size: 16),
                         label: const Text('选择图片'),
                         onPressed: () async {
-                          // 聊天背景：铺满屏，预算放到 480 KB（原图分辨率没必要上云）
+                          // 聊天背景：铺满屏，提到 1920px 以匹配 1080p 全屏（原来 1440 会被放大 1.33 倍）。
+                          // 字节预算 640 KB 是受服务端 2 MB 上限反推出来的，别单独调大
+                          // （见 settings_provider.dart 的 _mediaBudgetBytes 注释）。
                           final base64Image = await ImagePickerHelper.pickImageAsBase64(
-                            maxDimension: 1440,
-                            maxBytes: 480 * 1024,
+                            maxDimension: 1920,
+                            maxBytes: 640 * 1024,
                           );
                           if (base64Image != null && mounted) {
                             s.customBackground = base64Image;
@@ -322,8 +324,8 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
                         onPressed: () async {
                           // 启动页图片：预算 320 KB
                           final base64Image = await ImagePickerHelper.pickImageAsBase64(
-                            maxDimension: 1080,
-                            maxBytes: 320 * 1024,
+                            maxDimension: 1440,
+                            maxBytes: 400 * 1024,
                           );
                           if (base64Image != null && mounted) {
                             s.splashImage = base64Image;

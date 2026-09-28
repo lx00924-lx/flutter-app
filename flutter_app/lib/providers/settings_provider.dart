@@ -107,29 +107,42 @@ class SettingsProvider extends ChangeNotifier {
   }
 
   /// 各图像字段的"上云预算"（与选择图片时的参数保持一致）。
+  ///
+  /// ⚠️ 这四个数**受服务端 2 MB 硬上限约束**（`server.ts` 的 `settingsPayloadGuard`，
+  /// 超了整次设置推送会被 413 打回，图片就再也同步不上去）：
+  /// base64 长度 = 字节数 × 4/3，所以四者之和 × 4/3 + 其余字段（约 2 KB）必须 < 2 MB，
+  /// 即【四者之和 ≤ 约 1.5 MB】。当前 128 + 128 + 640 + 400 = 1296 KB，
+  /// 全部打满时 base64 约 1.69 MB（占上限 84%），仍有安全余量。
+  /// **调整任何一项前都要重算这个总和。**
   static int _mediaBudgetBytes(String key) {
     switch (key) {
       case 'aiAvatar':
       case 'userAvatar':
         return 128 * 1024;
       case 'customBackground':
-        return 480 * 1024;
+        return 640 * 1024;
       case 'splashImage':
-        return 320 * 1024;
+        return 400 * 1024;
       default:
         return 512 * 1024;
     }
   }
 
+  /// 各图像字段的目标分辨率。
+  ///
+  /// 定这两个数的依据是"匹配显示尺寸"，不是"越大越好"：
+  /// - 背景/启动图都是**铺满窗口**，1440 铺在 1920 宽的窗口上会被放大 1.33 倍（发糊），
+  ///   提到 1920 / 1440 即一比一；
+  /// - 头像显示只有 36 逻辑像素 × dpr 2 = 72 px，512 已是 7 倍余量，**不需要动**。
   static int _mediaBudgetDimension(String key) {
     switch (key) {
       case 'aiAvatar':
       case 'userAvatar':
         return 512;
       case 'customBackground':
-        return 1440;
+        return 1920;
       case 'splashImage':
-        return 1080;
+        return 1440;
       default:
         return 1024;
     }
