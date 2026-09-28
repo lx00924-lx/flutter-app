@@ -92,6 +92,12 @@ class MessageBubble extends StatelessWidget {
     final settings = context.read<SettingsProvider>().settings;
     final isAgent = message.isAgentMode || settings.defaultAgentMode;
 
+    // 有没有过程可看：落库的那份，或本轮正在实时收集的那份 —— 跑着的时候
+    // agentExecution 还是空的，不能只判断它，否则菜单项会时有时无
+    final hasTrace = (message.agentExecution?.timeline.isNotEmpty ?? false) ||
+        (message.agentExecution?.steps.isNotEmpty ?? false) ||
+        (message.isStreaming && (chat.liveTimeline.isNotEmpty || chat.liveSteps.isNotEmpty));
+
     showMenu<String>(
       context: context,
       position: RelativeRect.fromRect(
@@ -124,17 +130,18 @@ class MessageBubble extends StatelessWidget {
             ],
           ),
         ),
-        PopupMenuItem<String>(
-          value: 'trace',
-          height: 40,
-          child: Row(
-            children: [
-              Icon(Icons.account_tree_outlined, size: 18, color: isDark ? Colors.lightBlueAccent : const Color(0xFF0284C7)),
-              const SizedBox(width: 10),
-              const Text('执行详情', style: TextStyle(fontSize: 14)),
-            ],
+        if (hasTrace)
+          PopupMenuItem<String>(
+            value: 'trace',
+            height: 40,
+            child: Row(
+              children: [
+                Icon(Icons.account_tree_outlined, size: 18, color: isDark ? Colors.lightBlueAccent : const Color(0xFF0284C7)),
+                const SizedBox(width: 10),
+                const Text('执行详情', style: TextStyle(fontSize: 14)),
+              ],
+            ),
           ),
-        ),
         PopupMenuItem<String>(
           value: 'select',
           height: 40,
@@ -206,7 +213,7 @@ class MessageBubble extends StatelessWidget {
           );
           break;
         case 'trace':
-          showAgentExecutionDetail(context, message);
+          showAgentExecutionDetail(context, message, chat: chat);
           break;
         case 'select':
           FocusManager.instance.primaryFocus?.unfocus();
@@ -631,7 +638,7 @@ class MessageBubble extends StatelessWidget {
                         timeline: timeline,
                         // 重内容（工具参数/输出）都在「执行详情」页，气泡里只留索引
                         onOpenDetail: (timeline.isNotEmpty || steps.isNotEmpty)
-                            ? () => showAgentExecutionDetail(context, message)
+                            ? () => showAgentExecutionDetail(context, message, chat: chat)
                             : null,
                       ),
 

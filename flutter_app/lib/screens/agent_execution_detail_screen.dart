@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/chat_message.dart';
+import '../providers/chat_provider.dart';
 
 /// 打开某一轮 Agent 执行的「执行详情」页。
 ///
@@ -11,48 +12,83 @@ import '../models/chat_message.dart';
 /// 为什么不放在聊天气泡里：工具参数与输出动辄几 KB（原始 JSON、日志回显），铺在对话
 /// 里又长又吵，而 90% 的阅读场景根本不需要。所以气泡里只留一行摘要 + 紧凑行列表，
 /// 重内容全部收进这一页 —— 要看的人点进来，不看的人永远不被打扰。
-void showAgentExecutionDetail(BuildContext context, ChatMessage message) {
+///
+/// [chat] 传进来时：**这一轮还在跑**的消息会跟着实时刷新。过程数据此刻还在 Provider
+/// 里，`message.agentExecution` 要等整轮结束才写上去 —— 之前只读后者，于是"跑着的
+/// 时候点进去是空的"（用户实测反馈）。
+void showAgentExecutionDetail(BuildContext context, ChatMessage message, {ChatProvider? chat}) {
   Navigator.of(context).push(
-    MaterialPageRoute<void>(builder: (_) => AgentExecutionDetailScreen(message: message)),
+    MaterialPageRoute<void>(
+      builder: (_) => AgentExecutionDetailScreen(message: message, chat: chat),
+    ),
   );
 }
 
 class AgentExecutionDetailScreen extends StatelessWidget {
-  const AgentExecutionDetailScreen({super.key, required this.message});
+  const AgentExecutionDetailScreen({super.key, required this.message, this.chat});
 
   final ChatMessage message;
+  final ChatProvider? chat;
 
   AgentExecutionRecord? get _record => message.agentExecution;
 
-  bool get _hasTrace {
+  /// 过程数据：本轮还在跑就用 Provider 里实时收集的那份，否则用消息里落库的那份。
+  ({List<Map<String, dynamic>> timeline, List<String> steps, List<String> stepDetails}) _trace() {
+    final live = chat;
+    if (message.isStreaming && live != null) {
+      final liveSteps = live.liveSteps;
+      if (liveSteps.isNotEmpty || live.liveTimeline.isNotEmpty) {
+        return (timeline: live.liveTimeline, steps: liveSteps, stepDetails: live.liveStepDetails);
+      }
+    }
     final record = _record;
-    if (record == null) return false;
-    return record.timeline.isNotEmpty || record.steps.isNotEmpty;
+    return (
+      timeline: record?.timeline ?? const <Map<String, dynamic>>[],
+      steps: record?.steps ?? const <String>[],
+      stepDetails: record?.stepDetails ?? const <String>[],
+    );
+  }
+
+  List<Map<String, dynamic>> _itemsFor(
+    ({List<Map<String, dynamic>> timeline, List<String> steps, List<String> stepDetails}) trace,
+  ) {
+    if (trace.timeline.isNotEmpty) return trace.timeline;
+    return <Map<String, dynamic>>[
+      for (var i = 0; i < trace.steps.length; i++)
+        {
+          'kind': 'note',
+          'text': trace.steps[i],
+          'tool': '',
+          'detail': i < trace.stepDetails.length ? trace.stepDetails[i] : '',
+        },
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
+    final live = chat;
+    // 流式期间跟着刷新：过程是一行行长出来的，进来看到的不该是一张快照
+    if (live != null && message.isStreaming) {
+      return AnimatedBuilder(
+        animation: live,
+        builder: (context, _) => _buildScaffold(context),
+      );
+    }
+    return _buildScaffold(context);
+  }
+
+  Widget _buildScaffold(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     final record = _record;
-    final items = record == null || record.timeline.isEmpty
-        ? <Map<String, dynamic>>[
-            if (record != null)
-              for (var i = 0; i < record.steps.length; i++)
-                {
-                  'kind': 'note',
-                  'text': record.steps[i],
-                  'tool': '',
-                  'detail': i < record.stepDetails.length ? record.stepDetails[i] : '',
-                },
-          ]
-        : record.timeline;
+    final items = _itemsFor(_trace());
+    final hasTrace = items.isNotEmpty;
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('执行详情', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
         actions: [
-          if (_hasTrace)
+          if (hasTrace)
             IconButton(
               tooltip: '复制全部过程',
               icon: const Icon(Icons.copy_all_outlined, size: 20),
@@ -65,11 +101,18 @@ class AgentExecutionDetailScreen extends StatelessWidget {
             ),
         ],
       ),
-      body: !_hasTrace
+      body: !hasTrace
           ? Center(
-              child: Text(
-                '这一轮没有可展示的执行过程',
-                style: TextStyle(color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B)),
+              child: Padding(
+                padding: const EdgeInsets.all(28),
+                child: Text(
+                  '这一轮还没有可展示的执行过程。\n\n详情页展示的是"电脑端执行这一轮"的过程：思考、工具调用、参数与输出。',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    height: 1.7,
+                    color: isDark ? const Color(0xFF94A3B8) : const Color(0xFF64748B),
+                  ),
+                ),
               ),
             )
           : ListView(
