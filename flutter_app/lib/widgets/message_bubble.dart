@@ -671,7 +671,13 @@ class MessageBubble extends StatelessWidget {
                         collapsible: !message.isStreaming,
                         // 气泡底色：折起来时底部渐隐要盖在它上面
                         fadeColor: isDark ? const Color(0xFF1E293B) : Colors.white,
-                        builders: {'pre': _CodeBlockBuilder(isDark: isDark)},
+                        builders: {
+                          'pre': _CodeBlockBuilder(isDark: isDark),
+                          'table': _ScrollableTableBuilder(
+                            isDark: isDark,
+                            fontSize: settings.chatFontSize.toDouble(),
+                          ),
+                        },
                         styleSheet: MarkdownStyleSheet(
                           p: TextStyle(
                             fontSize: settings.chatFontSize.toDouble(),
@@ -956,6 +962,95 @@ class _CodeBlockView extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 宽表格：整张表套一层**横向滚动**，列多时不再被挤压/溢出屏幕。
+///
+/// 以前走 Markdown 默认渲染：列一多就挤成一团，长单元格要么折行折得看不懂、
+/// 要么直接溢出（用户要求"宽表格横向滚动"）。这里自己把 `table` 元素渲染成
+/// 等宽列 + 横向滚动，表头加底色。
+class _ScrollableTableBuilder extends MarkdownElementBuilder {
+  _ScrollableTableBuilder({required this.isDark, required this.fontSize});
+
+  final bool isDark;
+  final double fontSize;
+
+  @override
+  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
+    final rows = (element.children ?? const <md.Node>[])
+        .whereType<md.Element>()
+        .where((e) => e.tag == 'tr')
+        .toList();
+    if (rows.isEmpty) return null;
+    return _ScrollableTable(rows: rows, isDark: isDark, fontSize: fontSize);
+  }
+}
+
+class _ScrollableTable extends StatelessWidget {
+  const _ScrollableTable({required this.rows, required this.isDark, required this.fontSize});
+
+  final List<md.Element> rows;
+  final bool isDark;
+  final double fontSize;
+
+  @override
+  Widget build(BuildContext context) {
+    final borderColor = isDark ? const Color(0xFF334155) : const Color(0xFFE2E8F0);
+    final headerBg = isDark ? const Color(0xFF16213A) : const Color(0xFFF1F5F9);
+    final textColor = isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A);
+
+    // 先按最大列数补齐：Table 要求每一行的格子数一致，缺了会直接抛异常
+    final cellRows = <List<md.Element>>[
+      for (final row in rows)
+        (row.children ?? const <md.Node>[])
+            .whereType<md.Element>()
+            .where((c) => c.tag == 'td' || c.tag == 'th')
+            .toList(),
+    ];
+    final columnCount = cellRows.fold<int>(0, (max, cells) => cells.length > max ? cells.length : max);
+    if (columnCount == 0) return const SizedBox.shrink();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            border: Border.all(color: borderColor),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Table(
+              defaultColumnWidth: const IntrinsicColumnWidth(),
+              border: TableBorder.symmetric(inside: BorderSide(color: borderColor, width: 0.6)),
+              children: [
+                for (var r = 0; r < cellRows.length; r++)
+                  TableRow(
+                    decoration: r == 0 ? BoxDecoration(color: headerBg) : null,
+                    children: [
+                      for (var c = 0; c < columnCount; c++)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                          child: Text(
+                            c < cellRows[r].length ? cellRows[r][c].textContent.trim() : '',
+                            style: TextStyle(
+                              fontSize: fontSize - 0.5,
+                              height: 1.45,
+                              fontWeight: r == 0 ? FontWeight.w600 : FontWeight.normal,
+                              color: textColor,
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

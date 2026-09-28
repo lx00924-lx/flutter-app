@@ -267,3 +267,63 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - 中继重启后桥接恢复分两段：**注册**（归属反查要读 6.6MB 的 settings.json，启动期查不到 →
   现在返回 503 可重试，而非 403 token 失效）与**切回 WebSocket**（临时失败冷却 15 秒、其它失败 60 秒）。
 
+## 9. 消息与过程链路的结构事实（2026-09-28 重构后，改这条链路前必读）
+
+> 都是"接口真相"级别的：写错一处，整条链路看起来就会"时好时坏"，而且症状离真因很远。
+
+### 9.1 一轮 Agent 回答 = **两条消息**（过程 + 回答）
+
+- **过程消息** id = App 预生成的 `assistantMessageId`；正文 = **宿主自己说的话**
+  （`agentExecution.rawOutput`）；`agentExecution.timeline` 存**有序**过程（思考/行动/提示）。
+- **回答消息** id = 中继在进入润色阶段时生成的 `answerMessageId`（`server.ts` 的
+  `polishAnswerId`）；正文 = 润色结果；`isAgentMode:false`（**不挂**过程卡片）。
+- 客户端按 `answerMessageId` 路由润色 chunk；`done` 事件同时带 `answerMessageId` +
+  `answerContent` 兜底（断线时也能把回答补齐）。
+- **关闭二次润色**（`settings.agentPolish === false`）时：不调任何模型，**只有过程消息** ——
+  不要再给它补一条回答气泡。
+
+### 9.2 DSH 事件的字段真相（插件 `pumpSse` 依赖这些）
+
+- `assistant/message.content` 是**块数组**：`reasoning`（模型真实思考，DSH 网页端显示的那份）/
+  `text`（给用户看的正文）/ `tool-call`。**绝不能** `map(b => b.text).join('')` 混成一个字符串 ——
+  那正是早期"思维链永远为空 + 思考被当成正文"的根因。
+- `tool/call` 帧才有工具名：`data.callId` / `data.name` / `data.arguments`（**未解析的 JSON 字符串**）。
+- **`tool/result` 帧里没有工具名**。结构是：
+  `data.message.content[0] = { type:'tool-result', toolCallId, content:[文本块], isError? }`、
+  `data.message.source = { kind:'tool', callId }`。工具名要按 `callId` 从 `tool/call` 时记下的
+  Map 里取回（读 `message.toolName`/`data.name` 会恒为 `"tool"`，输出就折不到对应行动行上）。
+- 系统提示是 **in-history** 的（`request/context` 只报 `systemPromptUpdate:"in-history"`）：
+  往 prompt 前面塞指令会**出现在会话正文里**，用户可见。
+
+### 9.3 过程数据有两份来源（App 侧）
+
+- **跑着的时候**：`ChatProvider.liveTimeline / liveSteps / liveStepDetails`
+  （`message.agentExecution` 要整轮结束才由 `_composeExecution` 写上去）。
+- **结束后**：`message.agentExecution.timeline`（随消息落库、上云，换机/重装后仍在）。
+- **任何"看过程"的入口都必须同时看这两份**，否则会出现"跑着点进去是空的"（实测踩过）。
+
+### 9.4 展示定位（用户定调，别再自由发挥）
+
+- 气泡里**只留索引**：默认一行（`已深度思考 · N 步 · 用时`），展开是紧凑行列表；
+- **重内容**（工具参数、工具输出）在**独立「执行详情」页**（长按消息也有入口），不在气泡里弹；
+- 思维链展开**不做内层滚动**（限高 + 内滚被用户否掉）；
+- 行样式照 DSH：左侧 `⌄` + `标签 · 内容` 纯文本单行，无图标、无加粗；
+- 头像在气泡**上方**单独一行（气泡吃满宽度）；同一发送者连续消息只在第一条显示头像。
+
+### 9.5 中继的硬上限（都踩过）
+
+- `AGENT_TASK_TIMEOUT_MS` 默认 **30 分钟**（同名环境变量可覆盖）；等用户拍板时**再顺延一个完整窗口**。
+  历史值是 5 分钟 —— 会把 9 分钟就能成功的任务判死，而 DSH 那边还在跑（用户看到"执行超时"却发现过程还在长）。
+- 设置负载 **2 MB 硬上限**（超了 413）。所以图像字段必须先在客户端压进预算：
+  头像 512px/128KB、聊天背景 1440px/480KB、启动图 1080px/320KB。
+- 图像字段**内容没变就不重传**（`omitMediaOnCloudPush` + FNV-1a 指纹，同会话内生效）；
+  启动时会把历史遗留的超大图像**就地压缩**（实测把一个 6.14 MB 的头像压到 52 KB，
+  云端设置从 6.59 MB 降到 0.50 MB）。
+
+### 9.6 中文思考 = 用户 preset（不用改代码）
+
+- 用户 preset 目录：`<dshHome>/.agent-presets/<id>/`（复制随包 preset 即成，id 必须是新名字）；
+- 语言要求写在 `agent.cordis.yml` 的 **`persona.config.prefix`**（系统提示的真正落点）；
+- 默认 preset：`<dshHome>/settings.yaml` 的 `agent-presets.default`（**创建会话时**读取）；
+- **只有空会话能切 preset** —— 改完要在**新会话**里才生效，老会话永远保持创建时的组装。
+

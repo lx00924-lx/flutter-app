@@ -159,15 +159,29 @@ class SyncService {
   void _connectPushChannel() {
     final uri = _pushUri();
     if (uri == null) return;
+    WebSocketChannel channel;
     try {
-      _pushChannel = kIsWeb
+      channel = kIsWeb
           ? WebSocketChannel.connect(uri)
           : IOWebSocketChannel.connect(uri, pingInterval: const Duration(seconds: 30));
+      _pushChannel = channel;
     } catch (e) {
       debugPrint('[SyncService] 推送通道连接失败: $e');
       _schedulePushReconnect();
       return;
     }
+
+    // `ready` 必须有人接住：中继重启期间连接会失败，而这个 future 若无人 await，
+    // 就会以"未处理异常"的形式糊到日志里（实测中继重启时刷
+    // `Unhandled Exception: WebSocketChannelException … 502`）。真正的重连由下面
+    // stream 的 onError / onDone 负责，这里只是把噪音收干净。
+    unawaited(() async {
+      try {
+        await channel.ready;
+      } catch (e) {
+        debugPrint('[SyncService] 推送通道连接未建立（将按退避重连）: $e');
+      }
+    }());
 
     _pushSub = _pushChannel!.stream.listen(
       (raw) {
