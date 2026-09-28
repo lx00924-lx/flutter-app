@@ -51,9 +51,6 @@ class ReasoningView extends StatefulWidget {
 class _ReasoningViewState extends State<ReasoningView> {
   bool _isExpanded = false;
 
-  /// 展开区的最大高度：思考可以很长，不能把正文顶出屏幕外。
-  static const double _maxExpandedHeight = 380;
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -143,43 +140,42 @@ class _ReasoningViewState extends State<ReasoningView> {
           ),
           if (_isExpanded) ...[
             const Divider(height: 1, thickness: 0.5),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: _maxExpandedHeight),
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    if (items.isEmpty && hasThinking)
-                      SelectableText(
-                        widget.reasoningText,
-                        style: TextStyle(
-                          fontSize: 13.5,
-                          height: 1.65,
-                          color: isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569),
-                        ),
-                      )
-                    else
-                      for (final item in items)
-                        _TimelineRow(item: item, isDark: isDark, onOpenDetail: widget.onOpenDetail),
-                    if (widget.onOpenDetail != null && items.isNotEmpty) ...[
-                      const SizedBox(height: 6),
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: TextButton.icon(
-                          style: TextButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 6),
-                            minimumSize: const Size(0, 30),
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          onPressed: widget.onOpenDetail,
-                          icon: const Icon(Icons.open_in_new, size: 15),
-                          label: const Text('查看执行详情', style: TextStyle(fontSize: 12.5)),
-                        ),
+            // 展开就**全部铺开**：不再套一层限高 + 内层滚动 ——
+            // 用户实测"展开后还得在内层滑动"，很难受。整段跟着消息列表一起滚。
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (items.isEmpty && hasThinking)
+                    SelectableText(
+                      widget.reasoningText,
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        height: 1.65,
+                        color: isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569),
                       ),
-                    ],
+                    )
+                  else
+                    for (final item in items)
+                      _TimelineRow(item: item, isDark: isDark, onOpenDetail: widget.onOpenDetail),
+                  if (widget.onOpenDetail != null && items.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 6),
+                          minimumSize: const Size(0, 30),
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        onPressed: widget.onOpenDetail,
+                        icon: const Icon(Icons.open_in_new, size: 15),
+                        label: const Text('查看执行详情', style: TextStyle(fontSize: 12.5)),
+                      ),
+                    ),
                   ],
-                ),
+                ],
               ),
             ),
           ],

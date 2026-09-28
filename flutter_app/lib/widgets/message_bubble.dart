@@ -474,51 +474,57 @@ class MessageBubble extends StatelessWidget {
 
     return Padding(
       // 分组间距：同一发送者的连续消息贴紧，换人时留出更明显的间隔
-      padding: EdgeInsets.fromLTRB(16, groupedWithPrev ? 3 : 10, 16, 4),
-      child: Row(
-        mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.start,
+      padding: EdgeInsets.fromLTRB(16, groupedWithPrev ? 2 : 8, 16, 4),
+      child: Column(
+        // 头像移到气泡**上方**单独一行：气泡因此能吃满可用宽度（用户要求：
+        // "会话框生成在头像下面，以获取更宽的会话框宽度"）。同一发送者的连续消息
+        // 只在分组第一条显示头像，避免每行都多占一行高度。
+        crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
         children: [
-          if (!isUser) ...[
-            AppAvatar(
-              imageBytes: aiAvatarBytes,
-              radius: 18,
-              fallbackIcon: Icons.smart_toy_outlined,
-              fallbackBgColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFE0F2FE),
-              fallbackIconColor: const Color(0xFF0284C7),
-            ),
-            const SizedBox(width: 10),
-          ],
-          if (isUser && message.status == 'error') ...[
+          if (!groupedWithPrev)
             Padding(
-              padding: const EdgeInsets.only(right: 6, top: 10),
-              child: IconButton(
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-                icon: const Icon(Icons.error, color: Colors.redAccent, size: 22),
-                tooltip: '发送失败，点击重新发送',
-                onPressed: () async {
-                  final success = await chat.resendMessage(message.id);
-                  if (!success && context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('网络仍未连接，请检查网络通畅度后重试'),
-                        backgroundColor: Colors.redAccent,
-                        duration: Duration(seconds: 2),
-                      ),
-                    );
-                  }
-                },
+              padding: const EdgeInsets.only(bottom: 4),
+              child: AppAvatar(
+                imageBytes: isUser ? userAvatarBytes : aiAvatarBytes,
+                radius: 18,
+                fallbackIcon: isUser ? Icons.person : Icons.smart_toy_outlined,
+                fallbackBgColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFE0F2FE),
+                fallbackIconColor: const Color(0xFF0284C7),
               ),
             ),
-          ],
-          Flexible(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment:
-                  isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-              children: [
-                GestureDetector(
+          Row(
+            mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (isUser && message.status == 'error')
+                Padding(
+                  padding: const EdgeInsets.only(right: 6, top: 10),
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    icon: const Icon(Icons.error, color: Colors.redAccent, size: 22),
+                    tooltip: '发送失败，点击重新发送',
+                    onPressed: () async {
+                      final success = await chat.resendMessage(message.id);
+                      if (!success && context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text('网络仍未连接，请检查网络通畅度后重试'),
+                            backgroundColor: Colors.redAccent,
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                      }
+                    },
+                  ),
+                ),
+              Flexible(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment:
+                      isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                  children: [
+                    GestureDetector(
               onTapDown: (details) {
                 tapPosition = details.globalPosition;
               },
@@ -532,7 +538,9 @@ class MessageBubble extends StatelessWidget {
               },
               child: Container(
                 constraints: BoxConstraints(
-                  maxWidth: MediaQuery.of(context).size.width * 0.78,
+                  // 头像已经移到气泡上方单独一行，气泡可以用满宽度（用户要求"更宽"）：
+                  // 以前是屏幕宽度的 78%，且还要让出头像那 46px。
+                  maxWidth: MediaQuery.of(context).size.width - 44,
                 ),
                 padding: hasImagesOnly ? EdgeInsets.zero : const EdgeInsets.all(14),
                 decoration: BoxDecoration(
@@ -734,22 +742,14 @@ class MessageBubble extends StatelessWidget {
                   ],
                 ),
               ),
+                    ),
+                    // 时间戳移出气泡：透明背景、跟在气泡下方（用户要求）
+                    _buildTimeLabel(isDark, isUser),
+                  ],
                 ),
-                // 时间戳移出气泡：透明背景、跟在气泡下方（用户要求）
-                _buildTimeLabel(isDark, isUser),
-              ],
-            ),
+              ),
+            ],
           ),
-          if (isUser) ...[
-            const SizedBox(width: 10),
-            AppAvatar(
-              imageBytes: userAvatarBytes,
-              radius: 18,
-              fallbackIcon: Icons.person,
-              fallbackBgColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFE0F2FE),
-              fallbackIconColor: const Color(0xFF0284C7),
-            ),
-          ],
         ],
       ),
     );
