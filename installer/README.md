@@ -34,6 +34,10 @@ installer/
 ├── build-installer.ps1       一键构建（入库）
 ├── languages/
 │   └── ChineseSimplified.isl 简体中文语言包（入库）
+├── assets/                   向导外观素材（入库）
+│   ├── wizard-large.png      向导侧边大图（纯白底 + 产品图标）
+│   ├── wizard-small.png      向导右上角小图
+│   └── slides/               安装过程中的轮播图（4 张功能截图）
 ├── cache/                    ⛔ 下载缓存        （.gitignore）
 ├── runtime/python/           ⛔ 私有 Python 运行时（.gitignore）
 └── output/                   ⛔ 编译产物        （.gitignore）
@@ -54,6 +58,30 @@ App 侧 `BridgeProcessManager._resolvePythonExecutable()` 会**优先**使用 `{
 
 实现细节见 `prepare-runtime.ps1` 的注释（要点：Python **embeddable** 默认关闭
 `site-packages`，必须打开 `python3xx._pth` 里的 `import site`，否则 `import websockets` 会失败）。
+
+## 外观与安装过程（这块踩过三个坑，改之前务必看）
+
+| 现象 | 根因 | 做法 |
+| :--- | :--- | :--- |
+| 编译报 `Unknown type 'TTimer'` | Inno 的 Pascal Script **没有 `TTimer` 支持类**，脚本层也没有自己的消息循环 | 轮播改由 `CurInstallProgressChanged` 驱动 —— 按安装进度把 4 张图均匀铺开（0~25% 第 1 张、25~50% 第 2 张…），比定时器更贴合安装流程 |
+| 编译报 `Unknown identifier 'PICTURE'` | `TBitmapImage` 的属性是 **`Bitmap` / `PngImage`**，**没有 `Picture`** | 素材是 PNG，所以用 `SlideImage.PngImage.LoadFromFile(...)` |
+| 安装时反复抛「内部错误：Cannot call file extractor recursively」 | `CurInstallProgressChanged` 发生在 Inno **正在写文件**的过程中，此时不允许再调 `ExtractTemporaryFile` | 改为进入安装页时用 `ExtractTemporaryFiles('*.png')` **一次性全部提取**，之后只做 `LoadFromFile` |
+
+另外两条容易踩的点：
+
+* **Pascal 的花括号本身就是注释定界符** —— 注释正文里不能再写花括号（例如写 `{tmp}` 会把外层注释提前闭合，报出位置莫名其妙的 Syntax error）。
+* **轮播图用 `dontcopy`**：只打进安装包、**不落到目标目录**（实测确认目标目录里没有这些 png），安装结束后由 Inno 自动清理临时目录。
+
+## 安装前会停掉占用目标目录的桥接
+
+桥接跑的是 App 自带的私有 Python（应用目录下的 `python` 子目录）。它一旦变成孤儿进程
+（App 退出时没带走 —— 旧版本的行为，现已在托盘退出项里修掉），就占着安装目录里的 `python.exe`，
+Inno 的 RestartManager 无法自动关闭它，安装会以「安装程序无法自动关闭所有应用程序」**直接中止**
+（实测：退出码 5，日志里可见 `RestartManager found an application using one of our files: Python`）。
+
+所以 `[Code]` 的 `PrepareToInstall` 会先跑 `StopBridgeInAppDir()`：用 PowerShell 精确结束
+**「可执行文件路径位于应用目录下」**的 python —— **绝不动用户自己环境里的 Python**。
+实测对比：同一场景下，加这段之前安装失败（退出码 5），加了之后安装成功（退出码 0）且占用进程被清掉。
 
 ## 已知事项
 

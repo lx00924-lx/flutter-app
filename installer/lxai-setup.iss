@@ -19,6 +19,9 @@
 ;     PrivilegesRequiredOverridesAllowed=dialog 让用户能选"为所有用户"或"仅为我"。
 ;  3) 卸载【保留用户数据】：聊天记录/登录态在 %USERPROFILE%\Documents（Hive），
 ;     不在安装目录，卸载不会碰它。这里只清安装目录里运行时生成的文件。
+;  4) 外观：纯白底 + 产品图标（assets\wizard-*.png）；安装过程中在进度条上方
+;     轮播 4 张功能截图（assets\slides\，见 [Code] 段）。轮播图用 dontcopy 打进
+;     安装包但不落到目标目录，运行时用 ExtractTemporaryFile 提取。
 ; ============================================================================
 
 #ifndef MyAppVersion
@@ -60,6 +63,10 @@ SetupIconFile=..\flutter_app\windows\runner\resources\app_icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName} {#MyAppVersion}
 
+; 向导外观：纯白底 + 产品图标（尺寸为 Inno 标准的 2 倍，高 DPI 下更清晰）
+WizardImageFile=assets\wizard-large.png
+WizardSmallImageFile=assets\wizard-small.png
+
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -85,6 +92,9 @@ Source: "{#RuntimeDir}\*"; DestDir: "{app}\python"; Flags: ignoreversion recurse
 Source: "..\NOTICE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\TERMS.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\PRIVACY.md"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; 安装过程中的轮播图：只打进安装包，**不安装到目标目录**，
+; 运行时由 [Code] 里的 ExtractTemporaryFile 提取到 {tmp} 使用。
+Source: "assets\slides\*.png"; Flags: dontcopy
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -102,3 +112,211 @@ Type: files; Name: "{app}\bridge-run.log"
 Type: files; Name: "{app}\app-debug.log"
 Type: filesandordirs; Name: "{app}\__pycache__"
 Type: filesandordirs; Name: "{app}\python"
+
+[Code]
+{ ==========================================================================
+  安装过程中的轮播：在 wpInstalling 页上方展示 4 张功能截图与一句文案。
+
+  为什么不用定时器轮播：Inno 的 Pascal Script **没有 TTimer 支持类**
+  （编译会直接报 Unknown type 'TTimer'），而脚本层也没有自己的消息循环，
+  SetTimer 那套 Win32 回调同样用不了。
+  改用一个更贴合安装流程的触发源：Inno 在安装期间会持续调用
+  CurInstallProgressChanged，于是按进度把 4 张图均匀铺开 ——
+  进度 0~25% 第 1 张、25~50% 第 2 张……装到哪就看到哪，比盲切更自然。
+  ========================================================================== }
+const
+  SlideCount = 4;
+
+var
+  SlideFiles: array[0..SlideCount - 1] of String;
+  SlideTitles: array[0..SlideCount - 1] of String;
+  SlideDescs: array[0..SlideCount - 1] of String;
+  SlideIndex: Integer;
+  SlideImage: TBitmapImage;
+  SlideTitle: TNewStaticText;
+  SlideDesc: TNewStaticText;
+
+procedure InitSlideData();
+begin
+  SlideFiles[0] := '1-chat.png';
+  SlideTitles[0] := '随时随地，向你的电脑发问';
+  SlideDescs[0] := '手机、平板、另一台电脑都能远程遥控 —— 无需公网 IP';
+
+  SlideFiles[1] := '2-agent.png';
+  SlideTitles[1] := '一键启动本地桥接';
+  SlideDescs[1] := '后台静默运行不弹黑窗，启动、停止、重置都在一个面板里';
+
+  SlideFiles[2] := '3-api.png';
+  SlideTitles[2] := '接入你自己的模型';
+  SlideDescs[2] := '兼容 DeepSeek、OpenAI、Claude、Gemini、Ollama 等主流端点';
+
+  SlideFiles[3] := '4-splash.png';
+  SlideTitles[3] := '界面完全按你的喜好';
+  SlideDescs[3] := '自定义启动页、头像、聊天背景与系统提示词，并云端同步';
+end;
+
+procedure ShowSlide(Idx: Integer);
+var
+  TmpPath: String;
+begin
+  if (Idx < 0) or (Idx >= SlideCount) then Exit;
+
+  { 图片已在 CurPageChanged(wpInstalling) 里一次性提取好了 ——
+    这里**绝不能再调 ExtractTemporaryFile**：本过程由 CurInstallProgressChanged 驱动，
+    而那发生在 Inno 正在安装文件的过程中，此时调用提取器会直接抛
+    「内部错误：Cannot call file extractor recursively」，轮播就废了。 }
+  TmpPath := ExpandConstant('{tmp}\') + SlideFiles[Idx];
+
+  if FileExists(TmpPath) then
+    { TBitmapImage 的属性是 Bitmap / PngImage —— **没有 Picture**，
+      写成 Picture 会直接报 Unknown identifier。素材是 PNG，所以走 PngImage。 }
+    SlideImage.PngImage.LoadFromFile(TmpPath);
+
+  SlideTitle.Caption := SlideTitles[Idx];
+  SlideDesc.Caption := SlideDescs[Idx];
+end;
+
+{ 按安装页的实际尺寸摆放控件：图片保持 16:9 居中，文案在图片下方。
+  用 ScaleX/ScaleY 做 DPI 适配，避免高 DPI 下错位。 }
+procedure LayoutSlide();
+var
+  PageW, PageH, ImgW, ImgH: Integer;
+begin
+  PageW := WizardForm.InstallingPage.Width;
+  PageH := WizardForm.InstallingPage.Height;
+
+  { 图片占上方约一半；16:9 放不下就先压宽度 }
+  ImgH := (PageH * 50) div 100;
+  ImgW := (ImgH * 16) div 9;
+  if ImgW > PageW - ScaleX(30) then
+  begin
+    ImgW := PageW - ScaleX(30);
+    ImgH := (ImgW * 9) div 16;
+  end;
+
+  SlideImage.Left := (PageW - ImgW) div 2;
+  SlideImage.Top := ScaleY(4);
+  SlideImage.Width := ImgW;
+  SlideImage.Height := ImgH;
+
+  SlideTitle.Left := ScaleX(18);
+  SlideTitle.Top := SlideImage.Top + ImgH + ScaleY(10);
+  SlideTitle.Width := PageW - ScaleX(36);
+
+  SlideDesc.Left := ScaleX(18);
+  SlideDesc.Top := SlideTitle.Top + SlideTitle.Height + ScaleY(3);
+  SlideDesc.Width := PageW - ScaleX(36);
+end;
+
+procedure InitializeWizard();
+begin
+  InitSlideData();
+  SlideIndex := -1;
+
+  SlideImage := TBitmapImage.Create(WizardForm.InstallingPage);
+  SlideImage.Parent := WizardForm.InstallingPage;
+  SlideImage.Stretch := True;
+  SlideImage.Center := True;
+  SlideImage.Visible := False;
+
+  SlideTitle := TNewStaticText.Create(WizardForm.InstallingPage);
+  SlideTitle.Parent := WizardForm.InstallingPage;
+  SlideTitle.AutoSize := False;
+  SlideTitle.Height := ScaleY(20);
+  SlideTitle.Font.Size := 11;
+  SlideTitle.Font.Style := [fsBold];
+  SlideTitle.Visible := False;
+
+  SlideDesc := TNewStaticText.Create(WizardForm.InstallingPage);
+  SlideDesc.Parent := WizardForm.InstallingPage;
+  SlideDesc.AutoSize := False;
+  SlideDesc.Height := ScaleY(18);
+  SlideDesc.Visible := False;
+end;
+
+{ 安装进度变化 = 轮播的驱动源（见文件头说明）}
+procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
+var
+  NewIdx: Integer;
+begin
+  if MaxProgress <= 0 then Exit;
+
+  NewIdx := (CurProgress * SlideCount) div MaxProgress;
+  if NewIdx >= SlideCount then
+    NewIdx := SlideCount - 1;
+  if NewIdx < 0 then
+    NewIdx := 0;
+
+  if NewIdx <> SlideIndex then
+  begin
+    SlideIndex := NewIdx;
+    ShowSlide(SlideIndex);
+  end;
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = wpInstalling then
+  begin
+    { 趁安装还没开始，把 4 张轮播图一次性提取到临时目录。
+      必须在进入本页时做：安装期间的进度回调里不能再调提取器（见 ShowSlide 的说明）。
+      注意 Pascal 的花括号本身就是注释定界符，注释正文里不要再写花括号，否则会提前闭合。 }
+    ExtractTemporaryFiles('*.png');
+    LayoutSlide();
+    SlideIndex := 0;
+    ShowSlide(0);
+    SlideImage.Visible := True;
+    SlideTitle.Visible := True;
+    SlideDesc.Visible := True;
+  end
+  else if SlideImage <> nil then
+  begin
+    { 离开安装页要藏起来，否则控件会残留在其它页面上 }
+    SlideImage.Visible := False;
+    SlideTitle.Visible := False;
+    SlideDesc.Visible := False;
+  end;
+end;
+
+{ ==========================================================================
+  安装开始前：停掉占用目标目录的桥接进程。
+
+  为什么必须做：桥接跑的是 App 自带的私有 Python（位于应用目录的 python 子目录）。
+  旧版本里它是 detached 启动、App 退出不带走，很容易变成孤儿进程；一旦它还在跑，
+  就占着安装目录里的 python.exe，Inno 的 RestartManager 无法自动关闭它，安装会以
+  「安装程序无法自动关闭所有应用程序」直接中止（实测踩过，退出码 5，日志里
+  RestartManager found an application using one of our files: Python）。
+  在这里先把它停掉，用户就不必自己去任务管理器结束 python。
+
+  安全性：只杀「可执行文件路径位于应用目录下」的 python，
+  绝不动用户自己环境里的 Python。
+  ========================================================================== }
+procedure StopBridgeInAppDir();
+var
+  ScriptPath: String;
+  Script: TArrayOfString;
+  ResultCode: Integer;
+  AppDir: String;
+begin
+  AppDir := ExpandConstant('{app}');
+  ScriptPath := ExpandConstant('{tmp}\stop-lxai-bridge.ps1');
+
+  SetArrayLength(Script, 2);
+  Script[0] := '$app = ''' + AppDir + '''';
+  Script[1] :=
+    'Get-CimInstance Win32_Process -Filter "Name=''python.exe''" | ' +
+    'Where-Object { $_.ExecutablePath -like ($app + ''\*'') } | ' +
+    'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }';
+
+  { 脚本内容纯 ASCII，用 ANSI 保存即可（保存函数不写 UTF-8）}
+  if SaveStringsToFile(ScriptPath, Script, False) then
+    Exec('powershell.exe',
+         '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ScriptPath + '"',
+         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopBridgeInAppDir();
+  Result := '';
+end;
