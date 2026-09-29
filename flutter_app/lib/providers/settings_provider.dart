@@ -307,38 +307,54 @@ class SettingsProvider extends ChangeNotifier {
     // Dart isolate 仍存活，上面的会话轮询与中继长连接得以继续运行
     KeepAliveService.enableAfterLogin();
 
-    // 启动即拉一次电脑端目录：进聊天页时快捷栏也会拉，但那是"用到了才拉"，
-    // 用户先看设置页时会一直显示自己的旧档位。这里主动对齐一次。
-    // （电脑端此刻若还没起来，_applyAgentOnline 会在它上线时再补一次。）
-    unawaited(refreshAgentCatalog(silent: true));
+    // 启动期对齐电脑端目录；如果本机要自动拉起桥接，则**等桥接就绪后再拉**
+    //（顺序错了必然拿到空目录，见 _bootstrapAgentCatalog 的注释）
+    unawaited(_bootstrapAgentCatalog());
+  }
 
-    // 用户开了「启动应用时自动启动桥接」就把电脑端桥接拉起来
-    // （实测桌面端启动后桥接不会自己起，用户会以为电脑端掉线了）
-    unawaited(_autoStartBridgeIfEnabled());
+  /// 启动期：先按需拉起电脑端桥接，再对齐目录。
+  ///
+  /// 顺序为什么关键（实测日志 2026-09-30）：
+  ///   07:09:02  目录刷新: 0 个（未取到）      ← 先拉了目录
+  ///   07:09:04  [Bridge] 按设置自动启动桥接    ← 2 秒后才启动桥接
+  /// 而桥接「注册成功 → 推出第一份目录」还要约 4 秒（AGENTS.md §8 实测值），
+  /// 所以那次拉取注定是空的。之后唯一的自动补拉路径是 `_applyAgentOnline`，
+  /// 它要求在线态**发生变化** —— 本地读到的 isHarnessOnline 已经是 true 时会直接
+  /// return，于是界面就停在"未取到目录"，只能手动刷新。
+  /// 这里把顺序倒过来：先起桥接、等它就绪，再拉目录。
+  Future<void> _bootstrapAgentCatalog() async {
+    final startedBridge = await _autoStartBridgeIfEnabled();
+    if (startedBridge) {
+      // 桥接注册 + 推出目录约 4 秒，留 2 秒余量
+      await Future.delayed(const Duration(seconds: 6));
+    }
+    await refreshAgentCatalog(silent: true);
   }
 
   /// 按设置项「启动应用时自动启动桥接」在启动/登录后拉起电脑端桥接。
   ///
   /// 仅电脑端执行 —— 手机端没有本机 python 脚本，它的"启动桥接"是下发指令给电脑端。
   /// 桥接已在运行时直接返回（幂等），避免起出第二个进程抢同一个 Token。
-  Future<void> _autoStartBridgeIfEnabled() async {
+  ///
+  /// 返回：**本次是否真的把桥接拉起来了** —— 调用方据此决定要不要等它就绪再拉目录。
+  Future<bool> _autoStartBridgeIfEnabled() async {
     final isDesktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
-    if (!isDesktop || !_settings.autoStartBridgeOnLaunch) return;
+    if (!isDesktop || !_settings.autoStartBridgeOnLaunch) return false;
     final manager = BridgeProcessManager.instance;
     if (manager.isRunning) {
       debugPrint('[Bridge] 自动启动：桥接已在运行，跳过');
-      return;
+      return false;
     }
     final token = _settings.harnessToken.trim();
     if (token.isEmpty) {
       debugPrint('[Bridge] 自动启动：还没有配对 Token，跳过（登录后可手动启动一次）');
-      return;
+      return false;
     }
     // 等启动期的会话轮询/云端同步先跑完，避免和它们抢网络与磁盘
     await Future.delayed(const Duration(seconds: 4));
-    if (!_settings.autoStartBridgeOnLaunch || manager.isRunning) return;
+    if (!_settings.autoStartBridgeOnLaunch || manager.isRunning) return false;
     debugPrint('[Bridge] 按设置自动启动桥接（电脑端）');
-    await manager.start(token: token, harnessUrl: _harnessUrlForBridge());
+    return await manager.start(token: token, harnessUrl: _harnessUrlForBridge());
   }
 
   /// 供 ChatProvider 订阅的"消息 / 审批"类推送事件

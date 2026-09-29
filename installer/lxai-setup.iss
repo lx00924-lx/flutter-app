@@ -300,23 +300,37 @@ var
 begin
   AppDir := ExpandConstant('{app}');
   ScriptPath := ExpandConstant('{tmp}\stop-lxai-bridge.ps1');
+  Log('StopBridgeInAppDir: 开始清理（AppDir=' + AppDir + '）');
 
   SetArrayLength(Script, 2);
   Script[0] := '$app = ''' + AppDir + '''';
+  { 结束应用目录下的**所有**进程，不只是桥接用的 python。
+    实测（2026-09-30）真正挡住安装的是 App 本体 —— 它最小化在托盘里，不响应
+    RestartManager 的关闭请求，日志表现为「found an application using one of our
+    files: LxAI - 私有 Agent 控制中心」，卡 30 秒后以退出码 5 中止安装。
+    这里只按 ExecutablePath 过滤，碰不到用户自己环境里的任何程序。 }
   Script[1] :=
-    'Get-CimInstance Win32_Process -Filter "Name=''python.exe''" | ' +
-    'Where-Object { $_.ExecutablePath -like ($app + ''\*'') } | ' +
+    'Get-CimInstance Win32_Process | ' +
+    'Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -like ($app + ''\*'')) } | ' +
     'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }';
 
   { 脚本内容纯 ASCII，用 ANSI 保存即可（保存函数不写 UTF-8）}
   if SaveStringsToFile(ScriptPath, Script, False) then
+  begin
     Exec('powershell.exe',
          '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ScriptPath + '"',
          '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Log('StopBridgeInAppDir: 清理脚本已执行，exit=' + IntToStr(ResultCode));
+  end
+  else
+    Log('StopBridgeInAppDir: 写清理脚本失败，跳过');
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
+  { 加日志是为了定位"清理到底跑没跑、跑在 RestartManager 检查之前还是之后" ——
+    实测遇到过"占用被清掉了但安装仍以退出码 5 中止"，需要日志来区分时序问题。 }
+  Log('PrepareToInstall: 进入（准备安装阶段）');
   StopBridgeInAppDir();
   Result := '';
 end;
