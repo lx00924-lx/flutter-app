@@ -263,6 +263,16 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
   ② PATH 里的 `python`（开发机直跑构建产物 / 免安装绿色版）③ 都没有才报错。
   所以「桥接用 `C:\Python314\python.exe`」**只是开发机的情形，不是通用事实** ——
   排查「桥接起不来」时先确认这两条路径；改 Python 相关逻辑时**不要**删掉 ①，否则内置运行时白带。
+- **桥接的退出语义**（2026-09-30 调整，别再改回去）：托盘菜单现在有两个退出项 ——
+  「退出 LxAI（桥接保持在线）」与「退出 LxAI 并停止桥接」（`exitApp(stopBridge:)`，默认停）。
+  桥接是 `detachedWithStdio` 启动的，**不主动 kill 就会变成看不见的孤儿进程** —— 用户以为退干净了，
+  实际它还在后台连着中继（这正是用户报「退出应用后手机反而能连上」的原因）。
+  历史上曾是"退出不带走桥接"（为减少反复测试时等它重新注册的麻烦），但那个需求现在由
+  **「点 X = 收进托盘」**满足（App 与桥接都继续跑），所以"退出"可以放心做成完全退出。
+- **App 内日志页此前几乎是空的**（2026-09-30 修）：`main()` 里把全局 `debugPrint` 桥接进了
+  `AppLogger`。在此之前两者**互不相通** —— App 的诊断输出全是 `debugPrint`（只写 stdout，
+  双击启动的桌面应用没有控制台，输出直接丢掉），而设置页「调试日志」读的是 `AppLogger`，
+  全项目只有日志页自己在写它。所以用户报"抓不到日志"时，先确认这个桥接在不在，别去找日志文件。
 - **Windows 分发走安装器**（2026-09-29 新增，位于 `installer/`）：
   - 一键构建 `pwsh -File installer/build-installer.ps1`（先校验 Flutter Release 产物，版本号自动读 `pubspec.yaml`）；
     产物在 `installer\output\LxAI-Setup-<版本>.exe`（约 22 MB）。

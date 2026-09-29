@@ -9,6 +9,8 @@ import 'package:flutter/foundation.dart';
 import 'package:tray_manager/legacy.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'bridge_process_manager.dart';
+
 /// 托盘图标状态（优先级从上到下：越靠上越"有事要做"）。
 enum TrayStatus {
   /// 有选择框 / 审批在等用户处理 —— 最高优先级，必须一眼看见
@@ -79,7 +81,11 @@ class TrayService with TrayListener, WindowListener {
             // 「收进托盘」已按用户要求移除：窗口本来就靠关闭按钮收进托盘，
             // 菜单里再放一项等于让人在托盘菜单里把已经看不见的窗口再藏一次。
             MenuItem.separator(),
-            MenuItem(key: 'exit', label: '退出 LxAI'),
+            // 两个退出项的语义差异（用户定调）：桥接是 detached 启动的，App 退出
+            // 不会自动带走它。要不要留它在线，交给用户在这里明确选 ——
+            // 而不是像以前那样"退出后桥接悄悄变成孤儿进程，用户以为退干净了"。
+            MenuItem(key: 'exit_keep_bridge', label: '退出 LxAI（桥接保持在线）'),
+            MenuItem(key: 'exit', label: '退出 LxAI 并停止桥接'),
           ],
         ),
       );
@@ -144,8 +150,21 @@ class TrayService with TrayListener, WindowListener {
     }
   }
 
-  /// 真正退出（托盘菜单「退出 LxAI」）。
-  Future<void> exitApp() async {
+  /// 真正退出（托盘菜单的两个退出项都走这里）。
+  ///
+  /// [stopBridge] 决定要不要连带停掉桥接：桥接是用 detached 方式启动的，不主动 kill
+  /// 就会变成看不见的孤儿进程 —— 用户以为退干净了，实际它还在后台连着中继。
+  /// 所以默认**停**；调试时不想每次重启 App 都等桥接重新注册，就选菜单里
+  /// 「退出 LxAI（桥接保持在线）」那一项。
+  Future<void> exitApp({bool stopBridge = true}) async {
+    if (stopBridge) {
+      try {
+        // stop() 发完终止信号就返回、不等进程退出，所以不会拖慢退出速度
+        await BridgeProcessManager.instance.stop(byUser: false);
+      } catch (e) {
+        debugPrint('[Tray] 退出时停止桥接失败（忽略，继续退出）: $e');
+      }
+    }
     try {
       await windowManager.setPreventClose(false);
       await windowManager.destroy();
@@ -187,8 +206,10 @@ class TrayService with TrayListener, WindowListener {
     switch (menuItem.key) {
       case 'show':
         showWindow();
+      case 'exit_keep_bridge':
+        exitApp(stopBridge: false);
       case 'exit':
-        exitApp();
+        exitApp(stopBridge: true);
       default:
     }
   }

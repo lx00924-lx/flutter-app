@@ -9,6 +9,7 @@ import 'dart:io' show Platform;
 import 'providers/chat_provider.dart';
 import 'providers/settings_provider.dart';
 import 'screens/chat_screen.dart';
+import 'screens/log_console_screen.dart';
 import 'screens/login_screen.dart';
 import 'screens/splash_screen.dart';
 import 'services/notification_service.dart';
@@ -19,6 +20,23 @@ final GlobalKey<NavigatorState> rootNavigatorKey = GlobalKey<NavigatorState>();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 把全局 debugPrint 同时接进 AppLogger。
+  //
+  // 为什么需要这一步：App 里所有诊断输出用的都是 debugPrint —— 它只写 stdout，
+  // 而双击启动的桌面应用没有控制台，输出直接丢掉；设置页那个「调试日志」界面
+  // 读的却是 AppLogger，两者此前**互不相通**，于是日志页几乎是空的（全项目只有
+  // 日志页自己在写它）。结果是用户遇到"桥接不在线"这类问题时，一点现场都抓不到。
+  //
+  // 这里做一次桥接：原输出照旧（用重定向方式启动时仍能落盘），同时也进日志页。
+  // AppLogger 有 500 条上限，不会涨爆内存。
+  final originalDebugPrint = debugPrint;
+  debugPrint = (String? message, {int? wrapWidth}) {
+    originalDebugPrint(message, wrapWidth: wrapWidth);
+    if (message != null && message.trim().isNotEmpty) {
+      AppLogger.instance.log('DEBUG', 'App', message);
+    }
+  };
 
   // 初始化本地持久化 Hive 数据库 (并发异步打开，大幅提升启动速度；增加异常自动恢复机制)
   try {
