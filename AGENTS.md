@@ -269,6 +269,19 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
   实际它还在后台连着中继（这正是用户报「退出应用后手机反而能连上」的原因）。
   历史上曾是"退出不带走桥接"（为减少反复测试时等它重新注册的麻烦），但那个需求现在由
   **「点 X = 收进托盘」**满足（App 与桥接都继续跑），所以"退出"可以放心做成完全退出。
+- **桥接的 stdio 必须排空，否则永久卡死**（2026-09-30 修；这是「App 拉起的桥接从来不上线」的真因）：
+  `BridgeProcessManager.start()` 用 `ProcessStartMode.detachedWithStdio` 起桥接，**必须紧跟 `_drainStdio(process)`**。
+  Windows 匿名管道的内核缓冲区只有几 KB，而桥接启动时要打印品牌横幅 + 终端二维码
+  （`print_terminal_qr` 一屏 35~41 行 ANSI，实测约 8~10 KB）—— 父进程不读走，缓冲区写满后桥接的
+  下一个 `print()` 就**永久阻塞在 write 上**，永远走不到后面的 `websockets.connect`。
+  - 症状极具迷惑性：**进程活着、CPU≈0、`bridge-run.log` 停在二维码那一行、零外网 TCP 连接**，
+    中继侧显示「从未上线」—— 极易误判成网络不通 / Token 失效 / 中继故障。
+  - 判据：`Get-NetTCPConnection -OwningProcess <桥接PID>` 中**没有到中继 443 的 Established**；
+    且 `bridge-run.log` 里最后一次 `[✓ 成功上线]` 之后的所有启动都缺这一行。
+  - 实测对照（同一条命令行 / 同一个 token / 同一台中继）：App 拉起的 3 次全部卡死；
+    改用带真实控制台的 `Start-Process` 启动则 **2 秒上线**，并同步出 20 个会话。
+  - **排查手法**：别只在 App 里反复试，直接用 `{app}\python\python.exe` 按同样参数手动跑一遍做对照 ——
+    能上线就说明网络与 Token 都没问题，问题在本地进程/管道侧。
 - **App 内日志页此前几乎是空的**（2026-09-30 修）：`main()` 里把全局 `debugPrint` 桥接进了
   `AppLogger`。在此之前两者**互不相通** —— App 的诊断输出全是 `debugPrint`（只写 stdout，
   双击启动的桌面应用没有控制台，输出直接丢掉），而设置页「调试日志」读的是 `AppLogger`，

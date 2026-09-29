@@ -241,8 +241,15 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   }
 
   void _saveSilently() {
-    if (!mounted) return;
-    final sp = context.read<SettingsProvider>();
+    // ⚠️ 这里**不能**用 `context.read`：本方法也会从 `dispose()` 里调用，而 dispose
+    // 期间 `mounted` 仍为 true（Element 要到 `super.dispose()` 之后才置空），
+    // 守卫挡不住 —— 实测抛 `Null check operator used on a null value`
+    // （_saveSilently:245 ← dispose:268）。改用 initState 里缓存的引用。
+    //
+    // 注意也**不能**因为 mounted==false 就提前 return：用户改完输入框直接关页面时，
+    // 失焦保存来不及触发，dispose 里的这次调用正是最后一道保存机会。
+    final sp = _settingsProvider;
+    if (sp == null) return;
     final s = sp.settings;
     s.harnessToken = _tokenCtrl.text.trim();
     var rawUrl = _harnessUrlCtrl.text.trim();

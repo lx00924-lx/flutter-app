@@ -92,6 +92,23 @@ class BridgeProcessManager extends ChangeNotifier {
         mode: ProcessStartMode.detachedWithStdio,
       );
 
+      // ⚠️ 必须排空子进程的 stdio —— 这是"桥接能否上线"的前提，不是顺手清理。
+      //
+      // `detachedWithStdio` 会建立匿名管道，而 Windows 匿名管道的内核缓冲区只有几 KB。
+      // 桥接启动时要打印品牌横幅 + 终端二维码（`print_terminal_qr` 一屏 35~41 行 ANSI，
+      // 实测约 8~10 KB），父进程不读走，缓冲区写满后桥接的下一个 `print()` 会
+      // **永久阻塞在 write 上**，于是永远走不到后面的 `websockets.connect`。
+      //
+      // 现场表现极具迷惑性：进程活着、CPU 几乎为 0（在等管道）、`bridge-run.log`
+      // 停在二维码那一行、**没有任何到中继的 TCP 连接**，中继侧则显示"从未上线"——
+      // 于是被误判成"网络不通/Token 失效"，而实际上是本地管道死锁。
+      // 2026-09-30 实测对照：同一条命令行，App 拉起的 3 次全部卡死；换成带真实控制台
+      // 启动（不连管道）则 **2 秒内上线**并同步出 20 个会话。
+      //
+      // 读取后直接丢弃：桥接自己已用 `--log-file` 把同样内容落盘到 `bridge-run.log`
+      // （带轮转与 token 打码），再往 AppLogger 灌一份只会刷屏。
+      _drainStdio(process);
+
       _process = process;
       _pid = process.pid;
       _stoppedByUser = false;
@@ -264,6 +281,15 @@ class BridgeProcessManager extends ChangeNotifier {
         notifyListeners();
       }
     });
+  }
+
+  /// 排空桥接进程的 stdout/stderr，防止管道缓冲区写满导致桥接死锁。
+  ///
+  /// 详见 [start] 里的说明：不排空 = 桥接必然卡在启动横幅/二维码之后，
+  /// 永远连不上中继。读取到的内容直接丢弃（桥接自己已落盘 `bridge-run.log`）。
+  void _drainStdio(Process process) {
+    process.stdout.drain<void>().catchError((Object _) {});
+    process.stderr.drain<void>().catchError((Object _) {});
   }
 
   void _setMessage(String text, {required bool isError}) {
