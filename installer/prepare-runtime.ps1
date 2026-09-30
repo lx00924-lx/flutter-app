@@ -55,8 +55,18 @@ function Write-Warn([string]$msg) { Write-Host "    $msg" -ForegroundColor Yello
 # ── 幂等检查：已备料且导入自检通过就直接返回 ───────────────────────────────────
 $pyExe = Join-Path $RuntimePy 'python.exe'
 if (-not $Force -and (Test-Path -LiteralPath $pyExe)) {
+    # ⚠️ 这里的"探测失败"是**预期情况**（首次组装时 websockets 还没装进去）。
+    # 但 Python 的 ImportError 会往 stderr 打 Traceback，而 `2>&1` 让 PowerShell 把它
+    # 视作 NativeCommandError —— 若 ErrorActionPreference 是 Stop（调用方常常这么设），
+    # 脚本就会在这一行直接中止，**永远走不到下面的"重新组装"**，表现为安装器构建
+    # 莫名其妙地死在"备料私有 Python 运行时"这一步。所以先临时降级为 Continue 再探测。
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     $probe = & $pyExe -c "import websockets;print(websockets.__version__)" 2>&1
-    if ($LASTEXITCODE -eq 0 -and $probe -match '^\d') {
+    $probeCode = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+
+    if ($probeCode -eq 0 -and $probe -match '^\d') {
         Write-Step "私有运行时已就绪（Python $PyVersion / websockets $probe），跳过。加 -Force 可强制重做。"
         exit 0
     }
@@ -100,15 +110,32 @@ if (-not $hostPy) { throw '本机没有可用的 Python 来下载 wheel；请先
 
 # 目标运行时的版本/平台特征，避免下到不匹配的 wheel
 $pyTag = 'cp' + ($PyVersion -replace '^(\d+)\.(\d+).*', '$1$2')
-& $hostPy -m pip download $WebsocketsReq --no-deps --only-binary=:all: `
-    --python-version ($PyVersion -replace '^(\d+\.\d+).*', '$1') `
-    --platform win_amd64 --implementation cp -d $CacheDir 2>&1 |
-    Select-Object -Last 2 | ForEach-Object { Write-Host "    $_" }
 
-$whl = Get-ChildItem -LiteralPath $CacheDir -Filter "$WebsocketsReq-*.whl" |
+# 缓存优先：cache\ 里已经有可用的 wheel 就直接用，不再联网。
+#
+# 为什么必须这样：本机（以及不少国内环境）走代理/透明网关，pypi.org 会被解析到不可达的
+# 内网地址（实测 198.18.0.41，与 AGENTS.md 里记的 github.com → 198.18.0.x 同源）。
+# 旧写法"无条件先下载"会让整个安装器构建卡死在这一步，而 cache\ 里其实早就躺着版本
+# 完全匹配的 wheel。顺带的好处：离线也能重建安装器，重复构建也快得多。
+$whl = Get-ChildItem -LiteralPath $CacheDir -Filter "$WebsocketsReq-*.whl" -ErrorAction SilentlyContinue |
        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $whl) { throw "没取到 $WebsocketsReq 的 wheel" }
-Write-Ok $whl.Name
+
+if ($whl) {
+    Write-Ok "命中缓存：$($whl.Name)（跳过下载）"
+} else {
+    Write-Host '    缓存里没有，尝试从 PyPI 下载...' -ForegroundColor Yellow
+    & $hostPy -m pip download $WebsocketsReq --no-deps --only-binary=:all: `
+        --python-version ($PyVersion -replace '^(\d+\.\d+).*', '$1') `
+        --platform win_amd64 --implementation cp -d $CacheDir 2>&1 |
+        Select-Object -Last 2 | ForEach-Object { Write-Host "    $_" }
+    $whl = Get-ChildItem -LiteralPath $CacheDir -Filter "$WebsocketsReq-*.whl" -ErrorAction SilentlyContinue |
+           Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $whl) {
+        throw ("没取到 $WebsocketsReq 的 wheel，且缓存为空。请把版本匹配的 wheel" +
+               "（形如 $WebsocketsReq-*-cp313-*-win_amd64.whl）手动放进 cache\ 后重试。")
+    }
+    Write-Ok $whl.Name
+}
 
 # Expand-Archive 只认 .zip，先复制一份
 $tmpZip = Join-Path $CacheDir "_wheel_tmp.zip"
