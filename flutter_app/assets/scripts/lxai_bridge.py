@@ -2018,7 +2018,23 @@ async def execute_dsh_sse_stream(
 
                     loop.call_soon_threadsafe(q.put_nowait, ("stream_end", None))
             except Exception as e:
-                loop.call_soon_threadsafe(q.put_nowait, ("stream_error", str(e)))
+                # 主通道失败必须留下确切原因。这里以前只把异常文本塞进队列，
+                # 上层统一显示成"主通道不可用"—— 于是 401（鉴权不过）、
+                # 404（端点不存在）、超时、连接被拒 全长一个样子，排查只能靠猜。
+                # 现在带上 HTTP 状态码与响应体开头，一眼可辨。
+                _detail = str(e)
+                _code = getattr(e, "code", None)
+                _body = ""
+                try:
+                    _body = e.read().decode("utf-8", errors="replace")[:300]
+                except Exception:
+                    pass
+                _msg = _detail
+                if _code:
+                    _msg += f" [HTTP {_code}]"
+                if _body:
+                    _msg += f" body={_body}"
+                loop.call_soon_threadsafe(q.put_nowait, ("stream_error", _msg))
 
         msg_queue = asyncio.Queue()
         stream_thread = threading.Thread(target=stream_request_worker, args=(msg_queue,), daemon=True)
@@ -2510,6 +2526,21 @@ async def execute_local_harness(
     if not content_list:
         content_list = [{"type": "text", "text": str(prompt or "")}]
 
+    # WS RPC 通道也要带图。注意结构差异：payload 里图片是 {data, mediaType}，
+    # 而 content_list 是"块数组"，图片块要多一个 type 字段。
+    if images:
+        for _img in images:
+            if not isinstance(_img, dict):
+                continue
+            _entry = {
+                "type": "image",
+                "data": _img.get("data", ""),
+                "mediaType": _img.get("mediaType") or _img.get("media_type", ""),
+            }
+            if _img.get("name"):
+                _entry["name"] = _img["name"]
+            content_list.append(_entry)
+
     # 备用通道（适配器 / WS RPC）拿不到宿主的 selectModel，思考深度改不了。
     # 这里如实告知，避免用户以为"选了没生效"是 App 的问题。
     if reasoning_effort and reasoning_effort != "default":
@@ -2541,6 +2572,12 @@ async def execute_local_harness(
     }
     if real_session_id:
         prompt_payload["sessionId"] = real_session_id
+    # ⚠️ 图片必须带上。备用通道才是当前实际生效的那条路（实测执行详情里
+    # [3/3] 走的正是「宿主 3081 HTTP 适配器 (/v1/agent/prompt)」），
+    # 漏了这里图就被静默丢掉 —— 任务照样"成功"、模型却说没收到图，
+    # 症状和"根本没发"一模一样，极难排查。
+    if images:
+        prompt_payload["images"] = images
 
     candidate_endpoints.append((
         f"{adapter_base}/v1/chat/completions",
