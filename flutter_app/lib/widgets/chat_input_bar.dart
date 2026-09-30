@@ -1588,6 +1588,29 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                             );
                           }
                         }),
+                        // 末尾的「+」：**已经加了图之后才出现**，点它继续追加。
+                        //
+                        // 有了多选（allowMultiple）之后一次能挑好几张，但"选完才想起
+                        // 还有两张没加"是很自然的操作 —— 有这个加号，用户不用退出去重来。
+                        // 尺寸/圆角与上面的缩略图对齐（56 / 10），颜色走"次级"色板，
+                        // 视觉上明确是"占位/操作"，不会被误认成一张图。
+                        if (_pendingAttachments.isNotEmpty)
+                          GestureDetector(
+                            onTap: _handlePickImage,
+                            child: Container(
+                              width: 56,
+                              height: 56,
+                              margin: const EdgeInsets.only(right: 8),
+                              decoration: BoxDecoration(
+                                color: isDark ? const Color(0xFF1E293B) : const Color(0xFFF1F5F9),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
+                                ),
+                              ),
+                              child: const Icon(Icons.add, size: 22, color: Color(0xFF0284C7)),
+                            ),
+                          ),
                       ],
                     ),
                   ),
