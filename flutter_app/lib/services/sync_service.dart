@@ -1462,8 +1462,13 @@ class SyncService {
 
     String buffer = '';
 
-    await for (final chunk in response.data!.stream) {
-      final text = utf8.decode(chunk);
+    // 必须让 Utf8Decoder 跨包累积解码，不能对每个 chunk 单独 utf8.decode：
+    // SSE 是网络分包到达的，而中文一个字 3 字节 —— 包边界经常落在多字节字符中间，
+    // 单独解码会抛 FormatException，异常从 await for 里冒出来直接打断整条流
+    // （表现为 App 每次发消息都显示"连接中断，正在向电脑端取回结果"，然后靠兜底
+    // 对账把内容补回来）。transform(utf8.decoder) 由解码器自己留住半个字符，
+    // allowMalformed 再兜住真正的非法字节，两者缺一不可。
+    await for (final text in response.data!.stream.cast<List<int>>().transform(const Utf8Decoder(allowMalformed: true))) {
       buffer += text;
 
       while (buffer.contains('\n\n')) {
