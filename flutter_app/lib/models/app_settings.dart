@@ -158,7 +158,7 @@ class AppSettings {
   // --- 5. 本地 Agent 宿主 (本地电脑 Agent 桥接) ---
   bool defaultAgentMode;
   String harnessToken;
-  String harnessServiceUrl; // 默认 http://127.0.0.1:3080
+  String harnessServiceUrl; // 默认 http://127.0.0.1:19387（DSH 桌面版固定端口；dsh web / npx 为 3080）
   String localBridgeWsUrl; // 默认 http://127.0.0.1:3080
   String localAgentToken;
   String targetWorkspace;
@@ -263,7 +263,7 @@ class AppSettings {
     // Harness（配对 Token 不再硬编码：留空后由 fromMap 自动为每台设备随机生成）
     this.defaultAgentMode = false,
     this.harnessToken = '',
-    this.harnessServiceUrl = 'http://127.0.0.1:3080',
+    this.harnessServiceUrl = 'http://127.0.0.1:19387',
     this.localBridgeWsUrl = 'http://127.0.0.1:3080',
     this.localAgentToken = '',
     // 不再预设 'deepseek-agent' 这类并不存在的假工作区：默认留空，
@@ -480,7 +480,7 @@ class AppSettings {
       // 旧数据若是历史默认值（所有设备共用）或为空，则本地重新随机生成，
       // 生成结果由 SettingsProvider 落盘并同步到云端设置。
       harnessToken: _resolveHarnessToken(map['harnessToken']?.toString()),
-      harnessServiceUrl: map['harnessServiceUrl']?.toString() ?? 'http://127.0.0.1:3080',
+      harnessServiceUrl: map['harnessServiceUrl']?.toString() ?? 'http://127.0.0.1:19387',
       localBridgeWsUrl: map['localBridgeWsUrl']?.toString() ?? 'http://127.0.0.1:3080',
       localAgentToken: map['localAgentToken']?.toString() ?? '',
       // 历史数据里可能残留 'deepseek-agent' 这个并不存在的预设工作区，一并清空

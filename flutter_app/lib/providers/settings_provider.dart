@@ -489,7 +489,7 @@ class SettingsProvider extends ChangeNotifier {
       url = url.substring(8);
     }
     url = url.replaceAll(RegExp(r'/+$'), '');
-    return url.isEmpty ? '127.0.0.1:3080' : url;
+    return url.isEmpty ? '127.0.0.1:19387' : url;
   }
 
   /// 执行手机端下发的桥接控制指令（电脑端 App 收到后在本机操作脚本）。

@@ -191,7 +191,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       urlText = urlText.substring(8);
     }
     if (urlText.isEmpty) {
-      urlText = '127.0.0.1:3080';
+      urlText = '127.0.0.1:19387';
     }
     _harnessUrlCtrl = TextEditingController(text: urlText);
     _localWsUrlCtrl = TextEditingController(
@@ -253,7 +253,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     final s = sp.settings;
     s.harnessToken = _tokenCtrl.text.trim();
     var rawUrl = _harnessUrlCtrl.text.trim();
-    if (rawUrl.isEmpty) rawUrl = '127.0.0.1:3080';
+    if (rawUrl.isEmpty) rawUrl = '127.0.0.1:19387';
     if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
       s.harnessServiceUrl = 'http://$rawUrl';
     } else {
@@ -383,7 +383,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         await manager.restart(
           token: newToken,
           harnessUrl: _harnessUrlCtrl.text.trim().isEmpty
-              ? '127.0.0.1:3080'
+              ? '127.0.0.1:19387'
               : _harnessUrlCtrl.text.trim(),
         );
         if (!mounted) return;
@@ -445,7 +445,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
 
     final manager = BridgeProcessManager.instance;
     final isDesktop = Platform.isWindows || Platform.isMacOS || Platform.isLinux;
-    final normalizedHarness = harnessUrl.trim().isEmpty ? '127.0.0.1:3080' : harnessUrl.trim();
+    final normalizedHarness = harnessUrl.trim().isEmpty ? '127.0.0.1:19387' : harnessUrl.trim();
 
     setState(() => _isStartingBridge = true);
     try {
@@ -976,9 +976,9 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                       decoration: const InputDecoration(
                         labelText: 'Harness 服务地址',
                         prefixText: 'http://',
-                        hintText: '127.0.0.1:3080',
+                        hintText: '127.0.0.1:19387',
                         border: OutlineInputBorder(),
-                        helperText: '固定协议头 http://，默认预填 127.0.0.1:3080',
+                        helperText: '固定协议头 http://；桌面版 19387，dsh web / npx 为 3080',
                         isDense: true,
                       ),
                     ),

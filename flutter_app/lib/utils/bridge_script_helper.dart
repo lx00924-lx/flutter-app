@@ -51,7 +51,7 @@ class BridgeScriptHelper {
     required String harnessUrl,
   }) {
     final cleanServer = serverUrl.isNotEmpty ? serverUrl : AppConfig.normalizedServerBaseUrl;
-    final cleanHarness = harnessUrl.isNotEmpty ? harnessUrl : 'http://127.0.0.1:3080';
+    final cleanHarness = harnessUrl.isNotEmpty ? harnessUrl : 'http://127.0.0.1:19387';
     final cleanToken = token.isNotEmpty ? token : 'agent_default';
 
     // 行尾必须显式写成 CRLF 后再落盘：Windows 的 cmd.exe 按 CRLF 定位批处理行边界，

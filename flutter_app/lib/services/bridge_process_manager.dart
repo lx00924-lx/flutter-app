@@ -26,7 +26,7 @@ class BridgeProcessManager extends ChangeNotifier {
   Timer? _watchTimer;
   bool _stoppedByUser = false;
   int _autoRestartCount = 0;
-  String _lastHarnessUrl = '127.0.0.1:3080';
+  String _lastHarnessUrl = '127.0.0.1:19387';
   String _lastToken = '';
 
   /// 最近一次操作的结果提示（供界面弹 SnackBar）
@@ -55,7 +55,7 @@ class BridgeProcessManager extends ChangeNotifier {
     if (resetRetryCount) _autoRestartCount = 0;
 
     _lastToken = token.trim();
-    _lastHarnessUrl = harnessUrl.trim().isEmpty ? '127.0.0.1:3080' : harnessUrl.trim();
+    _lastHarnessUrl = harnessUrl.trim().isEmpty ? '127.0.0.1:19387' : harnessUrl.trim();
 
     try {
       final scriptPath = 'lxai_bridge.py';
