@@ -3201,11 +3201,11 @@ async function startServer() {
 
   // 桥接脚本下载。
   //
-  // 兼容旧路径：脚本从 deepseek_bridge.py 改名为 lxai_bridge.py（去掉第三方商标字样），
-  // 但历史教程、旧版 App 生成的一键脚本仍在请求旧地址 —— 一并保留，指向同一个文件，
-  // 只是下载下来的文件名统一为新名字。
-  app.get(["/lxai_bridge.py", "/deepseek_bridge.py", "/api/download/lxai_bridge.py",
-           "/api/download/deepseek_bridge.py", "/api/download/bridge.py"], async (req, res) => {
+  // 2026-10-01 起只保留新路径。脚本早期叫 deepseek_bridge.py（文件名里带第三方商标字样），
+  // 改名成 lxai_bridge.py 后曾同时挂三个旧别名做兼容；现已确认旧版 App 与历史教程都不再
+  // 请求旧地址，那三个别名（/deepseek_bridge.py、/api/download/deepseek_bridge.py、
+  // /api/download/bridge.py）随之下线 —— 免得继续对外分发带他人商标的文件名。
+  app.get(["/lxai_bridge.py", "/api/download/lxai_bridge.py"], async (req, res) => {
     try {
       const scriptPath = path.resolve(process.cwd(), "lxai_bridge.py");
       const content = await fs.readFile(scriptPath, "utf-8");
