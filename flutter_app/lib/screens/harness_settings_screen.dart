@@ -20,13 +20,9 @@ class HarnessSettingsScreen extends StatefulWidget {
 class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   late TextEditingController _tokenCtrl;
   late TextEditingController _harnessUrlCtrl;
-  late TextEditingController _localWsUrlCtrl;
-  late TextEditingController _localAgentTokenCtrl;
 
   final FocusNode _tokenFocus = FocusNode();
   final FocusNode _harnessUrlFocus = FocusNode();
-  final FocusNode _localWsUrlFocus = FocusNode();
-  final FocusNode _localAgentTokenFocus = FocusNode();
 
   bool _isStartingBridge = false;
   /// 正在向服务端换发配对 Token（防止重复点击）
@@ -194,16 +190,10 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       urlText = '127.0.0.1:19387';
     }
     _harnessUrlCtrl = TextEditingController(text: urlText);
-    _localWsUrlCtrl = TextEditingController(
-      text: s.localBridgeWsUrl.isNotEmpty ? s.localBridgeWsUrl : 'http://127.0.0.1:3080',
-    );
-    _localAgentTokenCtrl = TextEditingController(text: s.localAgentToken);
 
     // 绑定失焦自动保存监听，解决每次击键卡顿问题
     _tokenFocus.addListener(_handleFocusChange);
     _harnessUrlFocus.addListener(_handleFocusChange);
-    _localWsUrlFocus.addListener(_handleFocusChange);
-    _localAgentTokenFocus.addListener(_handleFocusChange);
 
     // 服务端换发/下发 Token 时同步刷新本页显示（详见 _syncTokenFromProvider）
     _settingsProvider = context.read<SettingsProvider>();
@@ -222,10 +212,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   }
 
   void _handleFocusChange() {
-    if (!_tokenFocus.hasFocus &&
-        !_harnessUrlFocus.hasFocus &&
-        !_localWsUrlFocus.hasFocus &&
-        !_localAgentTokenFocus.hasFocus) {
+    if (!_tokenFocus.hasFocus && !_harnessUrlFocus.hasFocus) {
       _saveSilently();
     }
   }
@@ -261,10 +248,6 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     }
     // 说明：工作区/会话/模型/权限这几项现在由聊天页上方的「Agent 快捷栏」负责，
     // 本页不再写回它们 —— 否则这里保存的旧值会把快捷栏刚改的选择覆盖掉。
-    s.localBridgeWsUrl = _localWsUrlCtrl.text.trim().isNotEmpty
-        ? _localWsUrlCtrl.text.trim()
-        : 'http://127.0.0.1:3080';
-    s.localAgentToken = _localAgentTokenCtrl.text.trim();
     sp.updateSettings(s);
   }
 
@@ -275,12 +258,8 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     _saveSilently();
     _tokenFocus.dispose();
     _harnessUrlFocus.dispose();
-    _localWsUrlFocus.dispose();
-    _localAgentTokenFocus.dispose();
     _tokenCtrl.dispose();
     _harnessUrlCtrl.dispose();
-    _localWsUrlCtrl.dispose();
-    _localAgentTokenCtrl.dispose();
     super.dispose();
   }
 
@@ -988,60 +967,6 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
             ),
             const SizedBox(height: 16),
 
-
-            // 局域网 / 本地直连设置 (Local Agent)
-            Card(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.lan_outlined, size: 20, color: Colors.blueAccent),
-                        SizedBox(width: 8),
-                        Text(
-                          '局域网 / 本地直连设置 (可选)',
-                          style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      '同 WiFi 局域网或桌面版直接连接本地电脑 Agent，无需公网中继。',
-                      style: TextStyle(fontSize: 12, color: Colors.grey),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _localWsUrlCtrl,
-                      focusNode: _localWsUrlFocus,
-                      decoration: const InputDecoration(
-                        labelText: '本地直连地址 (WS / HTTP)',
-                        hintText: 'http://127.0.0.1:3080',
-                        border: OutlineInputBorder(),
-                        helperText: '局域网或本机直连地址，默认 http://127.0.0.1:3080',
-                        isDense: true,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _localAgentTokenCtrl,
-                      focusNode: _localAgentTokenFocus,
-                      obscureText: true,
-                      decoration: const InputDecoration(
-                        labelText: '直连安全 Token (可选)',
-                        hintText: '留空或输入本地安全口令',
-                        border: OutlineInputBorder(),
-                        helperText: '局域网握手鉴权 Token，未配置可留空 (已启用安全隐藏)',
-                        isDense: true,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
 
             // 本地启动程序与脚本导出
             Card(

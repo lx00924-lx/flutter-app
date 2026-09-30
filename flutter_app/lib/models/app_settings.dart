@@ -159,8 +159,11 @@ class AppSettings {
   bool defaultAgentMode;
   String harnessToken;
   String harnessServiceUrl; // 默认 http://127.0.0.1:19387（DSH 桌面版固定端口；dsh web / npx 为 3080）
-  String localBridgeWsUrl; // 默认 http://127.0.0.1:3080
-  String localAgentToken;
+  // 2026-10-01 删除 localBridgeWsUrl / localAgentToken 两个字段。
+  // 它们服务于早期设想的「同 WiFi 直连本机 DSH web（3080）」链路，但那条链路从未接通：
+  // 唯一读它的 LocalAgentService 拿 http:// 地址去开 WebSocketChannel（要 ws://），
+  // 而 DSH 的 3080 也没有它假设的那套 auth 握手协议。留着只会误导用户去配一个不存在的东西。
+  // 字段删除后，历史云端设置里的同名键会被 fromMap 直接忽略，无需迁移。
   String targetWorkspace;
   String targetSessionId;
   bool isHarnessOnline;
@@ -264,8 +267,6 @@ class AppSettings {
     this.defaultAgentMode = false,
     this.harnessToken = '',
     this.harnessServiceUrl = 'http://127.0.0.1:19387',
-    this.localBridgeWsUrl = 'http://127.0.0.1:3080',
-    this.localAgentToken = '',
     // 不再预设 'deepseek-agent' 这类并不存在的假工作区：默认留空，
     // 由「刷新列表」从电脑端宿主取真实目录；没取到就显示空白框。
     this.targetWorkspace = '',
@@ -350,8 +351,6 @@ class AppSettings {
       'defaultAgentMode': defaultAgentMode,
       'harnessToken': harnessToken,
       'harnessServiceUrl': harnessServiceUrl,
-      'localBridgeWsUrl': localBridgeWsUrl,
-      'localAgentToken': localAgentToken,
       'targetWorkspace': targetWorkspace,
       'targetSessionId': targetSessionId,
       'isHarnessOnline': isHarnessOnline,
@@ -481,8 +480,6 @@ class AppSettings {
       // 生成结果由 SettingsProvider 落盘并同步到云端设置。
       harnessToken: _resolveHarnessToken(map['harnessToken']?.toString()),
       harnessServiceUrl: map['harnessServiceUrl']?.toString() ?? 'http://127.0.0.1:19387',
-      localBridgeWsUrl: map['localBridgeWsUrl']?.toString() ?? 'http://127.0.0.1:3080',
-      localAgentToken: map['localAgentToken']?.toString() ?? '',
       // 历史数据里可能残留 'deepseek-agent' 这个并不存在的预设工作区，一并清空
       targetWorkspace: (map['targetWorkspace']?.toString() ?? '') == 'deepseek-agent'
           ? ''

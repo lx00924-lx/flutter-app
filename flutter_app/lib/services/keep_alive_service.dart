@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 ///
 /// 背景：划掉任务栏时 FlutterActivity 会被销毁，默认会连带销毁 FlutterEngine，
 /// 导致 Dart isolate 中的中继轮询（SyncService 的 4 秒会话看门狗）与 WebSocket
-/// 长连接（LocalAgentService）一并停止，表现为“划掉即失联、收不到新消息”。
+/// 所有网络长连接一并停止，表现为“划掉即失联、收不到新消息”。
 ///
 /// 原生侧已实现（见 android/app/src/main/kotlin/com/lx/app/）：
 /// - `LxForegroundService`：常驻前台服务（`stopWithTask="false"`，划掉任务后仍运行）；
