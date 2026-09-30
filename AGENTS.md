@@ -179,11 +179,48 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
   Agent 工具调用里 `Start-Process` 起来的 App 正好在那棵树里（用户双击启动的则不会）。
 - **做法**：用 WMI 派生启动（`Win32_Process.Create`，父进程显示为 `WmiPrvSE.exe`），启动后复核 `ParentProcessId`。
 
-## 3. `git add -A` 会把临时文件带进提交
+## 3. Git 提交与推送（三个真实的坑）
+
+### 3.1 `git add -A` 会把临时文件带进提交
 
 - **现象**：提交信息文件、探测脚本、报告文件被一起提交（本仓库已发生两次）。
 - **做法**：一律 `git add <显式路径>`；提交信息临时文件提交后立刻删除；
   写信息文件用 `[IO.File]::WriteAllText(..., New-Object Text.UTF8Encoding($false))`，避免 BOM 混进 commit subject。
+
+### 3.2 新 clone 的仓库没有 git 身份，commit 会直接失败
+
+- **现象**：在临时 clone 出来的仓库里提交，报
+  `Author identity unknown` / `*** Please tell me who you are.`（2026-10-01 同步插件仓库时遇到）。
+- **根因**：本机的 git 身份**只配在仓库级**（`F:\ai\flutter\123` 的 local config：
+  `lx00924-lx` / `lx00924@gmail.com`），**全局配置是空的** —— 任何新 clone 都不继承身份。
+- **判据**：`git config --global user.name` 返回空字符串。
+- **做法**：从主仓库读出来应用到新 clone：
+
+  ```powershell
+  $n = (git -C F:\ai\flutter\123 config user.name).Trim()
+  $e = (git -C F:\ai\flutter\123 config user.email).Trim()
+  git -C <新clone路径> config user.name $n
+  git -C <新clone路径> config user.email $e
+  ```
+
+- **不会丢东西**：提交失败时暂存区仍在，补完身份直接 `git commit` 即可，不必重新 `add`。
+
+### 3.3 插件仓库 ⇄ 本地安装目录：两边的 `package.json` 必须不同
+
+自装 DSH 插件 `dsh-app-bridge` 同时存在于两个地方，**不能整目录互相同步**：
+
+| | GitHub `lx00924-lx/lxai-app-bridge`（发布版） | `~/.dsh/user-plugins-group/plugins/dsh-app-bridge/`（运行版） |
+| :--- | :--- | :--- |
+| `package.json` 的 `name` | `lxai-app-bridge` | **`dsh-app-bridge`** |
+| 额外字段 | `repository` / `bugs` / `keywords` / `files` / `dsh.bundle` | 无 |
+
+- DSH 用 `link:` 挂载插件，**依赖键名 / 目录名 / `package.json` 的 `name` 三者必须一致**。
+  拿仓库版覆盖本地 → 插件**静默不加载**（选择框转发、审批、权限切换全失效，且不报错）；
+  拿本地版覆盖仓库 → 丢失发布配置，别人 clone 后装不上。
+- **本地运行目录才是"事实上的源码"**：2026-09-28 在本地修掉了「思维链永远为空 + 工具名恒为 `tool`」
+  两个 bug，却忘了推回仓库，仓库因此停留在有问题的版本，直到 2026-10-01 才发现并补推。
+- 同步流程与推送前核对清单见插件仓库的 **`SYNC.md`**（本仓库内也留副本：
+  `docs/user-plugin-dsh-app-bridge/SYNC.md`）。
 
 ## 4. 单点互斥 `clientSessionId` 的语义（改登录 / 会话逻辑前必读）
 
@@ -312,6 +349,18 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
   "在线但没取到目录"。App 侧已按此自动重试两次并给"正在同步"提示，排查时不要误判成宿主忙。
 - 中继重启后桥接恢复分两段：**注册**（归属反查要读 6.6MB 的 settings.json，启动期查不到 →
   现在返回 503 可重试，而非 403 token 失效）与**切回 WebSocket**（临时失败冷却 15 秒、其它失败 60 秒）。
+- **环境灾备**（2026-10-01 建立）：桌面 `C:\Users\lx\Desktop\DSH备份-<日期>\` 存放 DSH 环境快照，
+  目的是**即使 DSH 桌面预览版把现有 web 版环境改坏且不可逆，LxAI 项目也能照它恢复**。三部分：
+  - `.dsh\` —— DSH 全部数据（`sessions/` 会话与聊天记录、`settings.yaml`、`user-plugins-group/` 自写插件源码等）。
+  - `LxAI-App数据\` —— `Documents` 下的 Hive（`messages_box` / `sessions_box` / `settings_box`），
+    即 **LxAI App 自己的聊天记录与设置**，换机或清缓存靠它恢复。
+  - `DSH环境快照.md` —— DSH CLI 版本（`0.1.5-rc.2` → `npm i -g @deepseek-ai/dsh@0.1.5-rc.2`）、
+    关键路径、插件清单、恢复顺序与验证命令。
+  - ⚠️ **备份含明文凭据**（`.dsh/.credentials.yaml`）与 App 聊天数据，**不要上传网盘、不要分享、不要入库**。
+  - ⚠️ DSH CLI 安装体（`C:\nvm4w\nodejs\node_modules\@deepseek-ai\dsh`，223 MB / 2.5 万文件）**刻意不备份**，
+    照快照里的版本号重装即可 —— 所以**动桌面版之前必须先记下当前 CLI 版本号**。
+  - ⚠️ 备份是**时间点快照**：`sessions/` 会随对话持续增长，重要操作前重新跑一次
+    （`robocopy <源> <目标> /E /XJ /R:1 /W:1`，**绝不加 `/MIR`** —— 见上文 §四 关于 junction 的警告）。
 
 ## 9. 消息与过程链路的结构事实（2026-09-28 重构后，改这条链路前必读）
 
