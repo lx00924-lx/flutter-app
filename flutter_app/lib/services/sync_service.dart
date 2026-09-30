@@ -1433,6 +1433,11 @@ class SyncService {
 
     Response<ResponseBody> response;
     try {
+      // 【图片诊断】③出网：图片跨 App→中继→桥接→插件四段，任何一段丢了都表现为
+      // "模型没看到图"。这一行确认 App 确实把 images 放进了 HTTP body ——
+      // 它是 0 就说明问题在 App 侧（对照 ① ② 的日志能定位到具体哪一步）。
+      debugPrint('[图片诊断] ③出网：images=${images?.length ?? 0} 张，'
+          'base64 总长=${images == null ? 0 : images.fold<int>(0, (sum, e) => sum + ((e['data'] as String?)?.length ?? 0))}');
       response = await _dio.post<ResponseBody>(
         url,
         data: {

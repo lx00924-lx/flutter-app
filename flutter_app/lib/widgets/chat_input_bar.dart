@@ -493,6 +493,11 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
       }
       // 只把真有值的图片项挑出来（_pendingDshImages 与附件等长，null 是占位）
       final dshImages = _pendingDshImages.whereType<Map<String, dynamic>>().toList();
+      // 【图片诊断】临时日志：图片要跨 App→中继→桥接→插件四段，任何一段丢了都表现为
+      // "模型没看到图"，光看结果分不清是哪一段。这几行把每段的实际载荷打出来。
+      debugPrint('[图片诊断] ①发送时：附件 ${attachments.length} 项 / '
+          '_pendingDshImages ${_pendingDshImages.length} 项（含 null 占位）/ '
+          '挑出可发送 ${dshImages.length} 张；isGenerating=${widget.isGenerating}');
 
       // 生成中发送 → 先弹「插话 / 排队」让用户选，和官方宿主一致
       if (widget.isGenerating) {
@@ -954,6 +959,10 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
           final part = result.toDshImagePart();
           if (part == null) skipped++;
           _pendingDshImages.add(part); // 与附件等长，null = 这张发不给宿主
+          debugPrint('[图片诊断] ②选图：转 DSH 格式 ' +
+              (part == null
+                  ? '失败（格式不受支持，请看 highResBase64 的 mime）'
+                  : '成功 mediaType=${part['mediaType']} base64 长度=${(part['data'] as String).length}'));
         }
       });
       if (skipped > 0 && mounted) {

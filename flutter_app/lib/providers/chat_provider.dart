@@ -1494,6 +1494,10 @@ class ChatProvider extends ChangeNotifier {
     final myTurn = ++_turnSeq;
 
     try {
+      // 【图片诊断】②.5 分流：确认图片是否走到了 Agent 分支。
+      // 非 Agent 模式是直连模型 API 的 —— 那条路不经过桥接、DSH 也看不到，
+      // 图片自然到不了（这是"图发了但模型没看到"的一种可能）。
+      debugPrint('[图片诊断] ②.5 ChatProvider：dshImages=${dshImages?.length ?? 0} 张，isAgentMode=$isAgentMode');
       if (isAgentMode) {
         // --- 走服务端中继调度 Agent 管道，确保本地 Harness 执行结果无缝回传并与 LLM 整合 ---
         final stream = SyncService.instance.streamServerAgentChat(
