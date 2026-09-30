@@ -1905,8 +1905,7 @@ async def execute_dsh_sse_stream(
     on_step_callback,
     extra_chat_config: dict = None,
     on_approval_callback = None,
-    on_content_callback = None,
-    images: list = None
+    on_content_callback = None
 ):
     """
     通过宿主 3080 SSE 流式端点 (POST /v1/agent/prompt/stream) 执行任务并实时推送思考与工具事件
@@ -1935,14 +1934,6 @@ async def execute_dsh_sse_stream(
         "model": model_name or "deepseek-v4-flash",
         "workspace": target_workspace or ""
     }
-    # 图片原样透传给插件，由宿主的 attachments 服务换成持久引用（ImageBlock）。
-    # ⚠️ data 必须是**规范 base64** —— 宿主逐字节校验（重新编码不一致就报
-    # INVALID_IMAGE_BASE64），所以这里绝不改写编码：换行、URL-safe 之类的"顺手清理"
-    # 会把本来可用的图弄坏。
-    # 张数与总体积交给宿主的 maxImagesPerMessage / maxMessageImageBytes 把关，
-    # 超限会以 error 事件回来，这里不重复限制（免得两边阈值不一致更难排查）。
-    if images:
-        payload["images"] = images
     if real_session_id:
         payload["sessionId"] = real_session_id
     if reasoning_effort and reasoning_effort != "default":
@@ -2018,23 +2009,7 @@ async def execute_dsh_sse_stream(
 
                     loop.call_soon_threadsafe(q.put_nowait, ("stream_end", None))
             except Exception as e:
-                # 主通道失败必须留下确切原因。这里以前只把异常文本塞进队列，
-                # 上层统一显示成"主通道不可用"—— 于是 401（鉴权不过）、
-                # 404（端点不存在）、超时、连接被拒 全长一个样子，排查只能靠猜。
-                # 现在带上 HTTP 状态码与响应体开头，一眼可辨。
-                _detail = str(e)
-                _code = getattr(e, "code", None)
-                _body = ""
-                try:
-                    _body = e.read().decode("utf-8", errors="replace")[:300]
-                except Exception:
-                    pass
-                _msg = _detail
-                if _code:
-                    _msg += f" [HTTP {_code}]"
-                if _body:
-                    _msg += f" body={_body}"
-                loop.call_soon_threadsafe(q.put_nowait, ("stream_error", _msg))
+                loop.call_soon_threadsafe(q.put_nowait, ("stream_error", str(e)))
 
         msg_queue = asyncio.Queue()
         stream_thread = threading.Thread(target=stream_request_worker, args=(msg_queue,), daemon=True)
@@ -2463,8 +2438,7 @@ async def execute_local_harness(
     extra_chat_config: dict = None,
     target_workspace: str = "",
     on_approval_callback = None,
-    on_content_callback = None,
-    images: list = None
+    on_content_callback = None
 ):
     harness_base = harness_url.rstrip("/")
     extra_chat_config = extra_chat_config or {}
@@ -2504,8 +2478,7 @@ async def execute_local_harness(
             on_step_callback=on_step_callback,
             extra_chat_config=extra_chat_config,
             on_approval_callback=on_approval_callback,
-            on_content_callback=on_content_callback,
-            images=images
+            on_content_callback=on_content_callback
         )
         if sse_ok and sse_out and not is_html_content(sse_out):
             await on_step_callback("✅ [3/3] 本地 Agent 宿主智能体已完成本轮所有操作，正在向 App 调度中心回传结果...")
@@ -2525,19 +2498,6 @@ async def execute_local_harness(
     
     if not content_list:
         content_list = [{"type": "text", "text": str(prompt or "")}]
-
-    # ⚠️ 这里**刻意不加**图片块。
-    #
-    # content_list 是「原生 WebSocket RPC 通道」的 payload（见 execute_dsh_via_ws：
-    # 它被塞进 "prompt"/"parts"/"content" 三个字段），那条通道只认纯文本块
-    # {type:'text', text}。往里追加 {type:'image', data, mediaType} 会让它直接出错 ——
-    # 而它位于候选循环**之前**、是最先尝试的一条，一旦挂掉整轮就会往后降级
-    # （用户看到的就是"主通道不可用"），图片反倒永远走不到真正能处理它的 HTTP 通道。
-    #
-    # 图片只走 HTTP：
-    #   · 主通道 execute_dsh_sse_stream 的 payload["images"]
-    #   · 备用通道的 prompt_payload["images"]
-    # 那两处才是插件按 body.images 读取的地方。
 
     # 备用通道（适配器 / WS RPC）拿不到宿主的 selectModel，思考深度改不了。
     # 这里如实告知，避免用户以为"选了没生效"是 App 的问题。
@@ -2570,12 +2530,6 @@ async def execute_local_harness(
     }
     if real_session_id:
         prompt_payload["sessionId"] = real_session_id
-    # ⚠️ 图片必须带上。备用通道才是当前实际生效的那条路（实测执行详情里
-    # [3/3] 走的正是「宿主 3081 HTTP 适配器 (/v1/agent/prompt)」），
-    # 漏了这里图就被静默丢掉 —— 任务照样"成功"、模型却说没收到图，
-    # 症状和"根本没发"一模一样，极难排查。
-    if images:
-        prompt_payload["images"] = images
 
     candidate_endpoints.append((
         f"{adapter_base}/v1/chat/completions",
@@ -2594,11 +2548,7 @@ async def execute_local_harness(
     ))
 
     # 2. 原生 WebSocket 通道
-    # ⚠️ 带图时跳过：这条 RPC 通道不承载图片块（原因见上面 content_list 处的说明），
-    # 让它去试只会白白失败一次、把整轮推给备用通道，图片反而更容易被丢掉。
-    if images:
-        await on_step_callback("ℹ️ 本轮含图片，WebSocket RPC 通道不承载图片，直接走 HTTP 通道")
-    elif HAS_WEBSOCKETS and not harness_base.startswith("https://"):
+    if HAS_WEBSOCKETS and not harness_base.startswith("https://"):
         ws_ok, ws_output = await execute_dsh_via_ws(
             harness_url, target_workspace, model_name, active_session_id, content_list, prompt, on_step_callback,
             permission=permission
@@ -2823,8 +2773,6 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
         model_name = task_data.get("model", args.harness_model)
         session_id = task_data.get("agentSessionId") or task_data.get("sessionId", "default_session")
         target_ws = task_data.get("agentWorkspace") or task_data.get("workspace") or ""
-        # 图片（App 附件）：原样透传给宿主，由插件的 attachments 服务换成持久引用
-        images = task_data.get("images", [])
 
         print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
         steps_collected = []
@@ -2884,7 +2832,7 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                     await on_step(output)
                 else:
                     success, output = await execute_local_harness(
-                        task_id, prompt, messages, harness_url, model_name, session_id, on_step, extra_config, target_workspace=target_ws, on_approval_callback=on_approval, images=images
+                        task_id, prompt, messages, harness_url, model_name, session_id, on_step, extra_config, target_workspace=target_ws, on_approval_callback=on_approval
                     )
         except Exception as task_err:
             success = False
@@ -3262,8 +3210,6 @@ async def run_bridge_client(args):
                     model_name = msg.get("model", args.harness_model)
                     session_id = msg.get("agentSessionId") or msg.get("sessionId", "default_session")
                     target_ws = msg.get("agentWorkspace") or msg.get("workspace") or ""
-                    # 图片（App 附件）：原样透传给宿主，由插件的 attachments 服务换成持久引用
-                    images = msg.get("images", [])
 
                     print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
                     steps_collected = []
@@ -3343,7 +3289,7 @@ async def run_bridge_client(args):
                             await ws_step_cb(output)
                         else:
                             success, output = await execute_local_harness(
-                                task_id, prompt, messages, harness_url, model_name, session_id, ws_step_cb, extra_config, target_workspace=target_ws, on_approval_callback=ws_approval_cb, on_content_callback=ws_content_cb, images=images
+                                task_id, prompt, messages, harness_url, model_name, session_id, ws_step_cb, extra_config, target_workspace=target_ws, on_approval_callback=ws_approval_cb, on_content_callback=ws_content_cb
                             )
                     except Exception as task_err:
                         success = False
