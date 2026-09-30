@@ -1905,7 +1905,8 @@ async def execute_dsh_sse_stream(
     on_step_callback,
     extra_chat_config: dict = None,
     on_approval_callback = None,
-    on_content_callback = None
+    on_content_callback = None,
+    images: list = None
 ):
     """
     通过宿主 3080 SSE 流式端点 (POST /v1/agent/prompt/stream) 执行任务并实时推送思考与工具事件
@@ -1934,6 +1935,14 @@ async def execute_dsh_sse_stream(
         "model": model_name or "deepseek-v4-flash",
         "workspace": target_workspace or ""
     }
+    # 图片原样透传给插件，由宿主的 attachments 服务换成持久引用（ImageBlock）。
+    # ⚠️ data 必须是**规范 base64** —— 宿主逐字节校验（重新编码不一致就报
+    # INVALID_IMAGE_BASE64），所以这里绝不改写编码：换行、URL-safe 之类的"顺手清理"
+    # 会把本来可用的图弄坏。
+    # 张数与总体积交给宿主的 maxImagesPerMessage / maxMessageImageBytes 把关，
+    # 超限会以 error 事件回来，这里不重复限制（免得两边阈值不一致更难排查）。
+    if images:
+        payload["images"] = images
     if real_session_id:
         payload["sessionId"] = real_session_id
     if reasoning_effort and reasoning_effort != "default":
@@ -2438,7 +2447,8 @@ async def execute_local_harness(
     extra_chat_config: dict = None,
     target_workspace: str = "",
     on_approval_callback = None,
-    on_content_callback = None
+    on_content_callback = None,
+    images: list = None
 ):
     harness_base = harness_url.rstrip("/")
     extra_chat_config = extra_chat_config or {}
@@ -2478,7 +2488,8 @@ async def execute_local_harness(
             on_step_callback=on_step_callback,
             extra_chat_config=extra_chat_config,
             on_approval_callback=on_approval_callback,
-            on_content_callback=on_content_callback
+            on_content_callback=on_content_callback,
+            images=images
         )
         if sse_ok and sse_out and not is_html_content(sse_out):
             await on_step_callback("✅ [3/3] 本地 Agent 宿主智能体已完成本轮所有操作，正在向 App 调度中心回传结果...")
@@ -2773,6 +2784,8 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
         model_name = task_data.get("model", args.harness_model)
         session_id = task_data.get("agentSessionId") or task_data.get("sessionId", "default_session")
         target_ws = task_data.get("agentWorkspace") or task_data.get("workspace") or ""
+        # 图片（App 附件）：原样透传给宿主，由插件的 attachments 服务换成持久引用
+        images = task_data.get("images", [])
 
         print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
         steps_collected = []
@@ -2832,7 +2845,7 @@ async def run_polling_bridge(args, token: str, server_base: str, concurrency_lim
                     await on_step(output)
                 else:
                     success, output = await execute_local_harness(
-                        task_id, prompt, messages, harness_url, model_name, session_id, on_step, extra_config, target_workspace=target_ws, on_approval_callback=on_approval
+                        task_id, prompt, messages, harness_url, model_name, session_id, on_step, extra_config, target_workspace=target_ws, on_approval_callback=on_approval, images=images
                     )
         except Exception as task_err:
             success = False
@@ -3210,6 +3223,8 @@ async def run_bridge_client(args):
                     model_name = msg.get("model", args.harness_model)
                     session_id = msg.get("agentSessionId") or msg.get("sessionId", "default_session")
                     target_ws = msg.get("agentWorkspace") or msg.get("workspace") or ""
+                    # 图片（App 附件）：原样透传给宿主，由插件的 attachments 服务换成持久引用
+                    images = msg.get("images", [])
 
                     print(f"\n\033[94m[收到任务] TaskID: {task_id} | 工作区: {target_ws} | 提示词: {prompt[:40]}...\033[0m")
                     steps_collected = []
@@ -3289,7 +3304,7 @@ async def run_bridge_client(args):
                             await ws_step_cb(output)
                         else:
                             success, output = await execute_local_harness(
-                                task_id, prompt, messages, harness_url, model_name, session_id, ws_step_cb, extra_config, target_workspace=target_ws, on_approval_callback=ws_approval_cb, on_content_callback=ws_content_cb
+                                task_id, prompt, messages, harness_url, model_name, session_id, ws_step_cb, extra_config, target_workspace=target_ws, on_approval_callback=ws_approval_cb, on_content_callback=ws_content_cb, images=images
                             )
                     except Exception as task_err:
                         success = False
