@@ -574,14 +574,24 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                 ),
                 ChatInputBar(
-                  onSend: (text, {attachments}) => chat.sendMessage(text, attachments: attachments),
+                  onSend: (text, {attachments, dshImages}) => chat.sendMessage(
+                    text,
+                    attachments: attachments,
+                    dshImages: dshImages,
+                  ),
                   onStop: () => chat.stopGeneration(),
                   isGenerating: chat.isGenerating,
                   // 生成中发送：输入栏弹出「插话 / 排队」选择后回调到这里
-                  onInterject: (text, {attachments}) =>
-                      chat.interjectMessage(text, attachments: attachments),
-                  onEnqueue: (text, {attachments}) =>
-                      chat.enqueueMessage(text, attachments: attachments),
+                  onInterject: (text, {attachments, dshImages}) => chat.interjectMessage(
+                    text,
+                    attachments: attachments,
+                    dshImages: dshImages,
+                  ),
+                  onEnqueue: (text, {attachments, dshImages}) => chat.enqueueMessage(
+                    text,
+                    attachments: attachments,
+                    dshImages: dshImages,
+                  ),
                 ),
               ],
             ),

@@ -1425,6 +1425,7 @@ class SyncService {
     required String assistantMessageId,
     required List<ChatMessage> messages,
     required Map<String, dynamic> settings,
+    List<Map<String, dynamic>>? images,
     CancelToken? cancelToken,
   }) async* {
     final cleanUserId = userId.trim().isEmpty ? 'guest' : userId.trim();
@@ -1439,6 +1440,12 @@ class SyncService {
           'assistantMessageId': assistantMessageId,
           'messages': messages.map((m) => m.toMap()).toList(),
           'settings': settings,
+          // 图片（Agent 模式附件）：中继原样下发给桥接，再由 DSH 插件的 attachments
+          // 服务换成宿主的持久引用（ImageBlock）。
+          // ⚠️ data 必须是**规范 base64** —— 宿主逐字节校验（重新编码不一致就报
+          // INVALID_IMAGE_BASE64），所以这一路只做搬运，不许中途重新编码。
+          // 只有真带了图才加这个字段：中继与桥接都按"有 images 才处理"写的。
+          if (images != null && images.isNotEmpty) 'images': images,
         },
         options: Options(
           responseType: ResponseType.stream,

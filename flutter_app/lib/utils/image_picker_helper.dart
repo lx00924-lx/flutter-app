@@ -87,6 +87,36 @@ class ProcessedImageResult {
     }
     return thumbnailBase64;
   }
+
+  /// 转成 DSH 宿主 prompt 需要的图片结构（`{data, mediaType, name}`）。
+  ///
+  /// 几个必须踩准的点：
+  /// - **用 highResBase64 而不是 thumbnailBase64**：后者是给界面列表显示用的 400px 缩略图，
+  ///   发给模型等于让它看糊图。
+  /// - **剥掉 `data:image/png;base64,` 前缀**：宿主收的是裸 base64 字符串，而且会逐字节
+  ///   校验规范性（`decoded.toString('base64') !== data` 就报 INVALID_IMAGE_BASE64）。
+  ///   Dart 的 base64Encode 本身产出的就是规范 base64，所以这里只做切分、**绝不重新编码**。
+  /// - **只放行 png / jpeg / webp**：宿主的 mediaTypes 就这三种，gif 之类塞过去会被
+  ///   UNSUPPORTED_IMAGE_TYPE 拒收。返回 null 让调用方跳过并提示，好过整轮任务失败。
+  ///
+  /// @returns 可直接放进 `images` 数组的 Map；格式不受支持时返回 null。
+  Map<String, dynamic>? toDshImagePart({String? name}) {
+    final uri = highResBase64;
+    if (!uri.startsWith('data:')) return null;
+    final comma = uri.indexOf(',');
+    if (comma < 0) return null;
+    final header = uri.substring(5, comma); // 形如 image/png;base64
+    final data = uri.substring(comma + 1);
+    if (data.isEmpty) return null;
+    final mediaType = header.split(';').first.trim().toLowerCase();
+    const accepted = {'image/png', 'image/jpeg', 'image/webp'};
+    if (!accepted.contains(mediaType)) return null;
+    return {
+      'data': data,
+      'mediaType': mediaType,
+      if (name != null && name.isNotEmpty) 'name': name,
+    };
+  }
 }
 
 /// 图片选择、相机拍摄与通用文件编解码工具类，支持最大 8K 高清模型直传与本地原图落盘
@@ -224,6 +254,46 @@ class ImagePickerHelper {
     }
 
     return null;
+  }
+
+  /// 从相册**多选**图片（一次可挑多张）。
+  ///
+  /// 与单数版的分工：单数版留给"选一张替换"的场景（头像、背景、启动图），
+  /// 这个专门给聊天附件 —— 用户可以一次挑好几张，也可以反复进来追加
+  /// （调用方把结果 `addAll` 进待发列表即可）。
+  ///
+  /// 刻意只走 FilePicker 的 allowMultiple，不保留 image_picker 兜底：
+  /// 后者在聊天附件这条路上本来就没用到，而多一张兜底就多一条"同一个操作
+  /// 在不同机型上行为不一致"的排查路径。单张失败只跳过那一张，不中断整批 ——
+  /// 用户选了 10 张、其中一张坏了，不该让另外 9 张也发不出去。
+  static Future<List<ProcessedImageResult>> pickImagesFromGallery() async {
+    final out = <ProcessedImageResult>[];
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.image,
+        allowMultiple: true,
+        withData: true,
+      );
+      if (result == null || result.files.isEmpty) return out;
+      for (final file in result.files) {
+        try {
+          Uint8List? bytes = file.bytes;
+          if ((bytes == null || bytes.isEmpty) && file.path != null && file.path!.isNotEmpty) {
+            final ioFile = File(file.path!);
+            if (await ioFile.exists()) bytes = await ioFile.readAsBytes();
+          }
+          if (bytes == null || bytes.isEmpty) continue;
+          final ext = (file.extension ?? (file.name.contains('.') ? file.name.split('.').last : 'png')).toLowerCase();
+          final processed = await processRawImageBytes(bytes, extension: ext, prefix: 'gallery');
+          if (processed != null) out.add(processed);
+        } catch (e) {
+          debugPrint('多选相册：单张处理失败已跳过（$e）');
+        }
+      }
+    } catch (e) {
+      debugPrint('多选相册失败: $e');
+    }
+    return out;
   }
 
   /// 把**已有的** data URI 压进预算（用于历史遗留的超大图片字段）。

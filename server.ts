@@ -948,12 +948,15 @@ async function runServerSideGeneration({
   assistantMessageId,
   messages,
   settings,
+  images,
   io
 }: {
   userId: string;
   assistantMessageId: string;
   messages: any[];
   settings: any;
+  /** App 附件图片（{data, mediaType, name?}）。原样下发给桥接，由插件换成宿主的持久引用。 */
+  images?: any[];
   io: Server;
 }) {
   const genKey = `${userId}_${assistantMessageId}`;
@@ -1176,6 +1179,10 @@ async function runServerSideGeneration({
           agentWorkspace: selectedWorkspace,
           prompt: rawUserPrompt,
           messages: workingMessages.slice(-5),
+          // 图片（App 附件）：原样下发，由插件调宿主的 attachments 服务换成持久引用。
+          // 只有真带了图才加这个字段 —— 桥接与插件都按"有 images 才处理"写的，
+          // 空数组会让两边多做一次无意义的判断。
+          ...(Array.isArray(images) && images.length > 0 ? { images } : {}),
           harnessUrl: settings?.agentHarnessUrl || "http://127.0.0.1:3080",
           model: settings?.agentModel || "deepseek-v4-flash",
           reasoningEffort: settings?.agentReasoningEffort || "high",
@@ -2232,7 +2239,7 @@ async function startServer() {
 
   // Server-side Background Chat Generation (Persists even if client is closed/killed)
   app.post("/api/chat/generate", async (req, res) => {
-    const { userId, assistantMessageId, messages, settings } = req.body;
+    const { userId, assistantMessageId, messages, settings, images } = req.body;
     if (!assistantMessageId || !Array.isArray(messages)) {
       return res.status(400).json({ error: "Invalid parameters" });
     }
@@ -2243,6 +2250,7 @@ async function startServer() {
       assistantMessageId,
       messages,
       settings: settings || {},
+      images,
       io
     }).catch(err => {
       console.error("[Background Gen Worker] Uncaught error:", err);
@@ -2313,7 +2321,7 @@ async function startServer() {
 
   // Server-side SSE Chat Stream (Streams Agent Execution & Final LLM Tokens in Realtime)
   app.post("/api/chat/stream", async (req, res) => {
-    const { userId = "guest", assistantMessageId, messages, settings } = req.body;
+    const { userId = "guest", assistantMessageId, messages, settings, images } = req.body;
     if (!assistantMessageId || !Array.isArray(messages)) {
       return res.status(400).json({ error: "Invalid parameters" });
     }
@@ -2491,6 +2499,7 @@ async function startServer() {
       assistantMessageId,
       messages,
       settings: settings || {},
+      images,
       io,
     }).catch((err) => {
       sendEvent("error", { error: err.message });
@@ -5255,7 +5264,7 @@ if %errorlevel% neq 0 (
       }
     });
 
-    socket.on("start_generation", async ({ userId, assistantMessageId, messages, settings }) => {
+    socket.on("start_generation", async ({ userId, assistantMessageId, messages, settings, images }) => {
       console.log(`[Socket] Received start_generation for user ${userId}, messageId ${assistantMessageId}`);
       try {
         console.log(`[Socket] Starting server-side generation for ${assistantMessageId}`);
@@ -5264,6 +5273,7 @@ if %errorlevel% neq 0 (
           assistantMessageId,
           messages,
           settings: settings || {},
+          images,
           io
         }).catch(err => {
           console.error("[Socket Background Gen Worker] Error:", err);

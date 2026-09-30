@@ -17,14 +17,27 @@ import '../screens/scanner_screen.dart';
 import 'agent_quick_bar.dart';
 import 'slash_command_menu.dart';
 
+/// 输入栏的发送回调签名。
+///
+/// `dshImages` 是给 **Agent 模式**用的图片（结构 `{data, mediaType, name}`，data 为
+/// **规范 base64**）：它与 `attachments` 里的图片是**两份不同的东西** ——
+/// `attachments` 存的是 <400px 缩略图 + 本地路径>，用于界面显示与本地留存（也随消息
+/// 落库上云，所以必须小）；而发给宿主的必须是高清原图，且不能进消息体，否则云端
+/// 消息会被几 MB 的 base64 撑爆。所以单独走一路，用完即弃。
+typedef ChatSendCallback = Function(
+  String text, {
+  List<String>? attachments,
+  List<Map<String, dynamic>>? dshImages,
+});
+
 class ChatInputBar extends StatefulWidget {
-  final Function(String text, {List<String>? attachments}) onSend;
+  final ChatSendCallback onSend;
   final VoidCallback onStop;
   final bool isGenerating;
   /// 生成中发送时，用户选择「插话发送」后的回调
-  final Function(String text, {List<String>? attachments})? onInterject;
+  final ChatSendCallback? onInterject;
   /// 生成中发送时，用户选择「排队发送」后的回调
-  final Function(String text, {List<String>? attachments})? onEnqueue;
+  final ChatSendCallback? onEnqueue;
 
   const ChatInputBar({
     super.key,
@@ -48,6 +61,13 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   // 附件列表 (支持图片、通用文件、音频)
   final List<String> _pendingAttachments = [];
   final List<String> _pendingFileDisplayNames = [];
+  /// Agent 模式要发给宿主的高清图片（结构 `{data, mediaType, name}`）。
+  ///
+  /// **与 `_pendingAttachments` 等长且索引一一对应**：图片项才有值，非图片项与
+  /// 格式不受支持的图（宿主只收 png/jpeg/webp，gif 之类会被拒）都是 null。
+  /// 刻意不用"只装图片"的紧凑列表 —— 那样用户删掉中间一张附件时，两个列表的
+  /// 索引就会错位，删错图这种 bug 极难在界面上看出来。
+  final List<Map<String, dynamic>?> _pendingDshImages = [];
 
   // 录音状态管理
   bool _isRecording = false;
@@ -471,14 +491,16 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
       if (_recordedPendingAudioUri != null) {
         attachments.add(_recordedPendingAudioUri!);
       }
+      // 只把真有值的图片项挑出来（_pendingDshImages 与附件等长，null 是占位）
+      final dshImages = _pendingDshImages.whereType<Map<String, dynamic>>().toList();
 
       // 生成中发送 → 先弹「插话 / 排队」让用户选，和官方宿主一致
       if (widget.isGenerating) {
-        _showSendModeSheet(finalText, attachments.isNotEmpty ? attachments : null);
+        _showSendModeSheet(finalText, attachments.isNotEmpty ? attachments : null, dshImages);
         return;
       }
 
-      _submitSend(finalText, attachments.isNotEmpty ? attachments : null, widget.onSend);
+      _submitSend(finalText, attachments.isNotEmpty ? attachments : null, widget.onSend, dshImages);
     }
   }
 
@@ -486,9 +508,14 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   void _submitSend(
     String text,
     List<String>? attachments,
-    Function(String text, {List<String>? attachments}) action,
+    ChatSendCallback action,
+    List<Map<String, dynamic>>? dshImages,
   ) {
-    action(text, attachments: attachments);
+    action(
+      text,
+      attachments: attachments,
+      dshImages: (dshImages != null && dshImages.isNotEmpty) ? dshImages : null,
+    );
     _controller.clear();
     // 消息确实发出去了，这时才消费掉引用卡片
     if (mounted) context.read<ChatProvider>().clearQuotedMessage();
@@ -496,6 +523,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     setState(() {
       _pendingAttachments.clear();
       _pendingFileDisplayNames.clear();
+      _pendingDshImages.clear();
       _recordedPendingAudioUri = null;
       _recordedPendingAudioSec = 0;
       _isMenuOpen = false;
@@ -510,7 +538,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   ///
   /// 用户犹豫期间这一轮可能已经结束了：此时"插话"已无意义，弹窗会自动关闭并按
   /// 普通发送处理（下面监听 ChatProvider 的生成状态）。
-  Future<void> _showSendModeSheet(String text, List<String>? attachments) async {
+  Future<void> _showSendModeSheet(String text, List<String>? attachments, List<Map<String, dynamic>>? dshImages) async {
     final chat = context.read<ChatProvider>();
     final executing = chat.isAgentExecuting;
     bool turnFinished = false;
@@ -612,7 +640,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
 
     if (mode == 'interject') {
       final action = widget.onInterject ?? widget.onSend;
-      _submitSend(text, attachments, action);
+      _submitSend(text, attachments, action, dshImages);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('⚡ 已插话：当前这轮已打断'),
@@ -623,7 +651,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     } else {
       final action = widget.onEnqueue;
       if (action == null) return;
-      _submitSend(text, attachments, action);
+      _submitSend(text, attachments, action, dshImages);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('⏳ 已加入排队（当前排队 ${chat.queuedCount} 条）'),
@@ -912,16 +940,28 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     );
   }
 
-  // 1. 发送图片：调用原生相册
+  // 1. 发送图片：调用原生相册（支持多选，可反复进来追加）
   Future<void> _handlePickImage() async {
     setState(() => _isMenuOpen = false);
     try {
-      final result = await ImagePickerHelper.pickImageFromGallery();
-      if (result != null && mounted) {
-        setState(() {
+      final results = await ImagePickerHelper.pickImagesFromGallery();
+      if (results.isEmpty || !mounted) return;
+      var skipped = 0;
+      setState(() {
+        for (final result in results) {
           _pendingAttachments.add(result.toAttachmentString());
           _pendingFileDisplayNames.add('图片');
-        });
+          final part = result.toDshImagePart();
+          if (part == null) skipped++;
+          _pendingDshImages.add(part); // 与附件等长，null = 这张发不给宿主
+        }
+      });
+      if (skipped > 0 && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('有 $skipped 张格式不受支持（仅 PNG / JPEG / WebP 能发给电脑端），这些只在本机显示'),
+          ),
+        );
       }
     } catch (e) {
       debugPrint('选择图片异常: $e');
@@ -942,6 +982,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
         setState(() {
           _pendingAttachments.add(result.toAttachmentString());
           _pendingFileDisplayNames.add('拍照');
+          _pendingDshImages.add(result.toDshImagePart());
         });
       }
     } catch (e) {
@@ -963,6 +1004,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
         setState(() {
           _pendingAttachments.add(file.base64Data);
           _pendingFileDisplayNames.add(file.name);
+          _pendingDshImages.add(null); // 通用文件不是图片，占位以保持两列表等长
         });
       }
     } catch (e) {
@@ -1053,6 +1095,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
       setState(() {
         _pendingAttachments.clear();
         _pendingFileDisplayNames.clear();
+        _pendingDshImages.clear();
         _recordedPendingAudioUri = null;
       });
     } else {
@@ -1468,6 +1511,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                                       onTap: () {
                                         setState(() {
                                           _pendingAttachments.removeAt(idx);
+                                          if (idx < _pendingDshImages.length) _pendingDshImages.removeAt(idx);
                                           if (idx < _pendingFileDisplayNames.length) {
                                             _pendingFileDisplayNames.removeAt(idx);
                                           }

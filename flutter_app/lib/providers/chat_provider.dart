@@ -27,12 +27,16 @@ class QueuedMessage {
   final String id;
   final String text;
   final List<String> attachments;
+  /// 排队时一并带上的 Agent 图片（`{data, mediaType, name}`，data 为规范 base64）。
+  /// 与 attachments 同理分工：那份随消息落库上云，这份只在真正发出时交给宿主。
+  final List<Map<String, dynamic>> dshImages;
   final DateTime createdAt;
 
   const QueuedMessage({
     required this.id,
     required this.text,
     this.attachments = const [],
+    this.dshImages = const [],
     required this.createdAt,
   });
 }
@@ -645,14 +649,20 @@ class ChatProvider extends ChangeNotifier {
   int get queuedCount => _queue.length;
 
   /// 加入排队：当前这轮结束后自动发出
-  void enqueueMessage(String text, {List<String>? attachments}) {
+  void enqueueMessage(
+    String text, {
+    List<String>? attachments,
+    List<Map<String, dynamic>>? dshImages,
+  }) {
     final t = text.trim();
     final atts = attachments ?? const <String>[];
-    if (t.isEmpty && atts.isEmpty) return;
+    final imgs = dshImages ?? const <Map<String, dynamic>>[];
+    if (t.isEmpty && atts.isEmpty && imgs.isEmpty) return;
     _queue.add(QueuedMessage(
       id: const Uuid().v4(),
       text: t,
       attachments: atts,
+      dshImages: imgs,
       createdAt: DateTime.now(),
     ));
     notifyListeners();
@@ -683,7 +693,11 @@ class ChatProvider extends ChangeNotifier {
         notifyListeners();
         return;
       }
-      sendMessage(next.text, attachments: next.attachments.isEmpty ? null : next.attachments);
+      sendMessage(
+        next.text,
+        attachments: next.attachments.isEmpty ? null : next.attachments,
+        dshImages: next.dshImages.isEmpty ? null : next.dshImages,
+      );
     });
   }
 
@@ -695,12 +709,16 @@ class ChatProvider extends ChangeNotifier {
   /// · 打断后的半截气泡**只留在本地、不推云端**：另一端拉到一半的内容再被服务端
   ///   的收尾版本覆盖，就会出现"这端有内容、那端是空气泡"。**完整消息才同步**；
   /// · 立刻开新一轮，旧轮的迟到事件由轮次编号拦掉，不会把新轮状态改坏。
-  Future<void> interjectMessage(String text, {List<String>? attachments}) async {
+  Future<void> interjectMessage(
+    String text, {
+    List<String>? attachments,
+    List<Map<String, dynamic>>? dshImages,
+  }) async {
     final cleanText = text.trim();
     if (cleanText.isEmpty && (attachments == null || attachments.isEmpty)) return;
 
     if (!_isGenerating) {
-      await sendMessage(text, attachments: attachments);
+      await sendMessage(text, attachments: attachments, dshImages: dshImages);
       return;
     }
 
@@ -1296,7 +1314,16 @@ class ChatProvider extends ChangeNotifier {
     return _storage.getMessageCountForSession(sessionId);
   }
 
-  Future<void> sendMessage(String text, {List<String>? attachments}) async {
+  Future<void> sendMessage(
+    String text, {
+    List<String>? attachments,
+    /// Agent 模式要发给宿主的图片（结构 `{data, mediaType, name}`，data 为规范 base64）。
+    ///
+    /// 刻意与 `attachments` 分开走：那份是 <400px 缩略图 + 本地路径，要随消息落库并同步到
+    /// 云端，塞进高清原图会把云端消息撑爆；而发给宿主必须用高清，否则模型看的是糊图。
+    /// 所以"存"与"发"两条路，这里只管发（发完即弃，不进消息体）。
+    List<Map<String, dynamic>>? dshImages,
+  }) async {
     final cleanText = text.trim();
     if (cleanText.isEmpty && (attachments == null || attachments.isEmpty)) return;
     if (_currentSession == null) createNewSession();
@@ -1474,6 +1501,7 @@ class ChatProvider extends ChangeNotifier {
           assistantMessageId: assistantMsg.id,
           messages: _messages.where((m) => !m.isStreaming).toList(),
           settings: agentSettings,
+          images: dshImages,
           cancelToken: cancelToken,
         );
 
