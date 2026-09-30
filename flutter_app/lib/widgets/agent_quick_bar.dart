@@ -167,13 +167,24 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
     return text;
   }
 
+  /// 选择会话。
+  ///
+  /// `value` 为空 = **不指定会话**：清空绑定，由中继/宿主自动分配。
+  /// 这是最稳的模式 —— 以前一直用它，所以从不需要手动选会话。
+  ///
+  /// 为什么必须留这条"回到自动"的路：一旦绑定了某个具体会话 id，而宿主重启后
+  /// 该会话不复存在（DSH 的会话 id 每次重启都会重新生成），那一轮任务就会被宿主
+  /// 以 session-not-found 拒掉，进而退化成"主通道不可用 + HTTP 404"这种完全指错
+  /// 方向的报错 —— 实测为此排查了很久。给用户一条自救通道，比任何自动修复都可靠。
   Future<void> _pickSession(String value) async {
     final sp = context.read<SettingsProvider>();
-    if (value.isEmpty) return;
     final s = sp.settings;
-    s.targetSessionId = value;
+    s.targetSessionId = value.trim();
     sp.updateSettings(s);
     setState(() {});
+    if (value.trim().isEmpty) {
+      _toast('已改为自动选择会话（下一条消息由电脑端分配）', isError: false);
+    }
   }
 
   /// 「新建会话」：先问名字，再在电脑端建一个并选中，之后消息都发进它。
@@ -296,7 +307,13 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
       sessionLabel = '新建会话';
     } else {
       final hit = sessions.where((e) => e['id']?.toString() == s.targetSessionId).toList();
-      sessionLabel = hit.isEmpty ? '已选会话' : SettingsProvider.agentSessionLabel(hit.first);
+      // 绑定了一个电脑端已经不存在的会话：这会让每一轮任务都被宿主拒掉
+      // （session-not-found → 主通道不可用 → 备用通道 404 兜底失败）。
+      // 必须明确说出来，而不是像以前那样含糊地显示"已选会话" ——
+      // 用户盯着那四个字根本看不出问题在哪，实测为此绕了很久。
+      sessionLabel = hit.isEmpty
+          ? '⚠ 会话已失效，请重选'
+          : SettingsProvider.agentSessionLabel(hit.first);
     }
 
     return Container(
@@ -338,16 +355,14 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
                     isDark: isDark,
                     onSelected: (v) => _pickSession(v),
                     items: {
+                      // 「自动」放在最前：清空绑定，交给电脑端分配。
+                      // 以前一直走这条路（字段是空的），所以从没需要手动选会话；
+                      // 它也是唯一不会因为"宿主重启导致会话 id 失效"而出问题的模式。
+                      '': '🔄 自动（不指定，推荐）',
                       for (final sess in sessions)
                         if ((sess['id']?.toString() ?? '').isNotEmpty)
                           sess['id'].toString(): SettingsProvider.agentSessionLabel(sess),
-                    }.isEmpty
-                        ? const {'': '暂无会话（点 + 新建）'}
-                        : {
-                            for (final sess in sessions)
-                              if ((sess['id']?.toString() ?? '').isNotEmpty)
-                                sess['id'].toString(): SettingsProvider.agentSessionLabel(sess),
-                          },
+                    },
                   ),
                   // 「新建会话」独立成按钮：可以顺手起名字，也不再混进下拉选项里
                   const SizedBox(width: 4),
