@@ -150,6 +150,25 @@ class TrayService with TrayListener, WindowListener {
     }
   }
 
+  /// 结束进程之前的收尾：把托盘图标从通知区里摘掉。
+  ///
+  /// ⚠️ 托盘图标是 **explorer** 持有的：不显式 destroy（底层就是
+  /// `Shell_NotifyIcon(NIM_DELETE)`）就直接 `exit(0)`，通知区会留下一个点不动的
+  /// "僵尸图标"，要等鼠标划过去才消失（用户 2026-10-01 实测报过这个 bug）。
+  /// **凡是会结束进程的路径，都必须先 await 这里**，不要直接 exit(0)。
+  Future<void> disposeTrayIcon() async {
+    if (!supported) return;
+    try {
+      await trayManager.destroy();
+      _inited = false;
+      _appliedTooltip = null;
+      _status = TrayStatus.idle;
+      debugPrint('[Tray] 托盘图标已移除');
+    } catch (e) {
+      debugPrint('[Tray] 移除托盘图标失败（继续退出）: $e');
+    }
+  }
+
   /// 真正退出（托盘菜单的两个退出项都走这里）。
   ///
   /// [stopBridge] 决定要不要连带停掉桥接：桥接是用 detached 方式启动的，不主动 kill
@@ -165,6 +184,8 @@ class TrayService with TrayListener, WindowListener {
         debugPrint('[Tray] 退出时停止桥接失败（忽略，继续退出）: $e');
       }
     }
+    // 顺序要紧：先摘托盘图标（让 explorer 收到删除通知），再销毁窗口，最后才结束进程
+    await disposeTrayIcon();
     try {
       await windowManager.setPreventClose(false);
       await windowManager.destroy();

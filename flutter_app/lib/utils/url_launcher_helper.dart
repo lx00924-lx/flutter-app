@@ -2,6 +2,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../services/tray_service.dart';
+
 class UrlLauncherHelper {
   static const MethodChannel _channel = MethodChannel('com.lx.app/app_launcher');
 
@@ -110,6 +112,9 @@ class UrlLauncherHelper {
         );
         // 留出 500ms 缓冲确保安装进程成功独立接管
         await Future.delayed(const Duration(milliseconds: 500));
+        // 退出前先摘掉托盘图标：这条路径同样会结束进程，不摘就会在通知区留一个
+        // 点不动的"僵尸图标"（要鼠标划过才消失）——详见 TrayService.disposeTrayIcon
+        await TrayService.instance.disposeTrayIcon();
         // 优雅自杀退出，彻底释放 dll 和主 exe 句柄
         exit(0);
       } catch (e) {
