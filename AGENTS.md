@@ -435,6 +435,22 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - 默认 preset：`<dshHome>/settings.yaml` 的 `agent-presets.default`（**创建会话时**读取）；
 - **只有空会话能切 preset** —— 改完要在**新会话**里才生效，老会话永远保持创建时的组装。
 
+### 9.7 会话恢复必须以「回调执行那一刻」为准（"新建会话后输入的内容跑进旧会话"的根因）
+
+- **症状**（用户 2026-10-01 实测）：在历史对话面板点 `+` 新建会话 → 在新会话里输入并发送 →
+  消息落进了**旧会话**，界面也悄悄切回了旧会话。
+- **根因**：`ChatProvider._silentSyncFromServer()` 的回调原本用「**发起同步那一刻**捕获的
+  `currentSessionId`」去恢复当前会话。云端同步要跑好几秒（`pullAndMergeMessages` 里多次
+  await + 反向上传），期间用户完全可能刚新建/切换会话，旧回调一到就把 `_currentSession` 顶回去。
+  更致命的是 `pullAndMergeMessages` 开头是 `if (cleanUserId.isEmpty || _isSyncing) return 0;` ——
+  **新建会话那一次同步会被直接吞掉、回调根本不会注册**，于是没有任何后续同步来纠正，
+  界面就永久停在旧会话上（直到用户下一次操作触发同步）。
+- **修法**：回调里改读**执行此刻**的 `_currentSession`，并对「本地新建、尚未上云
+  （`isSynced == false`）」的会话加保护 —— `saveSession` 是异步的，这一刻它可能还没落盘，
+  不能拿「列表里没有 → 退回第一个」的兜底把它顶掉。`loadSessions()` 里同一形状的兜底照此办理。
+- **判据**：这类 bug 的共同形状是「**用旧快照覆盖新状态**」＋「**失败被静默吞掉**」。
+  写任何异步回调前先问一句：这个闭包捕获的值，在回调真正跑起来的时候还成立吗？
+
 ## 10. PowerShell 脚本必须带 UTF-8 BOM（本机只有 PS 5.1）
 
 - **现象**：脚本在别处直接语法报错，错误信息里夹着乱码 ——
@@ -452,4 +468,33 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - 含非 ASCII 的 **`.iss`（Inno Setup）同理**，也要求带 BOM。
 - 与 **§1**（`.bat` 必须 CRLF + 注意编码）属同一类问题：**给 Windows 的脚本，编码与换行都要显式处理**，
   不能依赖「在我机器上能跑」。
+
+## 11. 品牌图标只有一个来源：`tools/make_icons.py`
+
+- **历史问题**（2026-10-01 修）：App 自 2026-09-18 起的图标是一张**第三方动漫插画** ——
+  `flutter_app/assets/icon/app_icon.png`、`flutter_app/windows/runner/resources/app_icon.ico`、
+  Android mipmap 全套都是它；而安装向导（`installer/assets/wizard-*.png`）用的却是另一套自己画的标识。
+  既有版权/商标风险，两处观感也不一致。
+- **现在**：`python tools/make_icons.py` 用几何图形（深藏青圆角方块 + 两个浅色节点 +
+  天蓝链路 + 琥珀色「中继」节点）**代码重绘**全套图标，一次写出 22 个文件（约 420 KB）。
+  只用 numpy + 标准库 —— ⚠️ 本机**没有 Pillow、没有 ImageMagick**，别再往那两个方向试。
+
+  | 目标 | 文件 |
+  | --- | --- |
+  | 源图 / 自适应前景 | `flutter_app/assets/icon/app_icon.png`、`app_icon_foreground.png`（1024²） |
+  | Android | `mipmap-{m,h,xh,xxh,xxxh}dpi/` 下的 `ic_launcher.png`、`ic_launcher_round.png`、`ic_launcher_foreground.png` |
+  | Windows 程序图标 | `flutter_app/windows/runner/resources/app_icon.ico`（16/24/32/48/64/128/256 七档） |
+  | Windows 托盘 4 态 | `flutter_app/assets/icons/tray/tray_{idle,message,question,offline}.ico`（只换中继节点颜色） |
+  | 安装向导 | `installer/assets/wizard-{large,small}.png`（此前已换，不由本脚本接管） |
+
+- **改图标 = 改脚本里的设计参数再跑一遍**，不要手工贴图。
+- ⚠️ **顺手补齐的缺口**：`AndroidManifest.xml` 同时引用 `@mipmap/ic_launcher_round`，
+  但各密度目录里**从来没有** `ic_launcher_round.png`（只有 `mipmap-anydpi-v26/` 的 xml，
+  即 API 26+ 才有）—— 现已随生成脚本补齐。
+- ⚠️ **不要跑 `flutter_launcher_icons`**：`pubspec.yaml` 里它配的 android 名称是 `"launcher_icon"`，
+  而 manifest 引用的是 `@mipmap/ic_launcher` —— 跑它只会生成一个**没人引用**的 `launcher_icon.png`，
+  真正生效的图标纹丝不动（这正是"换了图标却没生效"的坑）；而且它用不透明图覆盖
+  `ic_launcher_foreground.png`，会把自适应图标弄坏。
+- ⚠️ **Windows 有图标缓存**：覆盖 exe 后任务栏/开始菜单可能仍显示旧图标，
+  必要时 `ie4uinit.exe -show` 或重建图标缓存，别误判成"没替换成功"。
 

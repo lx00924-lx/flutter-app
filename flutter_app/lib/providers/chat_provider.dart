@@ -1167,10 +1167,20 @@ class ChatProvider extends ChangeNotifier {
     _sessions = _storage.getAllSessions();
     // 启动或从存储重新载入时：检查当前选中会话是否依然有效且存在于列表中
     final currentId = _currentSession?.id;
+    final current = _currentSession;
     if (currentId != null && _sessions.any((s) => s.id == currentId)) {
       // 仍然存在，更新引用并拉取最新消息
       _currentSession = _sessions.firstWhere((s) => s.id == currentId);
       _messages = _storage.getMessagesForSession(currentId);
+      notifyListeners();
+    } else if (current != null && !current.isSynced) {
+      // 本地新建、尚未上云的会话可能还没落盘（saveSession 是异步的），必须保住它，
+      // 否则会被下面的"自动选中第一个"顶掉 —— 用户看到的就是"刚建的会话又变回旧会话"。
+      if (currentId == null || !_sessions.any((s) => s.id == currentId)) {
+        _sessions.insert(0, current);
+      }
+      _currentSession = current;
+      _messages = _storage.getMessagesForSession(current.id);
       notifyListeners();
     } else if (_sessions.isNotEmpty) {
       // 当前选中的会话已不在列表中或尚未初始化，自动选中第一个有效会话
@@ -1182,18 +1192,27 @@ class ChatProvider extends ChangeNotifier {
   }
 
   void _silentSyncFromServer() {
-    final currentSessionId = _currentSession?.id;
     SyncService.instance.pullAndMergeMessages(
       userId: settingsProvider.syncUserId,
       clientSessionId: settingsProvider.clientSessionId,
       onNewMessagesImported: () {
+        // ⚠️ 必须按「回调执行这一刻」的当前会话恢复，**绝不能**用发起同步时捕获的会话 id。
+        // 历史 bug（用户实测）：点历史面板的「+」新建会话时，若上一次同步还在飞，
+        // 它的回调会抱着**旧会话 id** 回来把 _currentSession 顶回旧会话 —— 表现为
+        // "刚新建的会话里输入的内容跑进了旧会话"；而新建时那次同步又被 _isSyncing 挡掉，
+        // 没有后续同步来纠正，界面就永久停在旧会话上。
+        final keep = _currentSession;
         _sessions = _storage.getAllSessions();
-        // 如果当前选中的会话依然存在于会话列表中且在本地数据库中有效
-        if (currentSessionId != null && _sessions.any((s) => s.id == currentSessionId) && _storage.hasSession(currentSessionId)) {
-          _currentSession = _sessions.firstWhere((s) => s.id == currentSessionId);
-          _messages = _storage.getMessagesForSession(currentSessionId);
+        final keptInList = keep != null && _sessions.any((s) => s.id == keep.id);
+        // 本地新建、尚未上云的会话必须保住：saveSession 是异步的，这一刻它可能还没落盘，
+        // 若只用 first 兜底就会把它顶掉（同样是"新建的会话变回旧会话"）。
+        final keepUnsynced = keep != null && !keep.isSynced;
+        if (keep != null && (keptInList || keepUnsynced)) {
+          if (!keptInList) _sessions.insert(0, keep);
+          _currentSession = keep;
+          _messages = _storage.getMessagesForSession(keep.id);
         } else if (_sessions.isNotEmpty) {
-          // 当前选中的会话已不在列表中（可能在其他端被删除或被离线队列清除），自动切至第一个会话
+          // 当前选中的会话确实已不存在（例如在其它端被删除），才切至第一个会话
           _currentSession = _sessions.first;
           _messages = _storage.getMessagesForSession(_sessions.first.id);
         } else {
