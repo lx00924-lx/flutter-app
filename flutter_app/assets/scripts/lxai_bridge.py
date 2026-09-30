@@ -2526,20 +2526,18 @@ async def execute_local_harness(
     if not content_list:
         content_list = [{"type": "text", "text": str(prompt or "")}]
 
-    # WS RPC 通道也要带图。注意结构差异：payload 里图片是 {data, mediaType}，
-    # 而 content_list 是"块数组"，图片块要多一个 type 字段。
-    if images:
-        for _img in images:
-            if not isinstance(_img, dict):
-                continue
-            _entry = {
-                "type": "image",
-                "data": _img.get("data", ""),
-                "mediaType": _img.get("mediaType") or _img.get("media_type", ""),
-            }
-            if _img.get("name"):
-                _entry["name"] = _img["name"]
-            content_list.append(_entry)
+    # ⚠️ 这里**刻意不加**图片块。
+    #
+    # content_list 是「原生 WebSocket RPC 通道」的 payload（见 execute_dsh_via_ws：
+    # 它被塞进 "prompt"/"parts"/"content" 三个字段），那条通道只认纯文本块
+    # {type:'text', text}。往里追加 {type:'image', data, mediaType} 会让它直接出错 ——
+    # 而它位于候选循环**之前**、是最先尝试的一条，一旦挂掉整轮就会往后降级
+    # （用户看到的就是"主通道不可用"），图片反倒永远走不到真正能处理它的 HTTP 通道。
+    #
+    # 图片只走 HTTP：
+    #   · 主通道 execute_dsh_sse_stream 的 payload["images"]
+    #   · 备用通道的 prompt_payload["images"]
+    # 那两处才是插件按 body.images 读取的地方。
 
     # 备用通道（适配器 / WS RPC）拿不到宿主的 selectModel，思考深度改不了。
     # 这里如实告知，避免用户以为"选了没生效"是 App 的问题。
@@ -2596,7 +2594,11 @@ async def execute_local_harness(
     ))
 
     # 2. 原生 WebSocket 通道
-    if HAS_WEBSOCKETS and not harness_base.startswith("https://"):
+    # ⚠️ 带图时跳过：这条 RPC 通道不承载图片块（原因见上面 content_list 处的说明），
+    # 让它去试只会白白失败一次、把整轮推给备用通道，图片反而更容易被丢掉。
+    if images:
+        await on_step_callback("ℹ️ 本轮含图片，WebSocket RPC 通道不承载图片，直接走 HTTP 通道")
+    elif HAS_WEBSOCKETS and not harness_base.startswith("https://"):
         ws_ok, ws_output = await execute_dsh_via_ws(
             harness_url, target_workspace, model_name, active_session_id, content_list, prompt, on_step_callback,
             permission=permission
