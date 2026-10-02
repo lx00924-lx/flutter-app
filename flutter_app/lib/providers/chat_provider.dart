@@ -399,15 +399,54 @@ class ChatProvider extends ChangeNotifier {
 
   /// 标记有新的 Agent 回复（本轮结束 / 收到另一端同步过来的消息时调用）
   void _markAgentUnread() {
+    // 通知放在"已未读就提前返回"**之前**：`_hasUnreadAgent` 是给托盘小圆点用的
+    // 幂等标记，而系统通知是"又发生了一件事"。若跟着那个标记一起被挡掉，
+    // 用户把通知划掉之后，后续每一条回复都会静默无提醒 —— 那正是这条通知要解决的场景。
+    _notifyNewReplyIfInBackground();
     if (_hasUnreadAgent) return;
     _hasUnreadAgent = true;
     notifyListeners();
   }
 
-  /// 清掉未读（窗口回到前台时调用）
+  /// 手机端在后台时补一条系统通知。
+  ///
+  /// ⚠️ **只在不看前台时发**：人就在盯着屏幕，再弹一条通知纯属打扰。
+  /// 判据与 Windows 托盘的规则一致（`TrayService.sync` 里的
+  /// `effectiveUnread = unreadMessage && !窗口在前台`）—— 只是那边看的是窗口焦点，
+  /// 这边看的是 App 生命周期。
+  ///
+  /// 桌面端不受影响：`showNewReply` 内部只对 Android 生效。
+  void _notifyNewReplyIfInBackground() {
+    final state = WidgetsBinding.instance.lifecycleState;
+    // resumed = 前台可见；null（还没跑起来）也当作没在看，避免漏通知
+    if (state == AppLifecycleState.resumed) return;
+
+    final session = _currentSession;
+    final title = (session?.title ?? '').trim();
+    // 取最后一条**有内容**的回复做摘要：正在流式的那条还没写完，摘要会是空的
+    String snippet = '';
+    for (final m in _messages.reversed) {
+      if (m.role != MessageRole.assistant) continue;
+      final text = m.content.trim();
+      if (text.isEmpty || m.isStreaming) continue;
+      snippet = text.replaceAll('\n', ' ');
+      if (snippet.length > 120) snippet = '${snippet.substring(0, 120)}…';
+      break;
+    }
+
+    unawaited(NotificationService.instance.showNewReply(
+      sessionId: session?.id ?? '',
+      title: title.isEmpty ? 'LxAI · Agent 回复好了' : title,
+      body: snippet,
+    ));
+  }
+
+  /// 清掉未读（窗口回到前台时调用；手机端同时撤掉那条新回复通知）
   void clearAgentUnread() {
     if (!_hasUnreadAgent) return;
     _hasUnreadAgent = false;
+    // 已经回到 App 了，通知栏里那条"回复好了"就没必要再挂着
+    unawaited(NotificationService.instance.cancelNewReply());
     notifyListeners();
   }
 

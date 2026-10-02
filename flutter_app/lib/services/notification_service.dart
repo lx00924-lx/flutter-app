@@ -27,6 +27,17 @@ class NotificationService {
   static const String _questionChannelDesc = '电脑端 Agent 提问、等你选一个答案时提醒';
   static const int _questionNotificationId = 8802;
 
+  /// 「新回复」的独立渠道。
+  ///
+  /// ⚠️ 与上面两条的**关键区别**：这条是"通知你一件事"，不是"有个状态卡在那儿"——
+  /// 所以 `ongoing: false` + `autoCancel: true`：**可以滑动划掉**、点一下也会自动消失。
+  /// 上面两条刻意不让划（电脑端还在等你），这条恰恰相反：看过了就该能清掉，
+  /// 一直挂着反而是骚扰。
+  static const String _messageChannelId = 'lx_message';
+  static const String _messageChannelName = '新回复';
+  static const String _messageChannelDesc = 'Agent 回复完成时提醒（可划掉）';
+  static const int _messageNotificationId = 8803;
+
   final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
   bool _initialized = false;
 
@@ -35,6 +46,9 @@ class NotificationService {
 
   /// 用户点了选择框通知（payload 为 questionId）
   void Function(String questionId)? onQuestionTapped;
+
+  /// 用户点了「新回复」通知（payload 为 sessionId）
+  void Function(String sessionId)? onMessageTapped;
 
   Future<void> init() async {
     if (_initialized || kIsWeb) return;
@@ -52,6 +66,10 @@ class NotificationService {
           if (payload.isEmpty) return;
           if (payload.startsWith('q:')) {
             onQuestionTapped?.call(payload.substring(2));
+            return;
+          }
+          if (payload.startsWith('m:')) {
+            onMessageTapped?.call(payload.substring(2));
             return;
           }
           onApprovalTapped?.call(payload);
@@ -180,6 +198,58 @@ class NotificationService {
     try {
       await init();
       await _plugin.cancel(id: _questionNotificationId);
+    } catch (_) {}
+  }
+
+  /// 弹出「Agent 回复好了」通知（**可以滑动划掉**）。
+  ///
+  /// 与上面两条的区别见渠道常量处的注释：这是"通知你一件事"，不是"有个状态卡着"，
+  /// 所以 `ongoing: false` + `autoCancel: true` —— 用户划掉、或点一下，都会消失。
+  ///
+  /// [body] 传回复内容的开头一小段，让用户不打开 App 也能大致知道回了什么。
+  Future<void> showNewReply({
+    required String sessionId,
+    String title = '',
+    String body = '',
+  }) async {
+    if (kIsWeb || !Platform.isAndroid) return;
+    try {
+      await init();
+      if (!await hasPermission()) return;
+      final details = NotificationDetails(
+        android: AndroidNotificationDetails(
+          _messageChannelId,
+          _messageChannelName,
+          channelDescription: _messageChannelDesc,
+          importance: Importance.high,
+          priority: Priority.high,
+          category: AndroidNotificationCategory.message,
+          // 与上面两条相反的取值：可划掉、点击即消失
+          autoCancel: true,
+          ongoing: false,
+          // 回复通常不止一行，用长文本样式展开
+          styleInformation: body.isEmpty ? null : BigTextStyleInformation(body),
+        ),
+      );
+      await _plugin.show(
+        id: _messageNotificationId,
+        title: title.isEmpty ? 'LxAI · Agent 回复好了' : title,
+        body: body.isEmpty ? '点开查看回复内容' : body,
+        notificationDetails: details,
+        payload: 'm:$sessionId',
+      );
+      debugPrint('[Notify] 已发出新回复通知（$sessionId）');
+    } catch (e) {
+      debugPrint('[Notify] 发送新回复通知失败: $e');
+    }
+  }
+
+  /// 用户回到 App（或已读）时撤掉新回复通知。
+  Future<void> cancelNewReply() async {
+    if (kIsWeb || !Platform.isAndroid) return;
+    try {
+      await init();
+      await _plugin.cancel(id: _messageNotificationId);
     } catch (_) {}
   }
 }
