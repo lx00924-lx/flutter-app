@@ -36,9 +36,19 @@ Flutter 纯原生多端客户端（Android / Windows） · Node + React 官网�
 | 服务端 / 官网介绍页 | Node.js **20+**、npm |
 | 打包 Flutter App | Flutter **3.44+**（含 Dart 3.12+） |
 | 打包 Windows 客户端 | Visual Studio 2022，勾选「使用 C++ 的桌面开发」 |
-| 制作 Windows 安装程序 | Inno Setup **6**（见 [`installer/README.md`](./installer/README.md)） |
 | 打包 Android 客户端 | JDK 17+、Android SDK（含 build-tools / platform 36） |
 | 手动运行本地 Bridge | Python **3.8+**（用安装版分发时**用户无需 Python**，见 [4.2](#42-打包成-windows-安装程序推荐分发方式)） |
+| 制作 Windows 安装程序（**旧 Inno 版，已不再迭代**） | Inno Setup **6**（见 [`installer/README.md`](./installer/README.md)） |
+
+> ⚠️ **平台支持现状**：App **只适配了 Android 与 Windows**。
+> `flutter_app/linux/` 目录不存在、从未为 Linux 构建过，`macos/` `ios/` `web/` 同样没有。
+> Linux 的现状、插件缺口与打包路线见 [`docs/TODO.md`](./docs/TODO.md) 第 1 节。
+>
+> 自研的 Windows 安装器已迁到**独立仓库** `lx00924-lx/lxai-setup-flutter`；
+> 本仓库 `installer/` 是旧的 Inno Setup 版（仍能独立构建，只是不再迭代）。
+>
+> ⚠️ `installer/runtime/python`（私有 Python 运行时）**不要删、不要挪**：新安装器的
+> `tool/build-payload.ps1` 硬编码从这里取它。
 
 ```bash
 flutter doctor -v      # 确认 Flutter / VS / Android 工具链齐全

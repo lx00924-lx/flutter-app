@@ -5,7 +5,87 @@
 
 ---
 
-**当前没有待办。**
+**当前没有待办。**（下面第 1 条是**已决定"以后再做"**的规划项，保留着备查。）
+
+---
+
+## 1. Linux 桌面适配（以后再计划）
+
+**要什么**：让 App 能在 Linux 桌面跑起来（`flutter build linux`），并产出 `.deb` / AppImage。
+
+**为什么现在不做**：安装器选型（见下）已确定**只管 Windows**，Linux 那边不需要"安装向
+导"这种东西，所以不阻塞当前开发。等 Linux 真成为目标再启动。
+
+**先说结论，免得下次走弯路**：
+
+- **Linux 不需要"再开发一个安装器"**。那边没有"下一步、下一步"的向导文化，用户通过
+  包管理器装。对应物是**打安装包**，不是写安装程序：
+
+  | 格式 | 怎么产出 | 要写 UI 吗 | 用户怎么装 |
+  | :--- | :--- | :---: | :--- |
+  | `.deb`（Debian/Ubuntu） | `dpkg-deb --build` 或 `fpm`，一条命令 | ✗ | `apt install ./x.deb` 或软件中心双击 |
+  | `.rpm`（Fedora/RHEL） | `rpmbuild` 或 `fpm` | ✗ | `dnf install ./x.rpm` |
+  | **AppImage** | `linuxdeploy` + `appimagetool` | ✗ | **双击直接运行，不用安装** |
+
+- **AppImage 天然满足"单文件"**，而且比 Windows 更彻底（不是"一个文件安装"，是"一个文件直接跑"）。
+- ⚠️ **Linux 包必须在 Linux 上构建**（`dpkg-deb` 是 Debian 的工具，Windows 上产不出）。
+  推荐放 **GitHub Actions 的 ubuntu runner**，tag 一推自动出 `.deb` + AppImage，本机不用装 Linux 环境。
+- ⚠️ WebView2 是 Windows 独有的；Linux 上渲染 HTML 的等价物是 **WebKitGTK**（Tauri 在 Linux
+  就是这么做的）。但既然 Linux 不需要自定义向导，这条基本不会用到。
+
+**真正的工作量在"App 根本没移植过 Linux"**（2026-10-04 实测，非推测）：
+
+```
+flutter_app/linux/ 平台目录   ✘ 不存在（从未为 Linux 构建过）
+Platform.isWindows           27 处
+Platform.isAndroid           29 处
+Platform.isLinux             15 处   ← 当初留过口子，但没成体系
+```
+
+插件支持逐个核过 `pubspec.yaml` 的平台声明，**大部分没问题**：
+
+| ✅ 声明了 Linux | ❌ 没有 Linux 实现 |
+| :--- | :--- |
+| `window_manager`、`flutter_local_notifications`、`record`、`audioplayers`、`image_picker`、`file_picker`、`path_provider`、`shared_preferences` | **`flutter_tts`** → 朗读功能要另找方案<br>**`mobile_scanner`** → 扫码配对要另想办法（或 Linux 上只支持手输 Token） |
+
+- ⚠️ `tray_manager 0.7` 只是个**兼容壳**（底层已换成 nativeapi 那套，见
+  `lib/services/tray_service.dart` 顶部注释），它的 Linux 托盘支持**要单独确认**。
+  不过 App 里 `TrayService.supported` 现在写死 `Platform.isWindows`，本来也要补分支。
+- 要重写的 Windows 专属逻辑：**托盘、开机自启（注册表 `HKCU\...\Run` →
+  `~/.config/autostart/*.desktop`）、桥接进程管理**。
+
+**好消息**：后端天然跨平台 —— 中继是 Node、桥接是 `lxai_bridge.py`（Python），**一行都不用改**。
+
+**建议的顺序**（打包是整条链里最省事的一步，别和"移植 App"混在一起估工作量）：
+
+1. **App 移植**：`flutter create --platforms=linux .` 生成平台目录 → 补上面那些平台分支 →
+   解决 `flutter_tts` / `mobile_scanner` 两个缺口；
+2. **打包**：`.deb` + AppImage，几十行脚本，放 CI 跑；
+3. **自定义 UI 的安装向导只做 Windows**，Linux 走包管理器那套标准流程。
+
+## 2. Windows 安装器：现状与选型（供 Linux 那节参照）
+
+主仓库的 `installer/` 是**旧的 Inno Setup 版**，已不再迭代 —— 自研安装器迁到了**独立仓库**
+`F:\ai\flutter\lxai-setup-flutter`（GitHub `lx00924-lx/lxai-setup-flutter`）。
+
+⚠️ 但 `installer/runtime/python` **不能删也不能挪**：新安装器的
+`tool/build-payload.ps1` 硬编码从这里取私有 Python 运行时（`$RepoRoot\installer\runtime\python`）。
+
+单文件打包（M3）的四条候选路线、以及"为什么 Flutter 的 exe 做不到单文件直接跑"的实测结论，
+记在 `lxai-setup-flutter` 仓库的 `README.md`（「单文件安装包」一节）。这里只留结论：
+
+- 不要 Flutter、走原生（C++ / DuiLib / WebView2）→ 单文件 ~22–26 MB；
+- 保留 Flutter 向导 + 自解压外壳 → 单文件 ~37 MB；
+- 那条走不通的路（素材追加到 exe 尾部让 Flutter 自己解包）**别再试**：Flutter 的 exe
+  单独拷到别的目录都起不来，引擎没机会启动就没人解包。
+
+**用户当前倾向 D（C++ 底层安装 + WebView2 渲染 HTML/CSS 界面）**，理由是它同时满足
+"单文件 + 自定义 UI"，且界面层用 HTML/CSS 比 B 的 DuiLib XML 表达力强得多、换皮不用重编译。
+B（NSIS + DuiLib）是同一思路的备选，胜在零运行时依赖。**尚未开工，选型未最终敲定。**
+
+实测过的可行性前提（2026-10-04）：本机 **WebView2 运行时已装（154.0.4258.48）**、
+MSVC 14.51 + Windows SDK 10.0.26100 可用、WebView2 SDK 需从 NuGet 拉（2–5 MB）；
+NSIS / Qt / Rust / Go 均未安装。
 
 ---
 
@@ -23,4 +103,4 @@
 
 - 纯 App 端（Dart）的改动：`flutter analyze` 过一遍即可；
   要看到效果**需要重新打 App 包**（Windows / Android），网页端与此无关。
-- App 打包流程见根 `README.md` §四；安装器打包见 `installer/README.md`。
+- App 打包流程见根 `README.md` §四；Windows 安装器见独立仓库 `lxai-setup-flutter`。
