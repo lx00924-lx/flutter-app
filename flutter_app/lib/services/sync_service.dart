@@ -547,6 +547,11 @@ class SyncService {
       // 0. 先将离线期间积压的会话删除指令补发给云端
       await flushPendingDeletions(userId: cleanUserId, clientSessionId: clientSessionId);
 
+      // 0b. 再把离线期间没推上去的消息补传（服务器没开时发的那些）。
+      //     放在拉取之前：先把本地的补上去，紧接着拉回来的列表里就有它们了，
+      //     这一轮界面就是一致的，不用等下一次同步。
+      await flushPendingPushes(userId: cleanUserId, clientSessionId: clientSessionId);
+
       final url = '$serverBaseUrl/api/messages/$cleanUserId';
       final response = await _dio.get(
         url,
@@ -684,14 +689,18 @@ class SyncService {
     return importedCount;
   }
 
-  /// 实时静默推送单条或多条消息至服务器
-  Future<void> pushMessages({
+  /// 实时静默推送单条或多条消息至服务器。
+  ///
+  /// @returns 是否**真的推上去了**（服务端确认 2xx）。失败时会把这几条消息的 id
+  ///   记进本地"待推队列"，等同步时由 [flushPendingPushes] 补传 —— 以前失败只打
+  ///   一行日志，服务器没开时发的消息就永远上不了云。
+  Future<bool> pushMessages({
     required String userId,
     required List<ChatMessage> messages,
     String? clientSessionId,
   }) async {
     final cleanUserId = userId.trim();
-    if (cleanUserId.isEmpty || messages.isEmpty) return;
+    if (cleanUserId.isEmpty || messages.isEmpty) return false;
 
     final validMessages = messages
         .where((m) =>
@@ -703,11 +712,15 @@ class SyncService {
         .map((m) => m.toMap())
         .toList();
 
-    if (validMessages.isEmpty) return;
+    if (validMessages.isEmpty) return false;
+
+    // 待推队列里要记的是**原始消息 id**（不是过滤后的），否则被过滤掉的那条
+    // 永远出不了队，会一直卡在队列里反复重试。
+    final pushIds = messages.map((m) => m.id).where((id) => id.isNotEmpty).toList();
 
     try {
       final url = '$serverBaseUrl/api/sync-messages';
-      await _dio.post(
+      final resp = await _dio.post(
         url,
         data: {
           'userId': cleanUserId,
@@ -715,6 +728,15 @@ class SyncService {
         },
         options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
+      final status = resp.statusCode ?? 0;
+      if (status < 200 || status >= 300) {
+        debugPrint('[SyncService] Push messages failed: HTTP $status');
+        await StorageService.instance.addPendingPushMessageIds(pushIds);
+        return false;
+      }
+
+      // 推成功了：把这几条从待推队列里摘掉（它们可能正是上次失败时入队的）
+      await StorageService.instance.removePendingPushMessageIds(pushIds);
 
       // 标记所涉及的本地会话已成功同步
       final storage = StorageService.instance;
@@ -727,9 +749,64 @@ class SyncService {
           await storage.saveSession(match);
         }
       }
+      return true;
     } catch (e) {
       _checkAndTriggerForceLogout(e);
-      debugPrint('[SyncService] Push messages silent error: $e');
+      debugPrint('[SyncService] Push messages failed（已入待推队列，等服务器回来补传）: $e');
+      // 关键：以前这里只打一行日志，消息就永远上不了云。现在记下来，同步时补推。
+      await StorageService.instance.addPendingPushMessageIds(pushIds);
+      return false;
+    }
+  }
+
+  /// 把消息登记进"待推送"队列（不立即发）。
+  ///
+  /// 给"发送时就连 DNS 都不通"那条早返回路径用 —— 那种情况 `sendMessage`
+  /// 根本不会走到 [pushMessages]，不记一笔的话上线后也没人补传。
+  Future<void> enqueuePendingPush(List<ChatMessage> messages) async {
+    await StorageService.instance.addPendingPushMessageIds(
+      messages.map((m) => m.id).where((id) => id.isNotEmpty),
+    );
+  }
+
+  /// 补推离线期间没推上去的消息。
+  ///
+  /// 在 [pullAndMergeMessages] 开头与 `flushPendingDeletions` 并列调用：
+  /// 每次同步（含每 12 秒的周期同步）都会试着补一次，服务器回来了自然就补齐了。
+  ///
+  /// 只处理**队列里记过的 id**，按 id 从本地取最新内容再推 —— 不是"服务端没有的
+  /// 本地消息全都推一遍"，所以不会把另一台设备已删的消息推回去。
+  Future<void> flushPendingPushes({
+    required String userId,
+    String? clientSessionId,
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty) return;
+    final storage = StorageService.instance;
+    final pendingIds = storage.getPendingPushMessageIds();
+    if (pendingIds.isEmpty) return;
+
+    final toPush = <ChatMessage>[];
+    final vanished = <String>[];
+    for (final id in pendingIds) {
+      final msg = storage.getMessageById(id);
+      if (msg == null) {
+        // 本地已经没有了（比如用户在补推前把它删了）→ 出队，别一直挂着
+        vanished.add(id);
+        continue;
+      }
+      toPush.add(msg);
+    }
+    if (vanished.isNotEmpty) await storage.removePendingPushMessageIds(vanished);
+    if (toPush.isEmpty) return;
+
+    final ok = await pushMessages(
+      userId: cleanUserId,
+      messages: toPush,
+      clientSessionId: clientSessionId,
+    );
+    if (ok) {
+      debugPrint('[SyncService] 已补推 ${toPush.length} 条离线消息');
     }
   }
 
@@ -840,19 +917,23 @@ class SyncService {
     }
   }
 
-  /// 实时静默删除云端单条消息
-  Future<void> deleteMessage({
+  /// 实时静默删除云端单条消息。
+  ///
+  /// @returns 是否**真的删掉了**（服务端确认 2xx）。调用方必须据此决定本地要不要删 ——
+  ///   以前这里吞掉异常、调用方照样删本地，于是"服务器没开时删的那条"在下次同步
+  ///   又被当成新消息拉回来（复活）。宁可当场告诉用户"删除失败"，也不要假成功。
+  Future<bool> deleteMessage({
     required String userId,
     required String messageId,
     String? clientSessionId,
   }) async {
     final cleanUserId = userId.trim();
     final cleanMessageId = messageId.trim();
-    if (cleanUserId.isEmpty || cleanMessageId.isEmpty) return;
+    if (cleanUserId.isEmpty || cleanMessageId.isEmpty) return false;
 
     try {
       final url = '$serverBaseUrl/api/delete-message';
-      await _dio.post(
+      final resp = await _dio.post(
         url,
         data: {
           'userId': cleanUserId,
@@ -860,9 +941,15 @@ class SyncService {
         },
         options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
+      final ok = resp.statusCode != null && resp.statusCode! >= 200 && resp.statusCode! < 300;
+      if (!ok) {
+        debugPrint('[SyncService] Delete message failed: HTTP ${resp.statusCode}');
+      }
+      return ok;
     } catch (e) {
       _checkAndTriggerForceLogout(e);
-      debugPrint('[SyncService] Delete message silent error: $e');
+      debugPrint('[SyncService] Delete message failed（服务器不可达，本地不删）: $e');
+      return false;
     }
   }
 

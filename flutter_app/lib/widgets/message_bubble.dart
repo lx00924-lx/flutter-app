@@ -261,10 +261,19 @@ class MessageBubble extends StatelessWidget {
               backgroundColor: Colors.redAccent,
               foregroundColor: Colors.white,
             ),
-            onPressed: () {
+            onPressed: () async {
               FocusManager.instance.primaryFocus?.unfocus();
               Navigator.pop(ctx);
-              chat.deleteMessage(message.id);
+              // 删除需要服务器确认：删不掉就什么都别做，并如实说明。
+              // 以前是本地先删、推送失败只打日志 —— 结果下次同步又把那条拉回来（复活）。
+              final messenger = ScaffoldMessenger.of(context);
+              final ok = await chat.deleteMessage(message.id);
+              messenger.showSnackBar(
+                SnackBar(
+                  content: Text(ok ? '已删除该消息' : '删除失败：服务器不在线，请稍后再试'),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
             },
             child: const Text('确认删除'),
           ),

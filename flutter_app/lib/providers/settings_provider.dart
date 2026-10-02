@@ -1281,6 +1281,7 @@ class SettingsProvider extends ChangeNotifier {
       clientSessionId: _settings.clientSessionId,
     );
     if (ok) {
+      await StorageService.instance.setPendingSettingsPush(false);
       for (final key in AppSettings.mediaSettingKeys) {
         final value = _mediaValueOf(key);
         if (value.isNotEmpty) _pushedMediaHashes[key] = _contentFingerprint(value);
@@ -1288,8 +1289,24 @@ class SettingsProvider extends ChangeNotifier {
       if (omit.isNotEmpty) {
         debugPrint('[Settings] 本次推送省略未变更的图像字段: ${omit.join(', ')}');
       }
+    } else {
+      // 服务器没开/断网：记一个持久标记，等同步时由 retryPendingSettingsPush 补推。
+      // 以前失败就完全没人管了 —— 那条改动一直躺在本地，换机恢复时看不到。
+      await StorageService.instance.setPendingSettingsPush(true);
+      debugPrint('[Settings] 设置推送失败，已标记待补推');
     }
     return ok;
+  }
+
+  /// 补推"上次没推上去"的设置。由同步循环周期性调用（见 ChatProvider 的周期同步）。
+  ///
+  /// 设置是"最新状态覆盖"语义，所以只需要一个布尔标记 + 重推一次即可，
+  /// 不需要像消息那样排队。没有待补推标记时是个空操作，开销可忽略。
+  Future<void> retryPendingSettingsPush() async {
+    if (!StorageService.instance.pendingSettingsPush) return;
+    if (!_settings.isLoggedIn || _settings.loginAccount.trim().isEmpty) return;
+    debugPrint('[Settings] 检测到待补推设置，重试推送…');
+    await _pushSettingsGated();
   }
 
 

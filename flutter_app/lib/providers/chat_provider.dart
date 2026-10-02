@@ -565,6 +565,9 @@ class ChatProvider extends ChangeNotifier {
       // 用户可能把通知清过、或手机重启过，而电脑端还在等 —— 这类"卡住"的状态
       // 必须持续可见（用户明确要求：别因为划掉通知就消失）。
       if (_periodicSyncTicks % 50 == 0) _refreshPendingNotifications();
+      // 设置补推：服务器没开时改的设置会被打上待补推标记（见 SettingsProvider），
+      // 这里周期性试一次。没有标记时是空操作，所以放在提前 return 之前也几乎零开销。
+      unawaited(settingsProvider.retryPendingSettingsPush());
       // 推送通道连通时降到 60 秒一次（只当兜底）：12 秒拉取每天每台设备 7200 次，
       // 有长连接顶着就不必这么密。
       if (SyncService.instance.pushConnected && _periodicSyncTicks % 5 != 0) return;
@@ -1145,18 +1148,37 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  void deleteMessage(String messageId) {
+  /// 删除一条消息。
+  ///
+  /// ⚠️ **删除是需要服务器的操作**：只有服务端确认删掉了，本地才跟着删。
+  /// 以前是"本地先删、推送失败只打日志"，结果是服务器没开时删的那条，
+  /// 下次同步又被当成新消息拉回来（复活）—— 用户看到的就是"删了又回来"。
+  /// 现在反过来：删不掉就**什么都不做**并如实告诉用户，绝不做假成功。
+  ///
+  /// @returns 是否删除成功（失败时界面应给出提示）。
+  Future<bool> deleteMessage(String messageId) async {
+    // 没登录云端账号时，消息本来就没上过云，也就不存在"另一端还留着/下次同步又拉回来"
+    // 的问题 —— 直接本地删即可，不必因为服务器不可达而拒绝用户。
+    final cloudBound = settingsProvider.settings.isLoggedIn &&
+        settingsProvider.settings.loginAccount.trim().isNotEmpty &&
+        settingsProvider.settings.loginAccount.trim() != 'guest';
+
+    if (cloudBound) {
+      final ok = await SyncService.instance.deleteMessage(
+        userId: settingsProvider.syncUserId,
+        messageId: messageId,
+        clientSessionId: settingsProvider.clientSessionId,
+      );
+      if (!ok) return false;
+    }
+
     _storage.deleteMessage(messageId);
     _messages.removeWhere((m) => m.id == messageId);
     if (_quotedMessage?.id == messageId) {
       _quotedMessage = null;
     }
     notifyListeners();
-    SyncService.instance.deleteMessage(
-      userId: settingsProvider.syncUserId,
-      messageId: messageId,
-      clientSessionId: settingsProvider.clientSessionId,
-    );
+    return true;
   }
 
   void reloadFromStorage() {
@@ -1418,6 +1440,9 @@ class ChatProvider extends ChangeNotifier {
         _messages.add(msg);
         await _storage.saveMessage(msg);
       }
+      // 但必须**记进待推队列**：不然服务器回来时没人知道这几条还没上云，
+      // 它们就永远只留在这台设备上（另一端看不到）。见 SyncService.flushPendingPushes。
+      await SyncService.instance.enqueuePendingPush(userMsgsToSend);
 
       if (_messages.isNotEmpty && _currentSession!.title == '新对话') {
         final titleText = cleanText.isNotEmpty

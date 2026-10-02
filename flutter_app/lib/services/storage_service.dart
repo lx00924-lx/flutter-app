@@ -275,6 +275,81 @@ class StorageService {
     } catch (_) {}
   }
 
+  // --- 离线待推送消息队列 (Pending Push Queue) ---
+  //
+  // 为什么需要它：推送失败以前**只打一行 debugPrint**（`pushMessages` 的 catch），
+  // 于是"服务器没开时发的消息"就永远上不了云 —— 本地看得见、另一端永远看不到。
+  // 这里记下"推失败的 message id"，等同步时按 id 从本地重新取出来补推。
+  //
+  // 刻意**只记本机自己推失败的 id**，而不是"服务端没有的本地消息全都补推"：
+  // 后者会把另一台设备上已经删掉的消息又推回去（复活）。只补自己推失败的，
+  // 语义上一定是"这条从没上过云"，不可能与删除冲突。
+  List<String> getPendingPushMessageIds() {
+    final box = _settingsBox;
+    if (box == null) return [];
+    try {
+      final list = box.get('pending_push_message_ids');
+      if (list is List) {
+        return list.map((e) => e.toString()).toList();
+      }
+    } catch (_) {}
+    return [];
+  }
+
+  Future<void> addPendingPushMessageIds(Iterable<String> messageIds) async {
+    final box = _settingsBox;
+    if (box == null) return;
+    final add = messageIds.map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+    if (add.isEmpty) return;
+    try {
+      final current = getPendingPushMessageIds();
+      var changed = false;
+      for (final id in add) {
+        if (!current.contains(id)) {
+          current.add(id);
+          changed = true;
+        }
+      }
+      if (changed) await box.put('pending_push_message_ids', current);
+    } catch (_) {}
+  }
+
+  Future<void> removePendingPushMessageIds(Iterable<String> messageIds) async {
+    final box = _settingsBox;
+    if (box == null) return;
+    try {
+      final current = getPendingPushMessageIds();
+      var changed = false;
+      for (final id in messageIds) {
+        if (current.remove(id)) changed = true;
+      }
+      if (changed) await box.put('pending_push_message_ids', current);
+    } catch (_) {}
+  }
+
+  // --- 设置补推标记 ---
+  //
+  // `pushSettings` 失败以前同样没人管（`_pushSettingsGated` 只返回 false），
+  // 服务器没开时改的设置就一直躺在本地。用一个持久标记记着"还没推上去"，
+  // 等同步时补推一次。设置是"最新状态覆盖"语义，所以只需要一个布尔量。
+  bool get pendingSettingsPush {
+    final box = _settingsBox;
+    if (box == null) return false;
+    try {
+      return box.get('pending_settings_push') == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> setPendingSettingsPush(bool pending) async {
+    final box = _settingsBox;
+    if (box == null) return;
+    try {
+      await box.put('pending_settings_push', pending);
+    } catch (_) {}
+  }
+
   // --- 设置持久化 ---
   AppSettings loadSettings() {
     try {
