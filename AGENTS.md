@@ -158,6 +158,23 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 
 **新增代码时严禁再写死 `https://www.lx00924ai.top`**，一律走上述入口；该默认值只允许出现在 `app_config.dart`、`server.ts`、`src/config.ts` 三处。
 
+**GitHub 仓库地址同理**（2026-10-02 收拢）：历史上 `src/components/{Hero,Navbar,Downloads,ContactFooter}.tsx`
+与 `src/App.tsx` 里**写死了 7 处** `github.com/lx00924-lx/flutter-app`，fork 部署的人官网上会分发**作者的安装包**。
+现在统一由两个入口提供，新代码不要再写死：
+
+| 端 | 入口 | 覆盖方式 |
+| --- | --- | --- |
+| 官网 | `src/config.ts` 的 `DEFAULT_GITHUB_REPO`，导出 `GITHUB_REPO` / `GITHUB_URL` / `GITHUB_RELEASES_URL` | `.env` 的 `VITE_GITHUB_REPO="owner/repo"`（**构建期**注入，改完要 `npm run build`） |
+| App | `app_settings.dart` 的 `officialGithubOwner` / `officialGithubRepo` | 打包时 `--dart-define=GITHUB_OWNER=... --dart-define=GITHUB_REPO=...` |
+
+- `Architecture.tsx` 里展示的域名也不再写死，用 `getSiteHost()` 从 `VITE_SERVER_BASE_URL` 推导。
+- App 那两个常量**随包固化**：`githubOwner` / `githubRepo` 的 setter 是**故意写空的**，
+  避免云端同步把仓库改成别人的；`fromJson` 里也直接传常量而不是读缓存值。
+- ⚠️ 默认值仍需保留在 `src/config.ts` 与 `app_config.dart` 里（fork 者不配置时得有合理回落）。
+
+完整的 fork 核对清单见根 `README.md` 的 §五 —— **改到服务端 / 官网 / App / 安装器的任何一处
+"写死的作者信息"时，先去看那一节还在不在理**。
+
 ## 七、换用自己的 Android 签名（fork 者指引）
 
 仓库**不含任何密钥**。放置 `flutter_app/android/key.properties` + `flutter_app/android/app/AI.jks` 即自动切换为正式签名；缺失时 `android/app/build.gradle` 会回退到 debug 签名，**构建不会失败**。详细步骤见 `flutter_app/android/SIGNING_README.md`。
@@ -346,6 +363,23 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
     改用带真实控制台的 `Start-Process` 启动则 **2 秒上线**，并同步出 20 个会话。
   - **排查手法**：别只在 App 里反复试，直接用 `{app}\python\python.exe` 按同样参数手动跑一遍做对照 ——
     能上线就说明网络与 Token 都没问题，问题在本地进程/管道侧。
+- **桥接默认校验证书，别再改回 CERT_NONE**（2026-10-02 修）：
+  `create_resilient_ssl_context()` 原本**无条件**返回 `check_hostname=False` + `verify_mode=CERT_NONE` 的上下文，
+  等于对中继的**所有** HTTPS 请求都不验证书；而 WebSocket 链路（`websockets.connect` 没传 `ssl=`）
+  走的是库默认值**会**校验 —— 两条链路行为还不一致。中间人（恶意 Wi-Fi / 被劫持的代理 / 装了根证书的抓包工具）
+  可以冒充中继，拿到的是**配对 Token**，也就是能直接驱动用户电脑上的 Agent。
+  - 现在：`create_ssl_context(insecure=False)` 默认 `ssl.create_default_context()`（校验证书 + 主机名）；
+    需要放开的环境走**显式**开关 `--insecure` / `LXAI_INSECURE_TLS=1`，并在启动时打印醒目警告。
+  - WS 路径现在也把同一个上下文传进 `websockets.connect(ssl=...)`，两条链路语义统一。
+  - 证书失败**不走静默降级**：`is_cert_error()` 把它和"代理不通/DNS 失败"区分开，措辞不同，
+    最终失败时 `print_cert_error_help()` 打出可操作说明。允许"绕开代理直连"再试一次
+    （代理做 MITM 时直连确实可能正常），但**不会**自动降级成不校验。
+  - 实测：系统 Python 3.14 与 App 私有运行时 Python 3.13 都能通过 `create_default_context()`
+    验证 `https://www.lx00924ai.top` 的证书（`/api/health` 返回 200），所以打开校验**不影响本项目的部署**。
+  - ⚠️ App 拉起的桥接不传 `--insecure`，要走这条通道得设系统环境变量。
+- **桥接脚本有两份副本，改完必须同步**：仓库根 `lxai_bridge.py` 与
+  `flutter_app/assets/scripts/lxai_bridge.py`（App 分发给用户/导出 bat 用的是后者），
+  **没有自动同步机制**，靠手工 `Copy-Item`。两份当前逐字节相同，用 SHA256 核对。
 - **桥接脚本的下载路径只保留新名**（2026-10-01）：`server.ts` 原先同时挂了三个旧别名做兼容 ——
   `/deepseek_bridge.py`、`/api/download/deepseek_bridge.py`、`/api/download/bridge.py`。
   确认旧版 App 与历史教程都不再请求后**已全部下线**，现在只剩 `/lxai_bridge.py` 与

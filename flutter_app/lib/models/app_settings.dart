@@ -188,10 +188,29 @@ class AppSettings {
   // --- 打包固件常量 (随每次打包发布更新，不可被缓存篡改) ---
   static const String currentVersion = '1.0.1';
   static const int currentBuildNumber = 101;
-  static const String officialGithubOwner = 'lx00924-lx';
-  static const String officialGithubRepo = 'flutter-app';
-  static const String officialGithubUrl = 'https://github.com/lx00924-lx/flutter-app';
-  static const String officialGithubReleasesUrl = 'https://github.com/lx00924-lx/flutter-app/releases';
+
+  /// 仓库归属（用于更新检查与「关于」页展示）。
+  ///
+  /// ⚠️ fork / 自建部署**必须覆盖这两项**，否则 App 会去查原作者的 Releases
+  /// 并提示"有新版本"，用户点下去装成的是**原作者的包**。用 `--dart-define` 覆盖即可，
+  /// **不用改源码**：
+  ///
+  /// ```bash
+  /// flutter build apk --release \
+  ///   --dart-define=SERVER_BASE_URL=https://你的域名 \
+  ///   --dart-define=GITHUB_OWNER=你的GitHub用户名 \
+  ///   --dart-define=GITHUB_REPO=你的仓库名
+  /// ```
+  ///
+  /// 注意：这两个值的 setter 是**故意写空的**（见下面 `githubOwner` / `githubRepo`）——
+  /// 它们随包固化，不接受云端的旧缓存写入，避免"设置被同步成别人的仓库"。
+  static const String officialGithubOwner =
+      String.fromEnvironment('GITHUB_OWNER', defaultValue: 'lx00924-lx');
+  static const String officialGithubRepo =
+      String.fromEnvironment('GITHUB_REPO', defaultValue: 'flutter-app');
+  static const String officialGithubUrl =
+      'https://github.com/$officialGithubOwner/$officialGithubRepo';
+  static const String officialGithubReleasesUrl = '$officialGithubUrl/releases';
 
   // --- 直接展示项 ---
   String get githubOwner => officialGithubOwner;
@@ -491,8 +510,10 @@ class AppSettings {
       agentPermission: map['agentPermission']?.toString() ?? 'workspace-write',
       agentModel: map['agentModel']?.toString() ?? 'deepseek-v4-flash',
       agentPolish: map['agentPolish'] as bool? ?? true,
-      githubOwner: map['githubOwner']?.toString() ?? 'lx00924-lx',
-      githubRepo: map['githubRepo']?.toString() ?? 'flutter-app',
+      // 仓库归属不接受云端/缓存里的值：setter 是空的，这里传什么都会被忽略，
+      // 一律以随包固化的 officialGithub* 为准（防"设置被同步成别人的仓库"）。
+      githubOwner: officialGithubOwner,
+      githubRepo: officialGithubRepo,
       customDataPath: map['customDataPath']?.toString() ?? '',
       showDebugFab: map['showDebugFab'] as bool? ?? false,
     );

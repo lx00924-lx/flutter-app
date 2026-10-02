@@ -228,18 +228,18 @@ cp .env.example .env
 
 | 要改什么 | 在哪 | 不改会怎样 |
 | :--- | :--- | :--- |
-| **Release 分发源** | `src/App.tsx` 的 `GITHUB_REPO` | 你的官网「下载」区会列出并分发**作者的安装包** |
-| **写死的仓库链接（6 处）** | `src/components/Hero.tsx`（3 处）、`Navbar.tsx`（1 处）、`Downloads.tsx`（2 处） | 导航栏、Hero、下载区的按钮全部跳到**作者的仓库** |
-| **页面文案里的域名** | `src/components/Architecture.tsx` 第 54 行 | 你的官网上白纸黑字写着 `lx00924ai.top` |
+| **Release 分发源 / 全部 GitHub 链接** | `.env` 的 `VITE_GITHUB_REPO="你的用户名/你的仓库"` | 你官网上「下载」区会列出并分发**作者的安装包**，导航栏 / Hero / 页脚 / 下载按钮也全部跳到原仓库 |
+| **页面文案里的域名** | 无需改（`Architecture.tsx` 用 `getSiteHost()` 从 `VITE_SERVER_BASE_URL` 推导） | — |
 
-> 后两项是**写死的字符串**，没有环境变量可以覆盖，只能改源码。
+> `VITE_GITHUB_REPO` 不填时回落到 `src/config.ts` 里的 `DEFAULT_GITHUB_REPO`。
+> ⚠️ Vite 的环境变量是**构建期静态替换**，改完必须重新 `npm run build` 才生效。
 
 ### 5.3 App（`flutter_app/`）
 
 | 要改什么 | 在哪 | 不改会怎样 |
 | :--- | :--- | :--- |
 | **中继地址** | 打包时 `--dart-define=SERVER_BASE_URL=https://你的域名` | 登录、消息同步、设置漫游、扫码配对、桥接启动命令**全部指向作者的服务器**。登录页「前往官网注册」按钮打开的地址也取自它 |
-| **更新检查 / "官方仓库"** | `lib/models/app_settings.dart` 的 `officialGithubOwner` / `officialGithubRepo` | App 会去查**作者的** Releases 并提示"有新版本"，用户点下去就装成**作者的包**。⚠️ 这两个常量**故意设了空 setter 忽略缓存写入**（防篡改），所以**改不了配置、只能改源码重新打包** |
+| **更新检查 / "官方仓库"** | 打包时 `--dart-define=GITHUB_OWNER=你的用户名 --dart-define=GITHUB_REPO=你的仓库` | App 会去查**作者的** Releases 并提示"有新版本"，用户点下去就装成**作者的包**。<br>⚠️ 这两个值随包固化，**故意设了空 setter 忽略云端/缓存写入**（防"设置被同步成别人的仓库"），所以只能靠 `--dart-define` 或改源码，**不能在设置界面里改** |
 | **包名 / 显示名** | `android/app/build.gradle` 的 `namespace` 与 `applicationId`；`AndroidManifest.xml` 的 `android:label`；`windows/CMakeLists.txt` 的 `BINARY_NAME` | 与官方包**签名冲突、无法并存安装**，覆盖安装还会清掉用户数据 |
 | **版本号（两处，要一致）** | `pubspec.yaml` 的 `version` **和** `lib/models/app_settings.dart` 的 `currentVersion` / `currentBuildNumber` | 更新判断错乱（App 以为自己是旧版，反复提示更新） |
 | **Bridge 脚本（两份！）** | 仓库根 `lxai_bridge.py` **和** `flutter_app/assets/scripts/lxai_bridge.py` | 这两份是**逐字节相同的副本**（当前 SHA256 一致），**没有自动同步机制**。只改一份的话，App 分发给用户 / 导出的桥接脚本会回落到作者的服务器（脚本里的 `FALLBACK_SERVERS` 也写死了作者域名和两个已失效的 Cloud Run 地址） |
@@ -279,19 +279,21 @@ cp .env.example .env
 #    TURNSTILE_SECRET         = 你自己 Cloudflare 账号里的 secret
 #    VITE_TURNSTILE_SITE_KEY  = 同一个 widget 的 site key
 #    VITE_ALLOWED_HOSTS       = 你的域名
+#    VITE_GITHUB_REPO         = 你的用户名/你的仓库   ← 否则官网分发的是作者的安装包
 npm install && npm run build && npm start
 
 # 2) 反代 + HTTPS，并让反代【覆盖】X-Forwarded-For
 
 # 3) App
 cd flutter_app
-flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域名
-
-# 4) 只有"你也要对外分发安装包"时才需要：
-#    - src/App.tsx 的 GITHUB_REPO
-#    - src/components/{Hero,Navbar,Downloads}.tsx 里 6 处写死的链接
-#    - flutter_app/lib/models/app_settings.dart 的 officialGithubOwner / officialGithubRepo
+flutter build windows --release \
+  --dart-define=SERVER_BASE_URL=https://你的域名 \
+  --dart-define=GITHUB_OWNER=你的用户名 \
+  --dart-define=GITHUB_REPO=你的仓库
 ```
+
+> 上面这几项**全都有配置入口，不需要改任何源码**。真正只能改源码的是第 5.4 / 5.5 节的
+> 「安装器品牌」与「品牌名」—— 那属于"要不要做成自己的产品"的选择，不是能不能跑起来的前提。
 
 ---
 
@@ -321,6 +323,32 @@ python lxai_bridge.py --token "<App 里显示的配对 Token>" \
 
 唯一需要的第三方依赖是 `websockets`；未安装时会自动降级为 HTTP 长轮询通道。
 也支持环境变量：`SERVER_URL` / `HARNESS_URL`。
+
+**③ TLS 证书校验（默认开启，别随手关掉）**
+
+桥接**默认校验中继的 TLS 证书与主机名**（`ssl.create_default_context()`）。
+证书校验失败时会**明确报错并拒绝继续**，而不是降级重试：
+
+```
+[✗ TLS 证书校验失败] 无法确认对端就是真的中继服务器：
+    可能有人在中间人劫持，也可能是对端证书过期 / 自签名。
+    桥接已拒绝继续 —— 配对 Token 一旦泄露，对方就能驱动你这台电脑上的 Agent。
+```
+
+为什么这么严：桥接与中继之间传递的是**配对 Token**，拿到它就能驱动你这台电脑上的
+本地 Agent。如果能做中间人的攻击者（恶意 Wi-Fi、被劫持的代理、装了根证书的抓包工具）
+可以冒充中继，那么"能连上"反而是最坏的结果。
+
+确实需要放开的环境（**自签名证书的自建中继**、企业 MITM 代理）走**显式**开关，且启动时会打印醒目警告：
+
+```bash
+python lxai_bridge.py ... --insecure          # 等价于环境变量 LXAI_INSECURE_TLS=1
+```
+
+> ⚠️ 历史版本这里是无条件 `CERT_NONE` + `check_hostname=False` —— 也就是**根本不验证书**，
+> 而且 WebSocket 链路和 HTTP 长轮询链路行为还不一致（前者走库默认值会验、后者不验）。
+> 2026-10-02 已统一为"默认校验、显式降级"。用 App 启动桥接时它不传 `--insecure`，
+> 需要放开的话设系统环境变量 `LXAI_INSECURE_TLS=1`。
 
 **③ 端口填哪个 —— 取决于你用的是哪种 DSH**
 
@@ -403,6 +431,9 @@ Windows 端首次构建需要 VS C++ 工具链；Android 端需要 SDK 与 JDK�
 
 - **签名密钥（`key.properties` / `*.jks`）绝不能入库。** 一旦提交，任何 clone 仓库的人都能签出与你正式包同签名、可覆盖安装的 APK。
 - **`.env` 里的 SMTP 授权码与 Turnstile Secret 等同密码。** 拿到 SMTP 授权码就能用你的邮箱发信（会被用来发钓鱼邮件，后果算在你头上），拿到 Turnstile Secret 就能绕过人机验证批量注册。`.env` 已被 `.gitignore` 忽略，**不要提交、不要贴进聊天记录或截图**；怀疑泄露时去邮箱服务商后台重置授权码、在 Cloudflare 控制台轮换 Secret。
+- **`<部署目录>/.secrets/master.key` 是全部用户密钥的总钥匙。** 丢了 → 用户填的 API Key / Agent Token 永久解不开；泄露 → 等于泄露所有用户的密钥。要单独备份，**且不要和 `messages_data/` 放在同一个备份里**（那正是这一层设计要防的场景）。
+- **别关掉桥接的 TLS 证书校验。** `--insecure` / `LXAI_INSECURE_TLS=1` 只给自签名中继与企业代理用；开着它时，同网络里能做中间人的人可以冒充中继拿到配对 Token（= 直接驱动你电脑上的 Agent）。见 §六 ③。
+- **公网部署时，反代必须"覆盖"而不是"追加" `X-Forwarded-For`**，否则客户端能伪造 IP 绕过注册限流、或把限流栽赃到别人 IP 上。见 §5.1。
 - 服务端数据落盘在 `messages_data/`、媒体在 `messages_media/`，两者均已在 `.gitignore` 中，不会误提交用户数据。
 - 公网部署请自行配置 HTTPS 反向代理，并妥善保管 `messages_data/settings.json`（内含各用户的 API Key）。
 

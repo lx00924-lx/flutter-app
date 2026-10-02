@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Mail, Github, MessageSquare, Copy, Check, Heart, ExternalLink } from 'lucide-react';
+import { GITHUB_URL } from '../config';
 import { LegalDocModal, type LegalDoc } from './LegalDocModal';
 // 条款正文在构建时内联：与仓库根目录的 TERMS.md / PRIVACY.md 是同一份，不会各自漂移
 import termsMd from '../../TERMS.md?raw';
@@ -7,12 +8,13 @@ import privacyMd from '../../PRIVACY.md?raw';
 
 interface ContactFooterProps {
   userEmail?: string;
-  githubUrl: string;
+  /** 默认取 `VITE_GITHUB_REPO`（自建部署改 .env 即可，不用动源码） */
+  githubUrl?: string;
 }
 
 export const ContactFooter: React.FC<ContactFooterProps> = ({
   userEmail = 'lx00924@gmail.com',
-  githubUrl = 'https://github.com/lx00924-lx/flutter-app',
+  githubUrl = GITHUB_URL,
 }) => {
   const [copiedEmail, setCopiedEmail] = useState(false);
   const [openDoc, setOpenDoc] = useState<LegalDoc | null>(null);

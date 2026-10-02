@@ -7,9 +7,9 @@ import { Downloads } from './components/Downloads';
 import { ContactFooter } from './components/ContactFooter';
 import { RegisterModal } from './components/RegisterModal';
 import { DeleteAccountModal } from './components/DeleteAccountModal';
+import { GITHUB_REPO, GITHUB_URL } from './config';
 import { GitHubRelease, ReleaseAsset, RepoInfo } from './types/landing';
 
-const GITHUB_REPO = 'lx00924-lx/flutter-app';
 const GITHUB_API_BASE = 'https://api.github.com/repos';
 
 export default function App() {
@@ -150,7 +150,7 @@ export default function App() {
       {/* Footer & Contact Us */}
       <ContactFooter
         userEmail="lx00924@gmail.com"
-        githubUrl={`https://github.com/${GITHUB_REPO}`}
+        githubUrl={GITHUB_URL}
       />
 
       {/* 注册弹窗：邮箱验证码 + Turnstile + 一邮一号 */}

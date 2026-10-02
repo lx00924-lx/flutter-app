@@ -1,5 +1,6 @@
 import React from 'react';
 import { Download, Monitor, Smartphone, ExternalLink, CheckCircle2, ArrowRight } from 'lucide-react';
+import { GITHUB_RELEASES_URL, GITHUB_URL } from '../config';
 import { ReleaseAsset, GitHubRelease } from '../types/landing';
 
 interface HeroProps {
@@ -60,7 +61,7 @@ export const Hero: React.FC<HeroProps> = ({
               } else if (latestRelease?.html_url) {
                 window.open(latestRelease.html_url, '_blank');
               } else {
-                window.open('https://github.com/lx00924-lx/flutter-app/releases', '_blank');
+                window.open(GITHUB_RELEASES_URL, '_blank');
               }
             }}
             className="w-full sm:w-auto flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-2xl bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-semibold text-sm shadow-lg shadow-indigo-600/25 transition duration-150"
@@ -82,7 +83,7 @@ export const Hero: React.FC<HeroProps> = ({
               } else if (latestRelease?.html_url) {
                 window.open(latestRelease.html_url, '_blank');
               } else {
-                window.open('https://github.com/lx00924-lx/flutter-app/releases', '_blank');
+                window.open(GITHUB_RELEASES_URL, '_blank');
               }
             }}
             className="w-full sm:w-auto flex items-center justify-center gap-2.5 px-6 py-3.5 rounded-2xl bg-slate-900 hover:bg-slate-800 dark:bg-slate-100 dark:hover:bg-white dark:text-slate-900 active:scale-95 text-white font-semibold text-sm shadow-md transition duration-150"
@@ -98,7 +99,7 @@ export const Hero: React.FC<HeroProps> = ({
 
           {/* GitHub Source Code */}
           <a
-            href="https://github.com/lx00924-lx/flutter-app"
+            href={GITHUB_URL}
             target="_blank"
             rel="noreferrer"
             className="w-full sm:w-auto flex items-center justify-center gap-2 px-5 py-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-900 text-slate-700 dark:text-slate-200 font-semibold text-sm transition"

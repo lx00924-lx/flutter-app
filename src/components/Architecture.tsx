@@ -1,5 +1,6 @@
 import React from 'react';
 import { Smartphone, Monitor, Globe, Server, ArrowRight, ArrowLeftRight } from 'lucide-react';
+import { getSiteHost } from '../config';
 
 export const Architecture: React.FC = () => {
   return (
@@ -51,7 +52,7 @@ export const Architecture: React.FC = () => {
               高性能云端中继服务器
             </h4>
             <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed mb-4">
-              公网高速节点（`lx00924ai.top`），负责会话鉴权、Token 调度分配、设置增量漫游与信道桥接。
+              公网高速节点（`{getSiteHost()}`），负责会话鉴权、Token 调度分配、设置增量漫游与信道桥接。
             </p>
             <ul className="text-xs space-y-1.5 text-slate-500 dark:text-slate-400 font-medium">
               <li className="flex items-center gap-1.5">✓ 双端互斥登录心跳保活</li>

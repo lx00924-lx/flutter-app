@@ -384,6 +384,12 @@ def parse_args():
     parser.add_argument("--proxy", type=str, default=os.getenv("ALL_PROXY", os.getenv("HTTPS_PROXY", "")), help="手动指定代理服务器地址 (如 http://127.0.0.1:7890)")
     parser.add_argument("--log-file", type=str, default=os.getenv("BRIDGE_LOG_FILE", ""), help="把桥接输出同时落盘到这个文件（排查掉线/崩溃用；默认关闭）")
     parser.add_argument("--log-max-mb", type=float, default=float(os.getenv("BRIDGE_LOG_MAX_MB", "5")), help="落盘日志单文件上限 MB，超出自动轮转为 .1（默认 5）")
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        default=os.getenv("LXAI_INSECURE_TLS", "").strip().lower() in ("1", "true", "yes", "on"),
+        help="不校验对端 TLS 证书（自签名中继 / 企业 MITM 代理时才用；存在中间人风险，默认关闭）",
+    )
     return parser.parse_args()
 
 class _TeeSink:
@@ -751,21 +757,76 @@ FALLBACK_SERVERS = [
     "https://ais-dev-lswjsr25ivxdaulzx2iy3d-135884546184.asia-northeast1.run.app"
 ]
 
-def create_resilient_ssl_context():
-    try:
+def is_cert_error(exc: BaseException) -> bool:
+    """
+    判断异常是不是「TLS 证书校验失败」。
+
+    为什么要单独识别：证书问题**不是**"代理不通"，也不是"网络抖动" ——
+    它需要完全不同的处置（要么修证书，要么用户显式降级），
+    混在通用连接错误里只会得到一句看不懂的报错。
+    """
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return True
+    text = str(exc)
+    return (
+        "CERTIFICATE_VERIFY_FAILED" in text
+        or "certificate verify failed" in text
+        or "self signed certificate" in text
+        or "self-signed certificate" in text
+        or "certificate has expired" in text
+        or "Hostname mismatch" in text
+        or "IP address mismatch" in text
+    )
+
+
+def create_ssl_context(insecure: bool = False):
+    """
+    创建 HTTPS 用的 SSL 上下文。
+
+    ⚠️ **默认校验证书与主机名**（`ssl.create_default_context()`）。
+
+    历史上这里无条件返回 `check_hostname=False` + `verify_mode=CERT_NONE` 的上下文，
+    等于**对中继的所有 HTTPS 请求都不校验任何证书**。能做中间人的攻击者
+    （恶意 Wi-Fi、被劫持的代理、装了根证书的抓包工具）可以冒充中继，
+    拿到的直接就是 Agent 配对 Token —— 也就是"能远程驱动用户电脑上的 Agent"。
+    这个代价远大于"证书有问题时连不上"。
+
+    需要放开的环境（自签名中继 / 企业 MITM 代理）走**显式**开关：
+    命令行 `--insecure` 或环境变量 `LXAI_INSECURE_TLS=1`，且启动时打印醒目警告。
+    这是刻意的：安全降级必须是用户明确要求的，不能悄悄发生。
+    """
+    if insecure:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         return ctx
-    except Exception:
-        try:
-            return ssl._create_unverified_context()
-        except Exception:
-            return None
+    return ssl.create_default_context()
+
+
+def print_cert_error_help(target: str, err: BaseException):
+    """证书校验失败时给出**可操作**的说明，而不是甩一句 traceback。"""
+    print("\033[91m" + "=" * 70 + "\033[0m")
+    print("\033[91m[✗ TLS 证书校验失败]\033[0m 无法确认对端就是真的中继服务器：")
+    print(f"    目标: {target}")
+    print(f"    原因: {err}")
+    print("    可能有人在中间人劫持，也可能是对端证书过期 / 自签名。")
+    print("    桥接已拒绝继续 —— 配对 Token 一旦泄露，对方就能驱动你这台电脑上的 Agent。")
+    print("    怎么办：")
+    print("      1) 首选：换个可信网络，或关掉正在做 HTTPS 拦截的代理 / 抓包工具；")
+    print("      2) 若这是你自己部署的中继、确实用的自签名证书，确认无误后可显式放开：")
+    print("         python lxai_bridge.py ... --insecure")
+    print("         （等价于环境变量 LXAI_INSECURE_TLS=1；放开后本机对该中继不再校验证书）")
+    print("\033[91m" + "=" * 70 + "\033[0m")
+
 
 class ResilientHttpClient:
-    def __init__(self, force_no_proxy: bool = False, custom_proxy: str = "", primary_server: str = ""):
-        self.ssl_ctx = create_resilient_ssl_context()
+    def __init__(self, force_no_proxy: bool = False, custom_proxy: str = "", primary_server: str = "",
+                 insecure_tls: bool = False):
+        self.insecure_tls = insecure_tls
+        self.ssl_ctx = create_ssl_context(insecure=insecure_tls)
         self.force_no_proxy = force_no_proxy
         self.custom_proxy = (custom_proxy or "").strip()
         self.primary_server = primary_server.rstrip("/") if primary_server else "https://www.lx00924ai.top"
@@ -830,7 +891,9 @@ class ResilientHttpClient:
             except Exception as e:
                 last_error = e
                 err_str = str(e)
+                cert_failed = is_cert_error(e)
                 is_proxy_or_ssl_error = (
+                    cert_failed or
                     "10061" in err_str or
                     "refused" in err_str.lower() or
                     "proxy" in err_str.lower() or
@@ -841,7 +904,13 @@ class ResilientHttpClient:
                 
                 if is_proxy_or_ssl_error and self.active_opener != self.direct_opener:
                     if not self.has_switched_to_direct:
-                        print(f"\033[93m[🛡️ 网络自愈] 检测到系统代理不可用或 SSL 握手受阻，已自动熔断代理并切换至 Direct 直连！\033[0m")
+                        # 证书失败**也可能是代理在做 MITM**（换直连就正常），所以仍然试一次直连；
+                        # 但措辞要区别开，不能像以前那样一律说成"代理不可用或 SSL 握手受阻"。
+                        if cert_failed:
+                            print("\033[93m[🛡️ 网络自愈] 证书校验失败 —— 先尝试绕开代理直连；"
+                                  "若仍失败会明确报出证书问题（不会静默降级）\033[0m")
+                        else:
+                            print(f"\033[93m[🛡️ 网络自愈] 检测到系统代理不可用或 SSL 握手受阻，已自动熔断代理并切换至 Direct 直连！\033[0m")
                         self.has_switched_to_direct = True
                     self.active_opener = self.direct_opener
                     try:
@@ -856,14 +925,19 @@ class ResilientHttpClient:
                     continue
 
         if last_error:
+            # 证书问题单独给一份可操作的说明 —— 这是安全事件，不能混在通用网络错误里
+            if is_cert_error(last_error):
+                print_cert_error_help(url, last_error)
             raise last_error
         raise RuntimeError("所有网络候选节点均不可达")
 
 GLOBAL_HTTP_CLIENT = ResilientHttpClient()
 
-def init_global_http_client(force_no_proxy: bool = False, custom_proxy: str = "", primary_server: str = ""):
+def init_global_http_client(force_no_proxy: bool = False, custom_proxy: str = "", primary_server: str = "",
+                            insecure_tls: bool = False):
     global GLOBAL_HTTP_CLIENT
-    GLOBAL_HTTP_CLIENT = ResilientHttpClient(force_no_proxy=force_no_proxy, custom_proxy=custom_proxy, primary_server=primary_server)
+    GLOBAL_HTTP_CLIENT = ResilientHttpClient(force_no_proxy=force_no_proxy, custom_proxy=custom_proxy,
+                                             primary_server=primary_server, insecure_tls=insecure_tls)
 
 def http_post_json(url: str, data: dict, timeout: int = 15) -> dict:
     payload = json.dumps(data).encode("utf-8")
@@ -3067,7 +3141,16 @@ async def run_bridge_client(args):
     token = (args.token or "").strip()
     server_base = normalize_server_url(args.server)
     concurrency_limit = max(1, args.concurrency)
-    init_global_http_client(force_no_proxy=args.no_proxy, custom_proxy=args.proxy, primary_server=server_base)
+    insecure_tls = bool(getattr(args, "insecure", False))
+    init_global_http_client(force_no_proxy=args.no_proxy, custom_proxy=args.proxy,
+                            primary_server=server_base, insecure_tls=insecure_tls)
+
+    if insecure_tls:
+        print("\033[93m" + "!" * 70 + "\033[0m")
+        print("\033[93m[⚠️ 不安全模式] 已关闭 TLS 证书校验（--insecure / LXAI_INSECURE_TLS）。\033[0m")
+        print("\033[93m    本机将无法识别冒充中继的中间人，配对 Token 有被窃取的风险。\033[0m")
+        print("\033[93m    仅在你确知对端可信（自签名中继 / 企业代理）时使用。\033[0m")
+        print("\033[93m" + "!" * 70 + "\033[0m")
 
     # 未处理的异步任务异常默认只在任务被回收时打印，且可能被吞掉 —— 明确打出来，
     # 这样"某个后台协程炸了导致桥上掉线"能立刻在日志里看到。
@@ -3141,6 +3224,10 @@ async def run_bridge_client(args):
         return
 
     ws_url = normalize_ws_url(server_base, token)
+    # WebSocket 路径以前**没传** ssl 上下文，走的是 websockets 库自己的默认值（会校验证书）——
+    # 也就是说以前"HTTP 长轮询不验证书、WebSocket 又验证书"，两条链路行为不一致。
+    # 现在统一：都用同一个上下文，--insecure 对两条链路同时生效。
+    ws_ssl_ctx = create_ssl_context(insecure=bool(getattr(args, "insecure", False))) if ws_url.startswith("wss://") else None
     ws_fail_count = 0
     while True:
         try:
@@ -3148,7 +3235,8 @@ async def run_bridge_client(args):
                 ws_url,
                 ping_interval=20,
                 ping_timeout=20,
-                max_size=25 * 1024 * 1024
+                max_size=25 * 1024 * 1024,
+                ssl=ws_ssl_ctx
             ) as ws:
                 print(f"\033[92m[✓ 成功上线] 已与 App 服务器建立安全 WebSocket 长连接！等待任务下发...\033[0m")
                 ws_fail_count = 0

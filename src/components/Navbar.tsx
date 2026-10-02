@@ -1,5 +1,6 @@
 import React from 'react';
 import { Sparkles, Sun, Moon, Github, Mail, UserPlus } from 'lucide-react';
+import { GITHUB_URL } from '../config';
 
 interface NavbarProps {
   isDarkMode: boolean;
@@ -71,7 +72,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* GitHub Repo Button */}
           <a
-            href="https://github.com/lx00924-lx/flutter-app"
+            href={GITHUB_URL}
             target="_blank"
             rel="noreferrer"
             className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 bg-slate-100/80 dark:bg-slate-900/80 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-200/70 dark:hover:bg-slate-800 transition shadow-sm"
