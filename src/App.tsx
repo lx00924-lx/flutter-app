@@ -6,6 +6,7 @@ import { Architecture } from './components/Architecture';
 import { Downloads } from './components/Downloads';
 import { ContactFooter } from './components/ContactFooter';
 import { RegisterModal } from './components/RegisterModal';
+import { DeleteAccountModal } from './components/DeleteAccountModal';
 import { GitHubRelease, ReleaseAsset, RepoInfo } from './types/landing';
 
 const GITHUB_REPO = 'lx00924-lx/flutter-app';
@@ -26,6 +27,7 @@ export default function App() {
   // 官网**只做注册、不做登录**：服务端按「1 手机 + 1 电脑」分槽做单点互斥，
   // 网页端一旦登录就得决定它占哪个槽，会牵动那套很微妙的互斥逻辑，不值当。
   const [showRegister, setShowRegister] = useState(false);
+  const [showDeleteAccount, setShowDeleteAccount] = useState(false);
 
   // GitHub Release data
   const [latestRelease, setLatestRelease] = useState<GitHubRelease | null>(null);
@@ -152,7 +154,16 @@ export default function App() {
       />
 
       {/* 注册弹窗：邮箱验证码 + Turnstile + 一邮一号 */}
-      <RegisterModal open={showRegister} onClose={() => setShowRegister(false)} />
+      <RegisterModal
+        open={showRegister}
+        onClose={() => setShowRegister(false)}
+        onDeleteAccount={() => {
+          // 两个弹窗互斥：切到注销时先关掉注册，避免叠在一起
+          setShowRegister(false);
+          setShowDeleteAccount(true);
+        }}
+      />
+      <DeleteAccountModal open={showDeleteAccount} onClose={() => setShowDeleteAccount(false)} />
     </div>
   );
 }

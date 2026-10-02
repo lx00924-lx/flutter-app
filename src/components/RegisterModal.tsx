@@ -22,11 +22,13 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 type Props = {
   open: boolean;
   onClose: () => void;
+  /** 打开「注销账号」弹窗：注销同样靠邮箱验证码，入口放在注册弹窗里最顺手 */
+  onDeleteAccount?: () => void;
 };
 
 type Hint = { type: 'ok' | 'err'; text: string } | null;
 
-export function RegisterModal({ open, onClose }: Props) {
+export function RegisterModal({ open, onClose, onDeleteAccount }: Props) {
   const [email, setEmail] = useState('');
   const [code, setCode] = useState('');
   const [username, setUsername] = useState('');
@@ -328,6 +330,20 @@ export function RegisterModal({ open, onClose }: Props) {
             <p className="text-center text-[11px] leading-relaxed text-slate-400">
               注册即表示同意用户协议与隐私政策。官网只负责注册，登录请在客户端进行。
             </p>
+
+            {onDeleteAccount && (
+              <p className="text-center text-[11px] leading-relaxed text-slate-400">
+                已有账号想注销？
+                <button
+                  type="button"
+                  onClick={onDeleteAccount}
+                  className="ml-0.5 text-rose-500 underline-offset-2 transition hover:text-rose-600 hover:underline"
+                >
+                  注销账号
+                </button>
+                （需邮箱验证码验证身份）
+              </p>
+            )}
           </form>
         )}
       </div>

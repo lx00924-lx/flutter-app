@@ -565,25 +565,65 @@ async function verifyTurnstile(
   }
 }
 
-/** 发送验证码邮件 */
-async function sendVerificationMail(to: string, code: string): Promise<void> {
+/** 邮件场景：注册验证码 / 注销验证码 / 注销完成通知 */
+type MailScene = "register" | "delete" | "deleted";
+
+/**
+ * 邮箱脱敏：`lx00924@gmail.com` → `l******@gmail.com`。
+ * 注销流程里要把"验证码发到哪了"回显给用户，又不能把完整地址暴露在响应里
+ *（响应可能被日志、代理、浏览器插件看到）。
+ */
+function maskEmail(email: string): string {
+  const at = email.indexOf("@");
+  if (at <= 0) return "***";
+  const name = email.slice(0, at);
+  const domain = email.slice(at);
+  return name.slice(0, 1) + "*".repeat(Math.max(3, name.length - 1)) + domain;
+}
+
+/** 发送邮件（验证码 / 注销通知），按场景换文案 */
+async function sendVerificationMail(
+  to: string,
+  code: string,
+  scene: MailScene = "register",
+): Promise<void> {
   const transport = getMailTransport();
   if (!transport) throw new Error("SMTP 未配置");
   const minutes = Math.round(CODE_TTL_MS / 60000);
+
+  const title =
+    scene === "register" ? "注册验证码" : scene === "delete" ? "注销账号验证码" : "账号已注销";
+  const lead =
+    scene === "register"
+      ? `你的 ${SMTP_FROM_NAME} 注册验证码是：`
+      : scene === "delete"
+        ? `你正在注销 ${SMTP_FROM_NAME} 账号，验证码是：`
+        : `你的 ${SMTP_FROM_NAME} 账号已注销。`;
+  const tail =
+    scene === "deleted"
+      ? `与该账号相关的聊天记录、设置与会话数据均已删除，且不可恢复。<br>` +
+        `如果这不是你本人的操作，请立即重新注册并修改你的邮箱密码。`
+      : `有效期 ${minutes} 分钟，请勿转发给他人。<br>` +
+        `如果这不是你本人的操作，忽略本邮件即可，你的账号不会有任何变化。`;
+
   await transport.sendMail({
     from: `"${SMTP_FROM_NAME}" <${SMTP_FROM}>`,
     to,
-    subject: `【${SMTP_FROM_NAME}】注册验证码：${code}`,
+    subject: scene === "deleted" ? `【${SMTP_FROM_NAME}】${title}` : `【${SMTP_FROM_NAME}】${title}：${code}`,
     text:
-      `你的 ${SMTP_FROM_NAME} 注册验证码是：${code}\n` +
-      `有效期 ${minutes} 分钟，请勿转发给他人。\n\n` +
-      `如果这不是你本人的操作，忽略本邮件即可。`,
+      `${lead}${scene === "deleted" ? "" : code}\n` +
+      (scene === "deleted"
+        ? `与该账号相关的聊天记录、设置与会话数据均已删除，且不可恢复。\n` +
+          `如果这不是你本人的操作，请立即重新注册并修改你的邮箱密码。`
+        : `有效期 ${minutes} 分钟，请勿转发给他人。\n\n` +
+          `如果这不是你本人的操作，忽略本邮件即可，你的账号不会有任何变化。`),
     html:
       `<div style="font-family:-apple-system,'Segoe UI',sans-serif;max-width:480px">` +
-      `<p style="color:#334155">你的 ${SMTP_FROM_NAME} 注册验证码是：</p>` +
-      `<p style="font-size:30px;font-weight:700;letter-spacing:6px;color:#0284C7;margin:14px 0">${code}</p>` +
-      `<p style="color:#64748B;font-size:13px">有效期 ${minutes} 分钟，请勿转发给他人。<br>` +
-      `如果这不是你本人的操作，忽略本邮件即可。</p></div>`,
+      `<p style="color:#334155">${lead}</p>` +
+      (scene === "deleted"
+        ? ""
+        : `<p style="font-size:30px;font-weight:700;letter-spacing:6px;color:#0284C7;margin:14px 0">${code}</p>`) +
+      `<p style="color:#64748B;font-size:13px">${tail}</p></div>`,
   });
 }
 
@@ -2164,6 +2204,201 @@ async function startServer() {
       console.error(`Registration error for ${username}:`, e);
       res.status(500).json({ error: "注册失败，请稍后重试" });
     }
+  });
+
+  /**
+   * 注销账号 · 第一步：把验证码发到**账号绑定的邮箱**。
+   *
+   * ⚠️ 这里最关键的一点：验证码发给**服务端从 users.json 里查出来的邮箱**，
+   *    而不是用户在表单里当场填的邮箱。否则任何人只要知道别人的账号名，
+   *    就能把验证码发到自己邮箱、进而把别人的账号注销掉。
+   *
+   * 这也是"注销放在官网"的技术原因：官网没有登录态（我们刻意没做，避免牵动
+   * 「1 手机 + 1 电脑」的槽位互斥），所以证明身份只能靠邮箱验证码 —— 正好与需求吻合。
+   */
+  app.post("/api/account/delete-code", async (req, res) => {
+    const ip = clientIpOf(req);
+    const username = String(req.body?.username ?? "").trim();
+    const turnstileToken = String(req.body?.turnstileToken ?? "");
+
+    if (!username) {
+      return res.status(400).json({ error: "请填写要注销的账号名" });
+    }
+    if (!MAIL_READY) {
+      return res.status(503).json({ error: "服务端尚未配置邮件发送，暂时无法自助注销" });
+    }
+
+    // 防账号存在性探测：这个接口每次请求都计数（包括猜账号名的）
+    const probe = rateLimitHit(`acct:ip:h:${ip}`, 60 * 60 * 1000, 30);
+    if (!probe.ok) {
+      return res.status(429).json({ error: "操作过于频繁，请稍后再试", retryAfterSec: probe.retryAfterSec });
+    }
+
+    const ts = await verifyTurnstile(turnstileToken, ip);
+    if (!ts.ok) {
+      return res.status(403).json({ error: ts.reason || "人机验证未通过" });
+    }
+
+    const users = await safeReadJSON<any[]>(USERS_FILE, []);
+    const user = users.find((u: any) => u.username === username);
+    if (!user) {
+      return res.status(404).json({ error: "账号不存在" });
+    }
+    const email = normalizeEmail(user.email);
+    if (!email) {
+      return res.status(409).json({
+        error: "该账号未绑定邮箱（注册功能上线前创建的），无法通过邮箱验证自助注销",
+      });
+    }
+
+    // 独立 key 空间：注销码和注册码互不干扰
+    const codeKey = `delete:${email}`;
+    const prev = emailCodes.get(codeKey);
+    if (prev && Date.now() - prev.sentAt < CODE_RESEND_COOLDOWN_MS) {
+      const wait = Math.ceil((CODE_RESEND_COOLDOWN_MS - (Date.now() - prev.sentAt)) / 1000);
+      return res.status(429).json({ error: `请等待 ${wait} 秒后再试`, retryAfterSec: wait });
+    }
+
+    const qEmail = rateLimitPeek(`del:email:${email}`, 10 * 60 * 1000, CODE_PER_EMAIL_10MIN);
+    if (!qEmail.ok) {
+      return res.status(429).json({ error: "该邮箱发送过于频繁，请稍后再试", retryAfterSec: qEmail.retryAfterSec });
+    }
+    const qIp = rateLimitPeek(`del:ip:d:${ip}`, 24 * 60 * 60 * 1000, CODE_PER_IP_DAY);
+    if (!qIp.ok) {
+      return res.status(429).json({ error: "今日发送次数已达上限", retryAfterSec: qIp.retryAfterSec });
+    }
+
+    const code = String(randomInt(100000, 1000000));
+    emailCodes.set(codeKey, {
+      code,
+      expiresAt: Date.now() + CODE_TTL_MS,
+      attempts: 0,
+      sentAt: Date.now(),
+    });
+    try {
+      await sendVerificationMail(email, code, "delete");
+    } catch (e: any) {
+      emailCodes.delete(codeKey);
+      console.error("[DeleteAccount] 注销验证码发送失败:", e?.message || e);
+      return res.status(500).json({ error: "验证码邮件发送失败，请稍后重试" });
+    }
+    rateLimitHit(`del:email:${email}`, 10 * 60 * 1000, CODE_PER_EMAIL_10MIN);
+    rateLimitHit(`del:ip:d:${ip}`, 24 * 60 * 60 * 1000, CODE_PER_IP_DAY);
+
+    console.log(`[DeleteAccount] 已向 ${maskEmail(email)} 发送注销验证码（user=${username} ip=${ip}）`);
+    res.json({
+      ok: true,
+      maskedEmail: maskEmail(email), // 脱敏回显：让用户知道发哪了，又不暴露完整地址
+      expiresInSec: Math.round(CODE_TTL_MS / 1000),
+      cooldownSec: Math.round(CODE_RESEND_COOLDOWN_MS / 1000),
+    });
+  });
+
+  /**
+   * 注销账号 · 第二步：验证通过后删除账号与全部关联数据。
+   *
+   * 删除范围（都是 `{ [username]: ... }` 结构，按账号名整键移除）：
+   *   users.json / messages_v2.json / settings.json / active_sessions.json
+   *
+   * ⚠️ **不删媒体文件**：`messages_media/` 里的文件名是 multer 随机生成的，
+   *    不含用户信息，无法可靠判定归属 —— 宁可少删，也不能误删别人的文件。
+   *    要支持的话，得先把上传改成"按 userId 建子目录"。
+   * ⚠️ 内存里的 Agent 任务、WebSocket 连接不在删除范围内，它们会随任务超时/断连自然失效。
+   */
+  app.post("/api/account/delete", async (req, res) => {
+    const ip = clientIpOf(req);
+    const username = String(req.body?.username ?? "").trim();
+    const code = String(req.body?.code ?? "").trim();
+
+    if (!username || !code) {
+      return res.status(400).json({ error: "缺少账号名或验证码" });
+    }
+
+    const probe = rateLimitHit(`acct:ip:h:${ip}`, 60 * 60 * 1000, 30);
+    if (!probe.ok) {
+      return res.status(429).json({ error: "操作过于频繁，请稍后再试", retryAfterSec: probe.retryAfterSec });
+    }
+
+    const users = await safeReadJSON<any[]>(USERS_FILE, []);
+    const user = users.find((u: any) => u.username === username);
+    if (!user) {
+      return res.status(404).json({ error: "账号不存在" });
+    }
+    const email = normalizeEmail(user.email);
+    if (!email) {
+      return res.status(409).json({ error: "该账号未绑定邮箱，无法自助注销" });
+    }
+
+    // ── 验证码校验（与注册同一套规则：有效期 + 最多 5 次尝试）──
+    const codeKey = `delete:${email}`;
+    const entry = emailCodes.get(codeKey);
+    if (!entry) {
+      return res.status(400).json({ error: "请先获取注销验证码" });
+    }
+    if (Date.now() > entry.expiresAt) {
+      emailCodes.delete(codeKey);
+      return res.status(400).json({ error: "验证码已过期，请重新获取" });
+    }
+    if (entry.attempts >= CODE_MAX_ATTEMPTS) {
+      emailCodes.delete(codeKey);
+      return res.status(429).json({ error: "验证码错误次数过多，请重新获取" });
+    }
+    if (entry.code !== code) {
+      entry.attempts += 1;
+      const left = CODE_MAX_ATTEMPTS - entry.attempts;
+      console.warn(`[DeleteAccount] 注销验证码不匹配 user=${username} 已错 ${entry.attempts} 次`);
+      return res.status(400).json({
+        error: left > 0 ? `验证码不正确，还可尝试 ${left} 次` : "验证码错误次数过多，请重新获取",
+      });
+    }
+
+    // ── 执行删除 ──────────────────────────────────────────────
+    const removed: Record<string, number> = {};
+    try {
+      // 1) 账号本体
+      await withFileLock(USERS_FILE, async () => {
+        const all = await safeReadJSON<any[]>(USERS_FILE, []);
+        const kept = all.filter((u: any) => u.username !== username);
+        removed.users = all.length - kept.length;
+        await safeWriteJSON(USERS_FILE, kept);
+      });
+
+      // 2) 以账号名为顶层键的三个数据文件
+      const targets: Array<[string, string]> = [
+        [MESSAGES_FILE, "messages"],
+        [SETTINGS_FILE, "settings"],
+        [ACTIVE_SESSIONS_FILE, "sessions"],
+      ];
+      for (const [file, label] of targets) {
+        await withFileLock(file, async () => {
+          const obj = await safeReadJSON<Record<string, any>>(file, {});
+          if (obj && Object.prototype.hasOwnProperty.call(obj, username)) {
+            delete obj[username];
+            removed[label] = 1;
+            await safeWriteJSON(file, obj);
+          }
+        });
+      }
+
+      // 3) 内存里的注销验证码
+      emailCodes.delete(codeKey);
+
+      console.log(
+        `[DeleteAccount] 账号已注销: ${username} <${maskEmail(email)}> (ip=${ip}) 删除: ${JSON.stringify(removed)}`,
+      );
+    } catch (e: any) {
+      console.error("[DeleteAccount] 删除失败:", e?.message || e);
+      return res.status(500).json({ error: "注销过程中出错，请稍后重试或联系管理员" });
+    }
+
+    // ── 注销成功通知（不给"被莫名注销"留说不清的余地）──
+    try {
+      await sendVerificationMail(email, "", "deleted");
+    } catch (e: any) {
+      console.warn("[DeleteAccount] 注销通知邮件发送失败（不影响注销结果）:", e?.message || e);
+    }
+
+    res.json({ ok: true, removed });
   });
 
   app.post("/api/login", async (req, res) => {
