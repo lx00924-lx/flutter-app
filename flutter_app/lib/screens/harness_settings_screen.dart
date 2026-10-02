@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
 import '../config/app_config.dart';
 import '../utils/bridge_script_helper.dart';
+import '../utils/startup_helper.dart';
 import '../services/sync_service.dart';
 import '../services/bridge_process_manager.dart';
 import 'scanner_screen.dart';
@@ -175,9 +176,28 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     setState(() => _tokenCtrl.text = latest);
   }
 
+  /// 开机自动启动（仅 Windows）。
+  ///
+  /// 状态**不放在 AppSettings 里**：开机自启是"这台设备"的属性而不是账号的属性，
+  /// 让它跟着云端同步反而会串味（在 A 电脑开的开关影响 B 电脑）。真相只有注册表里的那一项，
+  /// 所以这里每次都从注册表读回来。详见 `StartupHelper`。
+  bool _launchAtStartup = false;
+  bool _launchAtStartupLoaded = false;
+
+  Future<void> _loadLaunchAtStartup() async {
+    if (!StartupHelper.supported) return;
+    final on = await StartupHelper.isEnabled();
+    if (!mounted) return;
+    setState(() {
+      _launchAtStartup = on;
+      _launchAtStartupLoaded = true;
+    });
+  }
+
   @override
   void initState() {
     super.initState();
+    unawaited(_loadLaunchAtStartup());
     final s = context.read<SettingsProvider>().settings;
     _tokenCtrl = TextEditingController(text: s.harnessToken);
     var urlText = s.harnessServiceUrl.trim();
@@ -848,6 +868,42 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                           );
                         },
                       ),
+                      // 开机自动启动：只在 Windows 出现，且**与上面那个是两件事** ——
+                      // 上面管"App 起来后要不要拉桥接"，这个管"开机会不会自动把 App 拉起来"。
+                      if (Platform.isWindows) ...[
+                        const SizedBox(height: 4),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('开机自动启动', style: TextStyle(fontSize: 14)),
+                          subtitle: Text(
+                            !_launchAtStartupLoaded
+                                ? '正在读取注册表…'
+                                : (_launchAtStartup
+                                    ? '已开启：登录 Windows 后自动启动 LxAI'
+                                    : '已关闭：需要手动打开 LxAI'),
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                          value: _launchAtStartup,
+                          onChanged: (val) async {
+                            // 先乐观更新，写完再回读注册表校准 —— 被安全软件拦下时界面不会骗人
+                            setState(() => _launchAtStartup = val);
+                            await StartupHelper.setEnabled(val);
+                            final actual = await StartupHelper.isEnabled();
+                            if (!mounted) return;
+                            setState(() {
+                              _launchAtStartup = actual;
+                              _launchAtStartupLoaded = true;
+                            });
+                            _snack(
+                              actual == val
+                                  ? (val ? '已开启开机自动启动' : '已关闭开机自动启动')
+                                  : '设置没生效（可能被安全软件拦截），当前状态：'
+                                      '${actual ? "已开启" : "已关闭"}',
+                              isError: actual != val,
+                            );
+                          },
+                        ),
+                      ],
                     ],
                     const SizedBox(height: 16),
                     SwitchListTile(
