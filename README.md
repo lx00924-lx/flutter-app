@@ -20,7 +20,7 @@ Flutter 纯原生多端客户端（Android / Windows） · Node + React 官网�
 | **② 多端 App 客户端** | `flutter_app/` | Flutter（纯原生，无 WebView 套壳） | 手机/电脑遥控端：聊天、语音、扫码配对、本地 Agent 控制 |
 | **③ 本地反向长连接 Bridge** | `lxai_bridge.py` | Python 3.8+ | 跑在**无公网 IP** 的电脑上，主动向云端建立反向长连接，把本地 Harness 暴露给 App |
 
-核心能力：单点登录设备互斥（1 台手机 + 1 台电脑）、消息增量漫游、全局设置云端同步、扫码即配对。
+核心能力：官网邮箱注册与自助注销、单点登录设备互斥（1 台手机 + 1 台电脑）、消息增量漫游、全局设置云端同步、扫码即配对。
 
 ---
 
@@ -57,6 +57,46 @@ npm start
 ```
 
 浏览器打开 `http://localhost:3000` 即可看到 LxAI 官网介绍与下载门户。
+
+### 3.1 开启「官网注册 / 自助注销」（可选；对外提供服务时建议开）
+
+注册与注销**只在官网进行，App 内没有注册入口** —— App 登录页底部只留一个
+「还没有账号？点击前往官网注册」的跳转（用系统默认浏览器打开官网）。
+
+| 功能 | 位置 | 流程 |
+| :--- | :--- | :--- |
+| **注册** | 官网右上角「注册」 | 填邮箱 → 收邮箱验证码 → 填账号名与密码。**一个邮箱只能注册一个账号**（一邮一号） |
+| **注销** | 官网注册弹窗底部「注销账号」 | 验证码发到**该账号绑定的邮箱** → 验证通过后永久删除账号及其云端数据 |
+
+两条链路都强制 **Cloudflare Turnstile** 人机验证，并带发送冷却（60 秒）与频率配额。
+
+> **为什么注册不放 App 里**：邮箱验证码、人机验证这类东西本来就该在浏览器里做；
+> 而且官网刻意**没有登录态**，注册流程完全不碰「1 台手机 + 1 台电脑」的单点互斥逻辑
+>（网页端一旦登录就得占某个槽位，会牵动那套很微妙的互斥判断）。
+
+不配置下面两项时，注册接口会**明确返回 503 / 拒绝**，不会静默失败：
+
+```bash
+cp .env.example .env
+# —— 第一段：SMTP 发信（验证码邮件）——
+# SMTP_HOST / SMTP_PORT / SMTP_SECURE / SMTP_USER / SMTP_PASS / SMTP_FROM / SMTP_FROM_NAME
+#   用邮箱服务商给的**授权码**，不要用登录密码。
+#   ⚠️ SMTP_SECURE 的语义是「连上就立刻 TLS（隐式 TLS）」而不是「启用加密」：
+#      465 填 1；587 是"先明文再 STARTTLS"，必须填 0，否则报
+#      SSL routines:tls_validate_record_header:wrong version number。
+#      0 / false / no / off 都算假。
+# —— 第二段：Cloudflare Turnstile ——
+# TURNSTILE_SECRET        服务端密钥（只给后端，绝不要放进前端）
+# VITE_TURNSTILE_SITE_KEY 前端站点密钥，**构建时**注入 —— 改完要 npm run build 才生效
+```
+
+> **注销会删什么、不删什么**（页面完成时会如实回显实际删除项）：
+> `users.json`（账号本体）、`messages_v2.json`（聊天记录）、`settings.json`（云端设置）、
+> `active_sessions.json`（登录槽位）里该账号的部分会被删除；
+> **`messages_media/` 里的图片 / 语音等媒体文件不删** —— 那些文件名是随机生成的、不含用户信息，
+> 无法可靠判定归属，宁可少删也不误删他人的文件。要支持得先把上传改成"按 userId 建子目录"。
+>
+> 另外，注册功能上线前创建的**老账号没有绑定邮箱**，无法邮箱验证自助注销，接口会返回 409 并说明原因。
 
 ---
 
@@ -135,8 +175,10 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://your-domai
 flutter run                                 --dart-define=SERVER_BASE_URL=http://192.168.1.10:3000
 ```
 
-该参数会统一作用于 App 的**全部**中继通信与本地 Bridge 启动命令：登录、注册、消息同步、
+该参数会统一作用于 App 的**全部**中继通信与本地 Bridge 启动命令：登录、消息同步、
 设置漫游、扫码配对、以及 App 内「一键启动 / 下载 bat / 二维码」里生成的 `--server` 地址。
+登录页「还没有账号？点击前往官网注册」按钮打开的地址同样取自它 ——
+所以自建部署时**不需要改任何源码**，注册链接会自动指向你自己的站点。
 
 不传该参数时，默认指向本项目作者的生产环境地址（见 `flutter_app/lib/config/app_config.dart`）。
 
@@ -267,6 +309,7 @@ Windows 端首次构建需要 VS C++ 工具链；Android 端需要 SDK 与 JDK�
 ## 八、安全提醒
 
 - **签名密钥（`key.properties` / `*.jks`）绝不能入库。** 一旦提交，任何 clone 仓库的人都能签出与你正式包同签名、可覆盖安装的 APK。
+- **`.env` 里的 SMTP 授权码与 Turnstile Secret 等同密码。** 拿到 SMTP 授权码就能用你的邮箱发信（会被用来发钓鱼邮件，后果算在你头上），拿到 Turnstile Secret 就能绕过人机验证批量注册。`.env` 已被 `.gitignore` 忽略，**不要提交、不要贴进聊天记录或截图**；怀疑泄露时去邮箱服务商后台重置授权码、在 Cloudflare 控制台轮换 Secret。
 - 服务端数据落盘在 `messages_data/`、媒体在 `messages_media/`，两者均已在 `.gitignore` 中，不会误提交用户数据。
 - 公网部署请自行配置 HTTPS 反向代理，并妥善保管 `messages_data/settings.json`（内含各用户的 API Key）。
 

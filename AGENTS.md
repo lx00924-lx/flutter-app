@@ -15,6 +15,14 @@
 ## 3. 云端同步与持久化规范
 - **设置云端漫游**：Flutter 客户端（`SyncService` / `SettingsProvider`）与服务端（`/api/settings/:userId`）已建立双向增量防抖同步，换机或清除缓存登录即自动恢复所有 API 端点卡片、模型及外观设置。
 - **单点登录互斥**：服务端严格维持 1 台手机 + 1 台电脑并行的互斥登录心跳策略。
+- **账号注册与注销只在官网**（2026-10-02 起，别再往 App 里加注册）：
+  - **注册**：官网 `POST /api/register` 要求 `{username, password, email, code}` —— 邮箱验证码 + Cloudflare Turnstile + **一邮一号**。App 登录页**已无注册入口**（`login_screen.dart` 只留「还没有账号？点击前往官网注册」跳转，用 `UrlLauncherHelper.openUrl(AppConfig.normalizedServerBaseUrl)`）。
+    ⚠️ `SyncService.registerWithServer` / `SettingsProvider.registerWithServer` 已标 `@Deprecated`，只发 `username`+`password`，**调用必定被 400 打回**。
+  - **注销**：`POST /api/account/delete-code`（发码）+ `POST /api/account/delete`（执行）。验证码**只发给服务端从 `users.json` 查出的绑定邮箱**，前端不提供"接收验证码的邮箱"输入框 —— 否则填别人的账号名 + 自己的邮箱就能注销别人的账号。
+  - **删除范围**：`users.json`（数组，按用户名过滤）、`messages_v2.json` / `settings.json` / `active_sessions.json`（按用户名整键移除），各自在 `withFileLock` 内完成。
+    ⚠️ **`messages_media/` 刻意不删**：文件名是 multer 随机生成的、不含用户信息，无法可靠判定归属，宁可少删也不误删他人文件。要支持得先把上传改成"按 userId 建子目录"。
+  - 前置配置：`.env` 里的 SMTP（用授权码，不是登录密码；`SMTP_SECURE` 语义是"连上就立刻 TLS"，465 填 1、587 必须填 0）与 `TURNSTILE_SECRET` / `VITE_TURNSTILE_SITE_KEY`（后者是**构建期**注入，改完要 `npm run build`）。未配置时接口**明确返回 503/拒绝**，不静默失败。
+  - 回归测试脚本：`F:\ai\flutter\lxai-delete-test\run-test.cjs`（本地沙箱实例 + 自建 SMTP 接收器，跑真实 `dist/server.cjs`，32 项断言）。
 
 ## 4. 操作与删除安全规范
 - **严格确认机制**：只有在用户明确给出“确认更改”、“可以”等肯定指令后方可进行文件修改或写入操作；在日常咨询或问答中，只解释原因和提供建议。
