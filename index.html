@@ -9,6 +9,13 @@
     <meta property="og:description" content="LxAI 官方开源介绍与下载门户。纯原生 Flutter 多端客户端、云端高性能中继与电脑端反向穿透，随时随地连接私有模型与工作区。" />
     <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!--
+      Cloudflare Turnstile（注册页的人机验证）。
+      异步加载：RegisterModal 里会轮询等 window.turnstile 就绪再显式渲染，
+      所以这里用 async defer 即可，不会阻塞首屏。
+      site key 走构建期环境变量 VITE_TURNSTILE_SITE_KEY（见 src/components/RegisterModal.tsx）。
+    -->
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
   </head>
   <body>
     <div id="root"></div>

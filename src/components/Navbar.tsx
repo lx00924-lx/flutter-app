@@ -1,11 +1,13 @@
 import React from 'react';
-import { Sparkles, Sun, Moon, Github, Mail } from 'lucide-react';
+import { Sparkles, Sun, Moon, Github, Mail, UserPlus } from 'lucide-react';
 
 interface NavbarProps {
   isDarkMode: boolean;
   onToggleTheme: () => void;
   repoStars: number | null;
   repoForks: number | null;
+  /** 打开官网注册弹窗 —— 官网只做注册，登录仍在客户端 */
+  onRegister: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -13,6 +15,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onToggleTheme,
   repoStars,
   repoForks,
+  onRegister,
 }) => {
   return (
     <header className="sticky top-0 z-50 w-full border-b border-slate-200/80 dark:border-slate-800/80 bg-white/80 dark:bg-slate-950/80 backdrop-blur-md transition-colors">
@@ -55,6 +58,16 @@ export const Navbar: React.FC<NavbarProps> = ({
           </nav>
 
           <div className="h-4 w-px bg-slate-200 dark:bg-slate-800 hidden md:block" />
+
+          {/* 注册入口（官网只负责注册，登录仍在客户端） */}
+          <button
+            onClick={onRegister}
+            className="flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-xs font-semibold text-white transition shadow-sm shadow-indigo-500/20"
+            title="注册 LxAI 账号"
+          >
+            <UserPlus className="w-4 h-4" />
+            <span className="hidden sm:inline">注册</span>
+          </button>
 
           {/* GitHub Repo Button */}
           <a

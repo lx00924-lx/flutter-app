@@ -1,7 +1,8 @@
 import "dotenv/config";
 import express from "express";
 import bcrypt from "bcryptjs";
-import { randomBytes, randomUUID, createCipheriv, createDecipheriv } from "crypto";
+import nodemailer, { type Transporter } from "nodemailer";
+import { randomBytes, randomUUID, randomInt, createCipheriv, createDecipheriv } from "crypto";
 import FormData from "form-data";
 import { createServer } from "http";
 import { Server } from "socket.io";
@@ -387,6 +388,172 @@ const startRetentionSweeper = (): void => {
 // 自建部署无需改代码：设置环境变量 SERVER_BASE_URL，或写入 .env 文件。
 const SERVER_BASE_URL =
   (process.env.SERVER_BASE_URL || "").trim().replace(/\/+$/, "") || "https://www.lx00924ai.top";
+
+// ==================== 注册与邮箱验证码（官网注册专用） ====================
+//
+// 为什么这一块要单独做：注册是全站**唯一允许陌生人写数据**的入口，防线必须在服务端，
+// 不能指望前端。四层限制缺一不可：
+//   1) Turnstile 人机验证 —— 挡脚本；
+//   2) 同邮箱 60 秒冷却 + 次数上限 —— 挡连点与轰炸（就是常见软件的"60s 后再发"）；
+//   3) 同 IP 小时/日配额 + 同 IP 日注册上限 —— 挡批量；
+//   4) 验证码最多试 5 次 —— 挡 6 位数字暴力枚举（这条最容易被漏掉）。
+//
+// ⚠️ 密钥一律走环境变量：.env 已被 .gitignore 忽略，绝不硬编码进仓库。
+// ⚠️ 本站走 Cloudflare，取真实 IP 必须用 CF-Connecting-IP，详见 clientIpOf()。
+
+const SMTP_HOST = (process.env.SMTP_HOST || "").trim();
+const SMTP_PORT = Number((process.env.SMTP_PORT || "465").trim()) || 465;
+const SMTP_SECURE = (process.env.SMTP_SECURE ?? "1").trim() !== "0"; // 465 端口 true；587 端口设 0
+const SMTP_USER = (process.env.SMTP_USER || "").trim();
+const SMTP_PASS = (process.env.SMTP_PASS || "").trim();
+const SMTP_FROM_NAME = (process.env.SMTP_FROM_NAME || "LxAI").trim();
+const SMTP_FROM = (process.env.SMTP_FROM || SMTP_USER).trim();
+
+const TURNSTILE_SECRET = (process.env.TURNSTILE_SECRET || "").trim();
+
+/** SMTP 是否配置齐全。没配时注册接口明确报错，而不是静默失败让人以为"注册了"。 */
+const MAIL_READY = !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
+
+// 验证码策略（要调松紧只改这里，代码里别再散落魔数）
+const CODE_TTL_MS = 10 * 60 * 1000;          // 有效期 10 分钟
+const CODE_RESEND_COOLDOWN_MS = 60 * 1000;   // 同邮箱 60 秒冷却
+const CODE_MAX_ATTEMPTS = 5;                 // 同一个码最多试 5 次
+const CODE_PER_EMAIL_10MIN = 3;              // 同邮箱 10 分钟最多发 3 条
+const CODE_PER_IP_HOUR = 5;                  // 同 IP 1 小时最多发 5 条
+const CODE_PER_IP_DAY = 20;                  // 同 IP 24 小时最多发 20 条
+const REGISTER_PER_IP_DAY = 1;               // 同 IP 24 小时最多成功注册 1 个
+
+/**
+ * 取真实客户端 IP。
+ *
+ * ⚠️ 本站走 Cloudflare，`req.ip` 拿到的是 CF 边缘节点地址（所有用户都是同一个），
+ * 拿它做限流会变成"一个人触发、全站被封"。CF 会注入 CF-Connecting-IP，
+ * 而本机源站只有 cloudflared 一条入口、没有公网端口，所以这个头**伪造不了**。
+ */
+function clientIpOf(req: express.Request): string {
+  const cf = req.headers["cf-connecting-ip"];
+  if (typeof cf === "string" && cf.trim()) return cf.trim();
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.trim()) return xff.split(",")[0].trim();
+  return req.socket.remoteAddress || "unknown";
+}
+
+/** 极简滑动窗口限流（单进程内存就够：本站只有一个 node 进程） */
+const rateBuckets = new Map<string, number[]>();
+function rateLimitHit(
+  key: string,
+  windowMs: number,
+  max: number,
+): { ok: boolean; retryAfterSec: number } {
+  const now = Date.now();
+  const arr = (rateBuckets.get(key) || []).filter((t) => now - t < windowMs);
+  if (arr.length >= max) {
+    rateBuckets.set(key, arr);
+    const oldest = arr[0];
+    return {
+      ok: false,
+      retryAfterSec: Math.max(1, Math.ceil((windowMs - (now - oldest)) / 1000)),
+    };
+  }
+  arr.push(now);
+  rateBuckets.set(key, arr);
+  // 桶数量异常说明有人在刷：顺手清一遍过期条目，避免内存无限增长
+  if (rateBuckets.size > 5000) {
+    for (const [k, v] of rateBuckets) {
+      const kept = v.filter((t) => now - t < 24 * 60 * 60 * 1000);
+      if (kept.length === 0) rateBuckets.delete(k);
+      else rateBuckets.set(k, kept);
+    }
+  }
+  return { ok: true, retryAfterSec: 0 };
+}
+
+/**
+ * 邮箱规范化：去空白 + 转小写。
+ * "一邮一号"必须建立在这上面 —— 否则 A@QQ.com 与 a@qq.com 会被当成两个账号。
+ */
+function normalizeEmail(raw: unknown): string {
+  return String(raw ?? "").trim().toLowerCase();
+}
+
+function isValidEmail(email: string): boolean {
+  return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
+}
+
+/** 验证码暂存（放内存即可：重启后让用户重新发一次，比落盘更不容易留脏数据） */
+type EmailCodeEntry = { code: string; expiresAt: number; attempts: number; sentAt: number };
+const emailCodes = new Map<string, EmailCodeEntry>();
+
+/** 惰性创建 SMTP 传输器（没配 SMTP 时返回 null） */
+let mailTransport: Transporter | null = null;
+function getMailTransport(): Transporter | null {
+  if (!MAIL_READY) return null;
+  if (!mailTransport) {
+    mailTransport = nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_SECURE,
+      auth: { user: SMTP_USER, pass: SMTP_PASS },
+    });
+  }
+  return mailTransport;
+}
+
+/**
+ * Turnstile 校验。
+ * 没配 TURNSTILE_SECRET 时：生产环境**拒绝注册**（安全优先），
+ * 开发环境放行并打警告（方便本地调试）。
+ */
+async function verifyTurnstile(
+  token: string,
+  ip: string,
+): Promise<{ ok: boolean; reason?: string }> {
+  if (!TURNSTILE_SECRET) {
+    if (process.env.NODE_ENV === "production") {
+      return { ok: false, reason: "服务端未配置人机验证密钥（TURNSTILE_SECRET）" };
+    }
+    console.warn("[Register] 未配置 TURNSTILE_SECRET，开发环境跳过人机验证");
+    return { ok: true };
+  }
+  if (!token) return { ok: false, reason: "缺少人机验证凭据" };
+  try {
+    const body = new URLSearchParams({ secret: TURNSTILE_SECRET, response: token });
+    if (ip && ip !== "unknown") body.set("remoteip", ip);
+    const r = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      body,
+    });
+    const data: any = await r.json();
+    if (data?.success) return { ok: true };
+    const codes = Array.isArray(data?.["error-codes"]) ? data["error-codes"].join(",") : "unknown";
+    return { ok: false, reason: `人机验证未通过（${codes}）` };
+  } catch (e: any) {
+    return { ok: false, reason: "人机验证服务不可达，请稍后重试" };
+  }
+}
+
+/** 发送验证码邮件 */
+async function sendVerificationMail(to: string, code: string): Promise<void> {
+  const transport = getMailTransport();
+  if (!transport) throw new Error("SMTP 未配置");
+  const minutes = Math.round(CODE_TTL_MS / 60000);
+  await transport.sendMail({
+    from: `"${SMTP_FROM_NAME}" <${SMTP_FROM}>`,
+    to,
+    subject: `【${SMTP_FROM_NAME}】注册验证码：${code}`,
+    text:
+      `你的 ${SMTP_FROM_NAME} 注册验证码是：${code}\n` +
+      `有效期 ${minutes} 分钟，请勿转发给他人。\n\n` +
+      `如果这不是你本人的操作，忽略本邮件即可。`,
+    html:
+      `<div style="font-family:-apple-system,'Segoe UI',sans-serif;max-width:480px">` +
+      `<p style="color:#334155">你的 ${SMTP_FROM_NAME} 注册验证码是：</p>` +
+      `<p style="font-size:30px;font-weight:700;letter-spacing:6px;color:#0284C7;margin:14px 0">${code}</p>` +
+      `<p style="color:#64748B;font-size:13px">有效期 ${minutes} 分钟，请勿转发给他人。<br>` +
+      `如果这不是你本人的操作，忽略本邮件即可。</p></div>`,
+  });
+}
+
 
 // ==================== Agent Token 工具（顶层，供生成流程与路由共用） ====================
 // 历史问题：客户端设置的字段名是 harnessToken，服务端曾误读 agentToken，
@@ -1766,39 +1933,188 @@ async function startServer() {
   app.use("/uploads", express.static(UPLOADS_DIR));
 
   // User Auth API
+  /**
+   * 发送邮箱验证码（官网注册第一步）。
+   *
+   * 顺序很重要：**先人机验证 → 再查邮箱是否已注册 → 最后才受配额限制**。
+   * 反过来的话，攻击者可以用"发码接口返回什么"来批量探测哪些邮箱已注册。
+   */
+  app.post("/api/register/send-code", async (req, res) => {
+    const ip = clientIpOf(req);
+    const email = normalizeEmail(req.body?.email);
+    const turnstileToken = String(req.body?.turnstileToken ?? "");
+
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: "邮箱格式不正确" });
+    }
+    if (!MAIL_READY) {
+      console.error("[Register] 未配置 SMTP（SMTP_HOST/SMTP_USER/SMTP_PASS），无法发送验证码");
+      return res.status(503).json({ error: "服务端尚未配置邮件发送，暂时无法注册" });
+    }
+
+    // 1) 人机验证（挡脚本）
+    const ts = await verifyTurnstile(turnstileToken, ip);
+    if (!ts.ok) {
+      return res.status(403).json({ error: ts.reason || "人机验证未通过" });
+    }
+
+    // 2) 一邮一号
+    const users = await safeReadJSON<any[]>(USERS_FILE, []);
+    if (users.some((u: any) => normalizeEmail(u.email) === email)) {
+      return res.status(409).json({ error: "该邮箱已注册，请直接登录" });
+    }
+
+    // 3) 60 秒冷却（用户要的那个"发送后倒计时"）
+    const prev = emailCodes.get(email);
+    if (prev && Date.now() - prev.sentAt < CODE_RESEND_COOLDOWN_MS) {
+      const wait = Math.ceil((CODE_RESEND_COOLDOWN_MS - (Date.now() - prev.sentAt)) / 1000);
+      return res.status(429).json({ error: `请等待 ${wait} 秒后再试`, retryAfterSec: wait });
+    }
+
+    // 4) 配额：同邮箱 / 同 IP 小时 / 同 IP 日
+    const emailQuota = rateLimitHit(`code:email:${email}`, 10 * 60 * 1000, CODE_PER_EMAIL_10MIN);
+    if (!emailQuota.ok) {
+      return res.status(429).json({ error: "该邮箱发送过于频繁，请稍后再试", retryAfterSec: emailQuota.retryAfterSec });
+    }
+    const ipHour = rateLimitHit(`code:ip:h:${ip}`, 60 * 60 * 1000, CODE_PER_IP_HOUR);
+    if (!ipHour.ok) {
+      return res.status(429).json({ error: "发送过于频繁，请稍后再试", retryAfterSec: ipHour.retryAfterSec });
+    }
+    const ipDay = rateLimitHit(`code:ip:d:${ip}`, 24 * 60 * 60 * 1000, CODE_PER_IP_DAY);
+    if (!ipDay.ok) {
+      return res.status(429).json({ error: "今日发送次数已达上限", retryAfterSec: ipDay.retryAfterSec });
+    }
+
+    // 5) 生成并发送（用 crypto.randomInt，不用 Math.random —— 后者可预测）
+    const code = String(randomInt(100000, 1000000));
+    emailCodes.set(email, {
+      code,
+      expiresAt: Date.now() + CODE_TTL_MS,
+      attempts: 0,
+      sentAt: Date.now(),
+    });
+    try {
+      await sendVerificationMail(email, code);
+    } catch (e: any) {
+      emailCodes.delete(email); // 发失败就作废，否则用户要白等 60 秒
+      console.error("[Register] 验证码邮件发送失败:", e?.message || e);
+      return res.status(500).json({ error: "验证码邮件发送失败，请稍后重试" });
+    }
+
+    console.log(`[Register] 已向 ${email} 发送验证码（ip=${ip}）`);
+    res.json({
+      ok: true,
+      expiresInSec: Math.round(CODE_TTL_MS / 1000),
+      cooldownSec: Math.round(CODE_RESEND_COOLDOWN_MS / 1000),
+    });
+  });
+
+  /**
+   * 注册（官网注册第二步）。
+   *
+   * 与旧版的区别：必须带 `email` + `code`，服务端强校验验证码与"一邮一号"。
+   * 旧的 `{username, password}` 调用（App 内注册）会在这里被拒 —— 这是**有意为之**：
+   * 注册统一收敛到官网，App 侧改为引导用户跳转。
+   */
   app.post("/api/register", async (req, res) => {
-    const { username, password } = req.body;
-    console.log(`Registration attempt for username: ${username}`);
+    const ip = clientIpOf(req);
+    const username = String(req.body?.username ?? "").trim();
+    const password = String(req.body?.password ?? "");
+    const email = normalizeEmail(req.body?.email);
+    const code = String(req.body?.code ?? "").trim();
+
+    console.log(`[Register] 注册请求: username=${username} email=${email} ip=${ip}`);
+
+    // ── 入参校验 ──────────────────────────────────────────────
+    if (!username || !password) {
+      return res.status(400).json({ error: "缺少账号或密码" });
+    }
+    if (username.length < 3 || username.length > 32) {
+      return res.status(400).json({ error: "账号长度需在 3~32 个字符之间" });
+    }
+    if (!/^[A-Za-z0-9_.@\u4e00-\u9fa5-]+$/.test(username)) {
+      return res.status(400).json({ error: "账号只能包含中英文、数字、下划线、点、@ 与短横线" });
+    }
+    if (password.length < 8 || password.length > 72) {
+      // 72 是 bcrypt 的输入上限（MAX_PASSWORD_BYTES），超出部分会被静默截断
+      return res.status(400).json({ error: "密码长度需在 8~72 位之间" });
+    }
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ error: "邮箱格式不正确" });
+    }
+
+    // ── 验证码校验（含尝试次数上限：6 位数字不限次数是能暴破的）──
+    const entry = emailCodes.get(email);
+    if (!entry) {
+      return res.status(400).json({ error: "请先获取邮箱验证码" });
+    }
+    if (Date.now() > entry.expiresAt) {
+      emailCodes.delete(email);
+      return res.status(400).json({ error: "验证码已过期，请重新获取" });
+    }
+    if (entry.attempts >= CODE_MAX_ATTEMPTS) {
+      emailCodes.delete(email);
+      return res.status(429).json({ error: "验证码错误次数过多，请重新获取" });
+    }
+    if (entry.code !== code) {
+      entry.attempts += 1;
+      const left = CODE_MAX_ATTEMPTS - entry.attempts;
+      console.warn(`[Register] 验证码不匹配 email=${email} 已错 ${entry.attempts} 次`);
+      return res.status(400).json({
+        error: left > 0 ? `验证码不正确，还可尝试 ${left} 次` : "验证码错误次数过多，请重新获取",
+      });
+    }
+
+    // ── 同 IP 日注册配额（挡"一个 IP 批量开号"）──────────────
+    const regQuota = rateLimitHit(`reg:ip:${ip}`, 24 * 60 * 60 * 1000, REGISTER_PER_IP_DAY);
+    if (!regQuota.ok) {
+      return res.status(429).json({ error: "今日注册次数已达上限，请明天再试" });
+    }
+
     try {
       let registeredUser: any = null;
       let errorMsg = "";
 
-      // 先把口令哈希算好再进锁，避免在文件锁内做 250ms 的 CPU 计算
-      const passwordHash = await hashPassword(password || "");
+      // 先把口令哈希算好再进锁，避免在文件锁内做 250ms 的 CPU 计算（沿用原有设计）
+      const passwordHash = await hashPassword(password);
 
       await withFileLock(USERS_FILE, async () => {
         const users = await safeReadJSON<any[]>(USERS_FILE, []);
         if (users.find((u: any) => u.username === username)) {
-          errorMsg = "User already exists";
+          errorMsg = "该账号名已被占用";
+          return;
+        }
+        // 一邮一号：在锁内再查一次，避免并发注册绕过（发码时的检查只是"早失败"）
+        if (users.find((u: any) => normalizeEmail(u.email) === email)) {
+          errorMsg = "该邮箱已注册，请直接登录";
           return;
         }
         // 只存哈希，不存明文
-        const newUser = { id: Date.now().toString(), username, passwordHash };
+        const newUser = {
+          id: Date.now().toString(),
+          username,
+          email,
+          passwordHash,
+          createdAt: new Date().toISOString(),
+        };
         users.push(newUser);
         await safeWriteJSON(USERS_FILE, users);
         registeredUser = newUser;
       });
 
       if (errorMsg) {
-        console.log(`Registration failed: ${errorMsg} for ${username}`);
-        return res.status(400).json({ error: errorMsg });
+        console.log(`[Register] 注册被拒: ${errorMsg} (${username})`);
+        return res.status(409).json({ error: errorMsg });
       }
 
-      console.log(`Registration successful for username: ${username}`);
-      res.json({ user: { id: registeredUser.id, username: registeredUser.username } });
+      emailCodes.delete(email); // 用完即焚，防止同一个码重复使用
+      console.log(`[Register] 注册成功: ${username} <${email}> (ip=${ip})`);
+      res.json({
+        user: { id: registeredUser.id, username: registeredUser.username, email: registeredUser.email },
+      });
     } catch (e) {
       console.error(`Registration error for ${username}:`, e);
-      res.status(500).json({ error: "Registration failed" });
+      res.status(500).json({ error: "注册失败，请稍后重试" });
     }
   });
 

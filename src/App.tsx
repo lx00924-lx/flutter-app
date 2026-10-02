@@ -5,6 +5,7 @@ import { Features } from './components/Features';
 import { Architecture } from './components/Architecture';
 import { Downloads } from './components/Downloads';
 import { ContactFooter } from './components/ContactFooter';
+import { RegisterModal } from './components/RegisterModal';
 import { GitHubRelease, ReleaseAsset, RepoInfo } from './types/landing';
 
 const GITHUB_REPO = 'lx00924-lx/flutter-app';
@@ -20,6 +21,11 @@ export default function App() {
     }
     return true;
   });
+
+  // 官网注册弹窗。
+  // 官网**只做注册、不做登录**：服务端按「1 手机 + 1 电脑」分槽做单点互斥，
+  // 网页端一旦登录就得决定它占哪个槽，会牵动那套很微妙的互斥逻辑，不值当。
+  const [showRegister, setShowRegister] = useState(false);
 
   // GitHub Release data
   const [latestRelease, setLatestRelease] = useState<GitHubRelease | null>(null);
@@ -109,6 +115,7 @@ export default function App() {
         onToggleTheme={() => setIsDarkMode(!isDarkMode)}
         repoStars={repoInfo ? repoInfo.stargazers_count : null}
         repoForks={repoInfo ? repoInfo.forks_count : null}
+        onRegister={() => setShowRegister(true)}
       />
 
       <main>
@@ -143,6 +150,9 @@ export default function App() {
         userEmail="lx00924@gmail.com"
         githubUrl={`https://github.com/${GITHUB_REPO}`}
       />
+
+      {/* 注册弹窗：邮箱验证码 + Turnstile + 一邮一号 */}
+      <RegisterModal open={showRegister} onClose={() => setShowRegister(false)} />
     </div>
   );
 }
