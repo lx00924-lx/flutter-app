@@ -676,7 +676,13 @@ class SettingsProvider extends ChangeNotifier {
     return ok;
   }
 
-  /// 远程服务端注册
+  /// 远程服务端注册。
+  ///
+  /// ⚠️ **已废弃，且调用它必定失败**（2026-10-02 起）：服务端 `/api/register`
+  /// 现在要求 `email` + `code`（邮箱验证码），并强制 Cloudflare Turnstile。
+  /// 注册已统一移到**官网**，App 登录页只留「前往官网注册」的跳转。
+  /// 保留仅为不破坏自建部署分支，新代码不要调用。
+  @Deprecated('注册已移到官网（需邮箱验证码 + Turnstile），App 内调用必定失败')
   Future<Map<String, dynamic>> registerWithServer({
     required String account,
     required String userName,

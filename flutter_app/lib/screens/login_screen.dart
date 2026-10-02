@@ -1,10 +1,26 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../config/app_config.dart';
 import '../providers/settings_provider.dart';
 import '../providers/chat_provider.dart';
+import '../utils/url_launcher_helper.dart';
 import '../widgets/legal_documents.dart';
 import 'chat_screen.dart';
 
+/// App 登录页。
+///
+/// ⚠️ **本页刻意不再提供"注册"入口**（2026-10-02 移除「账号登录 / 新用户注册」
+/// 分段卡与整套注册表单）。
+///
+/// 为什么要去掉：注册现在统一在**官网**进行，且必须过「邮箱验证码 + Cloudflare
+/// 人机验证」，一个邮箱只能开一个账号。而 App 内原先那套「填账号名 + 密码」的表单
+/// 对应的服务端 `/api/register` 已要求 `email` + `code` 两个必填字段 ——
+/// 留着它只会**必然被 400 打回**，用户看到的是"注册失败"却查不出原因。
+/// 人机验证、域名校验这类东西也本来就应该在浏览器里做。
+///
+/// 所以底部只留一个跳转：「还没有账号？点击前往官网注册」。
+/// 顺带的好处：注册流程完全不碰「1 台手机 + 1 台电脑」的单点互斥逻辑
+///（官网刻意没有登录态，不占任何槽位）。
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
 
@@ -13,38 +29,19 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  int _tabIndex = 0; // 0: 登录, 1: 注册
-
-  /// 用户协议 / 隐私政策是否已勾选（未勾选不允许登录/注册）。
+  /// 用户协议 / 隐私政策是否已勾选（未勾选不允许登录）。
   bool _agreedToTerms = false;
 
   // 登录表单
   final TextEditingController _loginAccountCtrl = TextEditingController();
   final TextEditingController _loginPasswordCtrl = TextEditingController();
   bool _obscureLoginPassword = true;
-
-  // 注册表单
-  final TextEditingController _regAccountCtrl = TextEditingController();
-  final TextEditingController _regUserNameCtrl = TextEditingController();
-  final TextEditingController _regPasswordCtrl = TextEditingController();
-  final TextEditingController _regConfirmPasswordCtrl = TextEditingController();
-  bool _obscureRegPassword = true;
-  bool _obscureRegConfirmPassword = true;
   bool _isLoading = false;
-
-  @override
-  void initState() {
-    super.initState();
-  }
 
   @override
   void dispose() {
     _loginAccountCtrl.dispose();
     _loginPasswordCtrl.dispose();
-    _regAccountCtrl.dispose();
-    _regUserNameCtrl.dispose();
-    _regPasswordCtrl.dispose();
-    _regConfirmPasswordCtrl.dispose();
     super.dispose();
   }
 
@@ -97,67 +94,18 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  void _handleRegister() async {
-    final account = _regAccountCtrl.text.trim();
-    final userName = _regUserNameCtrl.text.trim();
-    final password = _regPasswordCtrl.text;
-    final confirmPassword = _regConfirmPasswordCtrl.text;
-
-    if (!_agreedToTerms) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请先阅读并同意《用户协议》和《隐私政策》')),
-      );
-      return;
-    }
-    if (account.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请输入登录账号')),
-      );
-      return;
-    }
-    if (password.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('请设置登录密码')),
-      );
-      return;
-    }
-    if (password != confirmPassword) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('两次输入的密码不一致'),
-          backgroundColor: Colors.redAccent,
-        ),
-      );
-      return;
-    }
-
-    setState(() => _isLoading = true);
-    final sp = context.read<SettingsProvider>();
-    final result = await sp.registerWithServer(
-      account: account,
-      userName: userName.isNotEmpty ? userName : account,
-      password: password,
-    );
-
+  /// 用系统默认浏览器打开官网（注册入口在那里）。
+  ///
+  /// 地址取 `AppConfig.normalizedServerBaseUrl`（= 官网本身），**不写死域名** ——
+  /// 自建部署时用 `--dart-define=SERVER_BASE_URL=...` 一改，这里跟着变。
+  /// 打不开时明确告知失败并给出网址，不做"假装跳转了"。
+  Future<void> _openOfficialSite() async {
+    final site = AppConfig.normalizedServerBaseUrl;
+    final opened = await UrlLauncherHelper.openUrl(site);
     if (!mounted) return;
-    setState(() => _isLoading = false);
-
-    if (result['success'] == true) {
-      context.read<ChatProvider>().reloadFromStorage();
-
+    if (!opened) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('注册成功！欢迎您，$account')),
-      );
-
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const ChatScreen()),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(result['message']?.toString() ?? '注册失败，请稍后重试'),
-          backgroundColor: Colors.redAccent,
-        ),
+        SnackBar(content: Text('没能自动打开浏览器，请手动访问官网注册：$site')),
       );
     }
   }
@@ -227,89 +175,8 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   const SizedBox(height: 32),
 
-                  // 登录 / 注册 分段选择卡
-                  Container(
-                    padding: const EdgeInsets.all(4),
-                    decoration: BoxDecoration(
-                      color: isDark ? const Color(0xFF1E293B) : const Color(0xFFE2E8F0),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: InkWell(
-                            onTap: () => setState(() => _tabIndex = 0),
-                            borderRadius: BorderRadius.circular(10),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(vertical: 10),
-                              decoration: BoxDecoration(
-                                color: _tabIndex == 0
-                                    ? (isDark ? const Color(0xFF0F172A) : Colors.white)
-                                    : Colors.transparent,
-                                borderRadius: BorderRadius.circular(10),
-                                boxShadow: _tabIndex == 0
-                                    ? [
-                                        BoxShadow(
-                                          color: Colors.black.withOpacity(0.06),
-                                          blurRadius: 4,
-                                          offset: const Offset(0, 2),
-                                        ),
-                                      ]
-                                    : null,
-                              ),
-                              child: Text(
-                                '账号登录',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: _tabIndex == 0 ? FontWeight.bold : FontWeight.normal,
-                                  color: _tabIndex == 0 ? primaryColor : null,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        Expanded(
-                          child: InkWell(
-                            onTap: () => setState(() => _tabIndex = 1),
-                            borderRadius: BorderRadius.circular(10),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(vertical: 10),
-                              decoration: BoxDecoration(
-                                color: _tabIndex == 1
-                                    ? (isDark ? const Color(0xFF0F172A) : Colors.white)
-                                    : Colors.transparent,
-                                borderRadius: BorderRadius.circular(10),
-                                boxShadow: _tabIndex == 1
-                                    ? [
-                                        BoxShadow(
-                                          color: Colors.black.withOpacity(0.06),
-                                          blurRadius: 4,
-                                          offset: const Offset(0, 2),
-                                        ),
-                                      ]
-                                    : null,
-                              ),
-                              child: Text(
-                                '新用户注册',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                  fontSize: 14,
-                                  fontWeight: _tabIndex == 1 ? FontWeight.bold : FontWeight.normal,
-                                  color: _tabIndex == 1 ? primaryColor : null,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-
-                  // 内容区域
-                  if (_tabIndex == 0) _buildLoginForm(isDark, primaryColor)
-                  else _buildRegisterForm(isDark, primaryColor),
+                  // 内容区域：只剩登录表单（注册已移到官网，见类注释）
+                  _buildLoginForm(isDark, primaryColor),
                 ],
               ),
             ),
@@ -442,177 +309,12 @@ class _LoginScreenState extends State<LoginScreen> {
                 ),
         ),
         const SizedBox(height: 16),
-        TextButton(
-          onPressed: () => setState(() => _tabIndex = 1),
-          child: Text(
-            '还没有账号？立即免费注册',
-            style: TextStyle(color: primaryColor, fontSize: 13),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildRegisterForm(bool isDark, Color primaryColor) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        TextField(
-          controller: _regAccountCtrl,
-          decoration: InputDecoration(
-            labelText: '登录账号 *',
-            hintText: '作为唯一登录凭证，注册后不可修改',
-            prefixIcon: const Icon(Icons.badge_outlined),
-            filled: true,
-            fillColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFF8FAFC),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(
-                color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(height: 14),
-        TextField(
-          controller: _regUserNameCtrl,
-          decoration: InputDecoration(
-            labelText: '聊天昵称 (选填)',
-            hintText: '在聊天界面显示的名称，可随时在设置中修改',
-            prefixIcon: const Icon(Icons.person_outline),
-            filled: true,
-            fillColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFF8FAFC),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(
-                color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(height: 14),
-        TextField(
-          controller: _regPasswordCtrl,
-          obscureText: _obscureRegPassword,
-          decoration: InputDecoration(
-            labelText: '设置密码 *',
-            hintText: '请输入登录密码',
-            prefixIcon: const Icon(Icons.lock_outline),
-            suffixIcon: IconButton(
-              icon: Icon(
-                _obscureRegPassword ? Icons.visibility_off : Icons.visibility,
-                size: 20,
-              ),
-              onPressed: () => setState(() => _obscureRegPassword = !_obscureRegPassword),
-            ),
-            filled: true,
-            fillColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFF8FAFC),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(
-                color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(height: 14),
-        TextField(
-          controller: _regConfirmPasswordCtrl,
-          obscureText: _obscureRegConfirmPassword,
-          decoration: InputDecoration(
-            labelText: '确认密码 *',
-            hintText: '请再次输入密码以验证',
-            prefixIcon: const Icon(Icons.check_circle_outline),
-            suffixIcon: IconButton(
-              icon: Icon(
-                _obscureRegConfirmPassword ? Icons.visibility_off : Icons.visibility,
-                size: 20,
-              ),
-              onPressed: () => setState(() => _obscureRegConfirmPassword = !_obscureRegConfirmPassword),
-            ),
-            filled: true,
-            fillColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFF8FAFC),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(
-                color: isDark ? const Color(0xFF334155) : const Color(0xFFCBD5E1),
-              ),
-            ),
-          ),
-          onSubmitted: (_) => _handleRegister(),
-        ),
-        const SizedBox(height: 12),
-        // 注册同样需要确认条款（与登录页同一份勾选状态）
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              width: 26,
-              height: 26,
-              child: Checkbox(
-                value: _agreedToTerms,
-                onChanged: (v) => setState(() => _agreedToTerms = v ?? false),
-                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                visualDensity: VisualDensity.compact,
-              ),
-            ),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.only(top: 3),
-                child: Wrap(
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    Text('我已阅读并同意', style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
-                    InkWell(
-                      onTap: () => showLegalDocument(context, LegalDocument.terms),
-                      child: Text('《用户协议》',
-                          style: TextStyle(fontSize: 12, color: primaryColor, fontWeight: FontWeight.w600)),
-                    ),
-                    Text('和', style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
-                    InkWell(
-                      onTap: () => showLegalDocument(context, LegalDocument.privacy),
-                      child: Text('《隐私政策》',
-                          style: TextStyle(fontSize: 12, color: primaryColor, fontWeight: FontWeight.w600)),
-                    ),
-                    Text(
-                      '，并确认只对自己拥有或已获授权的设备使用远程控制。',
-                      style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: primaryColor,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(vertical: 14),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-            elevation: 2,
-          ),
-          onPressed: (_isLoading || !_agreedToTerms) ? null : _handleRegister,
-          child: _isLoading
-              ? const SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                )
-              : const Text(
-                  '注册并开启体验',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                ),
-        ),
-        const SizedBox(height: 14),
-        TextButton(
-          onPressed: () => setState(() => _tabIndex = 0),
-          child: Text(
-            '已有账号？点击返回登录',
+        // 注册入口：跳到官网（App 内不再注册，原因见文件顶部注释）
+        TextButton.icon(
+          onPressed: _openOfficialSite,
+          icon: const Icon(Icons.open_in_new, size: 16),
+          label: Text(
+            '还没有账号？点击前往官网注册',
             style: TextStyle(color: primaryColor, fontSize: 13),
           ),
         ),

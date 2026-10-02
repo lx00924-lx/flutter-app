@@ -459,7 +459,15 @@ class SyncService {
     }
   }
 
-  /// 客户端向服务端发起注册
+  /// 客户端向服务端发起注册。
+  ///
+  /// ⚠️ **已废弃，且调用它必定失败**（2026-10-02 起）。
+  /// 服务端 `/api/register` 现在要求 `email` + `code`（邮箱验证码）两个必填字段，
+  /// 还要过 Cloudflare Turnstile —— 本方法只发 `username` + `password`，
+  /// 会被服务端以 400 打回。注册已统一移到**官网**（浏览器里做验证码与人机验证），
+  /// App 端只保留「前往官网注册」的跳转，见 `screens/login_screen.dart`。
+  /// 这里暂不删除，是为了不破坏可能存在的自建部署分支；新代码不要调用它。
+  @Deprecated('注册已移到官网（需邮箱验证码 + Turnstile），App 内调用必定失败')
   Future<Map<String, dynamic>> registerWithServer({
     required String username,
     required String password,
