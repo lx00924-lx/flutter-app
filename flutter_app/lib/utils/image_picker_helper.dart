@@ -158,10 +158,18 @@ class ImagePickerHelper {
   /// 1. 保存原图到用户指定的自定义路径 (localPath)
   /// 2. 生成轻量缩略图 (供云端同步与本地缓存清理后兜底回显)
   /// 3. 生成大模型超清可用 Base64
+  ///
+  /// [persistRawFile] = false 时**跳过第 1 步**，返回的 `localFilePath` 为 null。
+  /// 给"设置项选图"（头像 / 背景 / 启动图）用：那些字段最终存的是压缩后的
+  /// base64，渲染走 `Image.memory`，**根本不会去读这个路径** —— 落盘只会留下
+  /// 一份没人引用的原图（换一次头像就在缓存目录里多一个，直到用户点"清空缓存"）。
+  /// 聊天附件则相反：`toAttachmentString()` 会把该路径拼进 `#localPath=`，
+  /// 渲染时要按它读原图，所以必须保持落盘。
   static Future<ProcessedImageResult?> processRawImageBytes(
     Uint8List rawBytes, {
     required String extension,
     String prefix = 'raw_img',
+    bool persistRawFile = true,
   }) async {
     if (rawBytes.isEmpty) return null;
 
@@ -176,14 +184,16 @@ class ImagePickerHelper {
 
     // 1. 本地原图落盘保存到自定义路径 (安全容错)
     String? savedPath;
-    try {
-      savedPath = await StoragePathService.instance.saveRawImageToDisk(
-        bytes: rawBytes,
-        extension: ext,
-        prefix: prefix,
-      );
-    } catch (e) {
-      debugPrint('saveRawImageToDisk error: $e');
+    if (persistRawFile) {
+      try {
+        savedPath = await StoragePathService.instance.saveRawImageToDisk(
+          bytes: rawBytes,
+          extension: ext,
+          prefix: prefix,
+        );
+      } catch (e) {
+        debugPrint('saveRawImageToDisk error: $e');
+      }
     }
 
     // 2. 快速生成 Base64 Data URI
@@ -210,7 +220,9 @@ class ImagePickerHelper {
   }
 
   /// 1. 从手机系统相册选择图片（优先调起系统应用分发意图，让用户直接选择“图片库/相册”，双通道安全兜底）
-  static Future<ProcessedImageResult?> pickImageFromGallery() async {
+  ///
+  /// [persistRawFile] 透传给 [processRawImageBytes]，含义见那里的注释。
+  static Future<ProcessedImageResult?> pickImageFromGallery({bool persistRawFile = true}) async {
     // 优先通道：使用标准系统媒体选择意图 (ACTION_GET_CONTENT)，直接唤起多相册选择面板
     try {
       final result = await FilePicker.platform.pickFiles(
@@ -228,7 +240,8 @@ class ImagePickerHelper {
         }
         if (bytes != null && bytes.isNotEmpty) {
           final ext = (file.extension ?? (file.name.contains('.') ? file.name.split('.').last : 'png')).toLowerCase();
-          return await processRawImageBytes(bytes, extension: ext, prefix: 'gallery');
+          return await processRawImageBytes(bytes, extension: ext, prefix: 'gallery',
+              persistRawFile: persistRawFile);
         }
       } else if (result == null) {
         // 用户主动取消选择
@@ -247,7 +260,8 @@ class ImagePickerHelper {
       if (photo != null) {
         final Uint8List bytes = await photo.readAsBytes();
         final ext = photo.name.contains('.') ? photo.name.split('.').last.toLowerCase() : 'png';
-        return await processRawImageBytes(bytes, extension: ext, prefix: 'gallery');
+        return await processRawImageBytes(bytes, extension: ext, prefix: 'gallery',
+            persistRawFile: persistRawFile);
       }
     } catch (e2) {
       debugPrint('ImagePicker gallery fallback error: $e2');
@@ -323,6 +337,10 @@ class ImagePickerHelper {
 
   /// 选择图片并直接转为 Base64 字符串（用于头像、背景图、启动图等设置项）
   ///
+  /// **不落盘**：最终存进设置字段的就是返回的 base64，渲染走 `Image.memory`，
+  /// 全程不依赖任何本地文件 —— 所以用户删掉原始图片、换手机重装都不影响，
+  /// 也**不会**在缓存目录里留下孤儿原图（见 [processRawImageBytes] 的 persistRawFile）。
+  ///
   /// [maxBytes] > 0 时启用**预算压缩**：解码 → 按最长边缩放 → JPEG 编码，仍超预算
   /// 就继续降分辨率（最多 6 轮），全程在后台 isolate 里做。
   ///
@@ -337,7 +355,10 @@ class ImagePickerHelper {
     int maxBytes = 0,
   }) async {
     try {
-      final processed = await pickImageFromGallery();
+      // persistRawFile: false —— 这些设置项的最终产物是**压缩后的 base64**，
+      // 渲染走 Image.memory，不会去读原图路径。以前这里顺手落盘的那份原图
+      // 没有任何人引用，纯属垃圾（每次换头像都会在缓存目录里多一个）。
+      final processed = await pickImageFromGallery(persistRawFile: false);
       if (processed == null) return null;
 
       final rawBase64 = processed.highResBase64.contains(',')
