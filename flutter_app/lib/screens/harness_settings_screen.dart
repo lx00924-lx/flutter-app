@@ -5,8 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
 import '../config/app_config.dart';
+import '../utils/app_colors.dart';
 import '../utils/bridge_script_helper.dart';
-import '../utils/startup_helper.dart';
 import '../services/sync_service.dart';
 import '../services/bridge_process_manager.dart';
 import 'scanner_screen.dart';
@@ -176,28 +176,12 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
     setState(() => _tokenCtrl.text = latest);
   }
 
-  /// 开机自动启动（仅 Windows）。
-  ///
-  /// 状态**不放在 AppSettings 里**：开机自启是"这台设备"的属性而不是账号的属性，
-  /// 让它跟着云端同步反而会串味（在 A 电脑开的开关影响 B 电脑）。真相只有注册表里的那一项，
-  /// 所以这里每次都从注册表读回来。详见 `StartupHelper`。
-  bool _launchAtStartup = false;
-  bool _launchAtStartupLoaded = false;
-
-  Future<void> _loadLaunchAtStartup() async {
-    if (!StartupHelper.supported) return;
-    final on = await StartupHelper.isEnabled();
-    if (!mounted) return;
-    setState(() {
-      _launchAtStartup = on;
-      _launchAtStartupLoaded = true;
-    });
-  }
+  // 「开机自动启动」的状态与开关已挪到「设置 ➔ 系统与常规维护」的 `_LaunchAtStartupCard`：
+  // 它是这台机器的系统行为，不属于"本地 Agent 设置"这一页的职责。
 
   @override
   void initState() {
     super.initState();
-    unawaited(_loadLaunchAtStartup());
     final s = context.read<SettingsProvider>().settings;
     _tokenCtrl = TextEditingController(text: s.harnessToken);
     var urlText = s.harnessServiceUrl.trim();
@@ -596,7 +580,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                     children: [
                       Text('当前配对 Token: ${_maskToken(token)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                       const SizedBox(height: 4),
-                      Text('Harness 地址: http://$url', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                      Text('Harness 地址: http://$url', style: TextStyle(fontSize: 12, color: AppColors.secondary(context))),
                       const SizedBox(height: 4),
                       const Text('协议: 端到端双向安全长连接 (免公网 IP)', style: TextStyle(fontSize: 12, color: Colors.green)),
                     ],
@@ -654,9 +638,9 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                   ),
                 ),
                 const SizedBox(height: 8),
-                const Text(
+                Text(
                   '💡 手机端通过相机扫描电脑终端打印的二维码，即可自动识别临时授权链接并握手完成配对。',
-                  style: TextStyle(fontSize: 11, color: Colors.grey),
+                  style: TextStyle(fontSize: 11, color: AppColors.secondary(context)),
                 ),
               ],
             ),
@@ -796,7 +780,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                         : (Platform.isWindows || Platform.isMacOS || Platform.isLinux
                                             ? '点击即可在后台静默运行 py 桥接，无需手动打开 CMD 或保留黑窗口'
                                             : '点击后下发指令，由电脑端 LxAI 应用启动本机桥接（需保持该应用运行）'),
-                                    style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                    style: TextStyle(fontSize: 11, color: AppColors.secondary(context)),
                                   ),
                                 ],
                               ),
@@ -817,7 +801,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                         _bridgeSwitchLabel,
                                         style: TextStyle(
                                           fontSize: 11,
-                                          color: Colors.grey.shade600,
+                                          color: AppColors.secondary(context),
                                         ),
                                       ),
                                     ],
@@ -868,42 +852,9 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                           );
                         },
                       ),
-                      // 开机自动启动：只在 Windows 出现，且**与上面那个是两件事** ——
-                      // 上面管"App 起来后要不要拉桥接"，这个管"开机会不会自动把 App 拉起来"。
-                      if (Platform.isWindows) ...[
-                        const SizedBox(height: 4),
-                        SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text('开机自动启动', style: TextStyle(fontSize: 14)),
-                          subtitle: Text(
-                            !_launchAtStartupLoaded
-                                ? '正在读取注册表…'
-                                : (_launchAtStartup
-                                    ? '已开启：登录 Windows 后自动启动 LxAI'
-                                    : '已关闭：需要手动打开 LxAI'),
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                          value: _launchAtStartup,
-                          onChanged: (val) async {
-                            // 先乐观更新，写完再回读注册表校准 —— 被安全软件拦下时界面不会骗人
-                            setState(() => _launchAtStartup = val);
-                            await StartupHelper.setEnabled(val);
-                            final actual = await StartupHelper.isEnabled();
-                            if (!mounted) return;
-                            setState(() {
-                              _launchAtStartup = actual;
-                              _launchAtStartupLoaded = true;
-                            });
-                            _snack(
-                              actual == val
-                                  ? (val ? '已开启开机自动启动' : '已关闭开机自动启动')
-                                  : '设置没生效（可能被安全软件拦截），当前状态：'
-                                      '${actual ? "已开启" : "已关闭"}',
-                              isError: actual != val,
-                            );
-                          },
-                        ),
-                      ],
+                      // ⚠️ 「开机自动启动」**不在这里**：它管的是"开机会不会自动把 App
+                      // 拉起来"，属于这台机器的系统行为，跟桥接怎么连没关系。
+                      // 已挪到「设置 ➔ 系统与常规维护」，用户在那儿才找得到。
                     ],
                     const SizedBox(height: 16),
                     SwitchListTile(

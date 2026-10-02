@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../models/app_settings.dart';
 import '../providers/settings_provider.dart';
 import '../services/api_service.dart';
+import '../utils/app_colors.dart';
 
 class ApiSettingsScreen extends StatefulWidget {
   const ApiSettingsScreen({super.key});
@@ -285,7 +286,7 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(Icons.api_outlined, size: 64, color: Colors.grey),
+                  Icon(Icons.api_outlined, size: 64, color: AppColors.faint(context)),
                   const SizedBox(height: 16),
                   const Text('暂未配置任何 API 模型端点', style: TextStyle(fontSize: 16)),
                   const SizedBox(height: 12),
@@ -406,7 +407,7 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
                             Expanded(
                               child: Text(
                                 '终端: ${ep.endpoint}',
-                                style: const TextStyle(fontSize: 12, color: Colors.grey),
+                                style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),

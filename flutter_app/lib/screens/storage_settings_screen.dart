@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/storage_path_service.dart';
+import '../utils/app_colors.dart';
 
 class StorageSettingsScreen extends StatefulWidget {
   const StorageSettingsScreen({super.key});
@@ -192,9 +193,9 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
                     ],
                   ),
                   const SizedBox(height: 8),
-                  const Text(
+                  Text(
                     '指定本地拍摄原图、录音、TTS 语音合成与临时文件的落盘目录。修改路径时将自动将现存缓存完整迁移至新位置。',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                    style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
                   ),
                   const SizedBox(height: 14),
 
@@ -311,9 +312,9 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
                     ],
                   ),
                   const SizedBox(height: 8),
-                  const Text(
+                  Text(
                     '清理后将释放设备存储空间。历史聊天记录将保留轻量缩略图继续正常回显。',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                    style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
                   ),
                   const SizedBox(height: 12),
                   Row(

@@ -8,6 +8,8 @@ import '../providers/settings_provider.dart';
 import '../services/update_service.dart';
 import '../services/keep_alive_service.dart';
 import '../services/notification_service.dart';
+import '../utils/app_colors.dart';
+import '../utils/startup_helper.dart';
 import '../utils/url_launcher_helper.dart';
 import '../widgets/legal_documents.dart';
 import 'account_settings_screen.dart';
@@ -136,11 +138,17 @@ class SettingsScreen extends StatelessWidget {
           const SizedBox(height: 16),
 
           // --- 剩余直接展示的系统功能 ---
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
             child: Text(
               '系统与常规维护',
-              style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.grey),
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.bold,
+                // 语义色，别写 Colors.grey：那是照浅色背景调的，深色模式下既偏暗
+                // 又和 Material 3 自己算出来的次级文字色不一致。
+                color: AppColors.secondary(context),
+              ),
             ),
           ),
 
@@ -159,6 +167,16 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 10),
+
+          // 2. 开机自动启动（仅 Windows）。
+          //
+          // 从「本地 Agent 设置」挪过来的：它管的是"开机会不会自动把 App 拉起来"，
+          // 属于**这台机器**的系统行为，跟"桥接怎么连"没关系。放在 Agent 那一页里，
+          // 用户根本想不到去那儿找。
+          if (Platform.isWindows) ...[
+            const _LaunchAtStartupCard(),
+            const SizedBox(height: 10),
+          ],
 
           // 2. GitHub 官方更新源 (支持 Android / Windows 自动平台固件匹配与检测)
           const _GithubReleaseCard(),
@@ -262,7 +280,7 @@ class SettingsScreen extends StatelessWidget {
           padding: const EdgeInsets.only(top: 3),
           child: Text(
             subtitle,
-            style: const TextStyle(fontSize: 12, color: Colors.grey),
+            style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
           ),
@@ -288,7 +306,7 @@ class SettingsScreen extends StatelessWidget {
               ),
               const SizedBox(width: 4),
             ],
-            const Icon(Icons.arrow_forward_ios, size: 14, color: Colors.grey),
+            Icon(Icons.arrow_forward_ios, size: 14, color: AppColors.faint(context)),
           ],
         ),
         onTap: onTap,
@@ -374,7 +392,7 @@ class _BackgroundPermissionCardState extends State<_BackgroundPermissionCard>
               children: [
                 Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                 const SizedBox(height: 2),
-                Text(subtitle, style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+                Text(subtitle, style: TextStyle(fontSize: 11, color: AppColors.secondary(context))),
               ],
             ),
           ),
@@ -418,7 +436,7 @@ class _BackgroundPermissionCardState extends State<_BackgroundPermissionCard>
             const SizedBox(height: 4),
             Text(
               '这几项决定手机在后台还能不能持续收消息、以及电脑端请求授权时能不能提醒到你。',
-              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+              style: TextStyle(fontSize: 11, color: AppColors.secondary(context)),
             ),
             const SizedBox(height: 10),
             if (_loading)
@@ -758,7 +776,7 @@ class _UpdateDownloadDialogState extends State<_UpdateDownloadDialog> {
                 ),
                 Text(
                   '当前版本: v${res.currentVersion}',
-                  style: const TextStyle(fontSize: 12, color: Colors.grey),
+                  style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
                 ),
               ],
             ),
@@ -871,7 +889,7 @@ class _UpdateDownloadDialogState extends State<_UpdateDownloadDialog> {
                         builder: (context, status, _) {
                           return Text(
                             status.isNotEmpty ? status : '准备中...',
-                            style: const TextStyle(fontSize: 11, color: Colors.grey),
+                            style: TextStyle(fontSize: 11, color: AppColors.secondary(context)),
                           );
                         },
                       ),
@@ -956,6 +974,109 @@ class _UpdateDownloadDialogState extends State<_UpdateDownloadDialog> {
           ),
         ],
       ],
+    );
+  }
+}
+
+/// 「开机自动启动」卡片（仅 Windows）。
+///
+/// 从 `harness_settings_screen.dart` 挪过来的：它管的是"开机会不会自动把 App 拉起来"，
+/// 属于**这台机器**的系统行为，跟"桥接怎么连"没有关系。放在「本地 Agent 设置」里，
+/// 用户根本想不到去那儿找它。
+///
+/// ⚠️ 真相只有一个：注册表 `HKCU\...\Run` 里那一项在不在（见 `StartupHelper`）。
+/// 所以这里**不做乐观更新就完事** —— 写完必须回读注册表校准，被安全软件拦下时
+/// 界面不能骗用户说"已开启"。
+class _LaunchAtStartupCard extends StatefulWidget {
+  const _LaunchAtStartupCard();
+
+  @override
+  State<_LaunchAtStartupCard> createState() => _LaunchAtStartupCardState();
+}
+
+class _LaunchAtStartupCardState extends State<_LaunchAtStartupCard> {
+  bool _enabled = false;
+  bool _loaded = false;
+  String _command = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _refresh();
+  }
+
+  Future<void> _refresh() async {
+    final on = await StartupHelper.isEnabled();
+    final cmd = on ? await StartupHelper.currentCommand() : '';
+    if (!mounted) return;
+    setState(() {
+      _enabled = on;
+      _command = cmd;
+      _loaded = true;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: SwitchListTile(
+        secondary: Icon(
+          _enabled ? Icons.power_settings_new : Icons.power_off_outlined,
+          color: const Color(0xFF0284C7),
+        ),
+        title: const Text('开机自动启动'),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              !_loaded
+                  ? '正在读取注册表…'
+                  : (_enabled
+                      ? '已开启：登录 Windows 后自动启动 LxAI'
+                      : '已关闭：需要手动打开 LxAI'),
+              style: const TextStyle(fontSize: 12),
+            ),
+            // 指向哪个 exe —— 覆盖安装换过目录、或者绿色版挪过位置时，
+            // 这一行能立刻看出自启项是不是还指着老地方。
+            if (_loaded && _enabled && _command.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  _command,
+                  style: TextStyle(fontSize: 10.5, color: AppColors.faint(context)),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
+        ),
+        value: _enabled,
+        onChanged: (val) async {
+          // 先乐观更新让开关跟手，写完再回读校准
+          setState(() => _enabled = val);
+          await StartupHelper.setEnabled(val);
+          final actual = await StartupHelper.isEnabled();
+          final cmd = actual ? await StartupHelper.currentCommand() : '';
+          if (!mounted) return;
+          setState(() {
+            _enabled = actual;
+            _command = cmd;
+            _loaded = true;
+          });
+          if (!context.mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                actual == val
+                    ? (val ? '已开启开机自动启动' : '已关闭开机自动启动')
+                    : '设置没生效（可能被安全软件拦截），当前状态：${actual ? "已开启" : "已关闭"}',
+              ),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        },
+      ),
     );
   }
 }

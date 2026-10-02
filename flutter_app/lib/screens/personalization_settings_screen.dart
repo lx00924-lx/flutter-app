@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
+import '../utils/app_colors.dart';
 import '../utils/image_picker_helper.dart';
 
 class PersonalizationSettingsScreen extends StatefulWidget {
@@ -154,7 +155,7 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
                       const Spacer(),
                       if (s.customBackground.isNotEmpty)
                         IconButton(
-                          icon: const Icon(Icons.close, size: 18, color: Colors.grey),
+                          icon: Icon(Icons.close, size: 18, color: AppColors.faint(context)),
                           tooltip: '清除背景',
                           onPressed: () {
                             s.customBackground = '';
@@ -243,7 +244,7 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
                     title: const Text('启用启动页', style: TextStyle(fontSize: 14)),
                     subtitle: Text(
                       s.enableSplash ? '已开启，冷启动展示指定时长' : '已关闭，冷启动直接秒进聊天界面',
-                      style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                      style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
                     ),
                     value: s.enableSplash,
                     onChanged: (val) {
@@ -311,7 +312,7 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
                       const Spacer(),
                       if (s.splashImage.isNotEmpty)
                         IconButton(
-                          icon: const Icon(Icons.close, size: 18, color: Colors.grey),
+                          icon: Icon(Icons.close, size: 18, color: AppColors.faint(context)),
                           tooltip: '恢复默认',
                           onPressed: () {
                             s.splashImage = '';

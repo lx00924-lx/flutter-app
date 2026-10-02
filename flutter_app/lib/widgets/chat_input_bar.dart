@@ -11,6 +11,7 @@ import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/audio_recorder_service.dart';
 import '../services/sync_service.dart';
+import '../utils/app_colors.dart';
 import '../utils/image_picker_helper.dart';
 import '../screens/voice_call_screen.dart';
 import '../screens/scanner_screen.dart';
@@ -424,18 +425,18 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                             fontWeight: FontWeight.bold,
                           ),
                         ),
-                        Text(cmd.description, style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+                        Text(cmd.description, style: TextStyle(fontSize: 12, color: AppColors.secondary(context))),
                         if (cmd.options.isNotEmpty)
                           Text(
                             '可选值：${cmd.options.map((o) => o.value).join(' / ')}',
-                            style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+                            style: TextStyle(fontSize: 11, color: AppColors.faint(context)),
                           ),
                       ],
                     ),
                   ),
                 Text(
                   '提示：输入 / 会自动浮出命令面板，支持模糊匹配（如 /pm 也能找到 /permission）。',
-                  style: TextStyle(fontSize: 11.5, color: Colors.grey.shade600),
+                  style: TextStyle(fontSize: 11.5, color: AppColors.secondary(context)),
                 ),
               ],
             ),
@@ -597,7 +598,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                     executing
                         ? '这条消息要怎么发？执行阶段的插话会中止电脑上正在跑的本地任务。'
                         : '这条消息要怎么发？',
-                    style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                    style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
                   ),
                 ),
                 ListTile(
@@ -957,7 +958,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
               padding: const EdgeInsets.only(left: 4),
               child: Text(
                 '翻到最后一题再提交',
-                style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                style: TextStyle(fontSize: 11, color: AppColors.secondary(context)),
               ),
             ),
           const Spacer(),
@@ -1227,7 +1228,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                                 child: Text(
                                   '全部清空',
-                                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                  style: TextStyle(fontSize: 11, color: AppColors.secondary(context)),
                                 ),
                               ),
                             ),
@@ -1250,9 +1251,9 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                               ),
                               InkWell(
                                 onTap: () => chat.withdrawQueued(q.id),
-                                child: const Padding(
-                                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                                  child: Icon(Icons.close, size: 14, color: Colors.grey),
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                  child: Icon(Icons.close, size: 14, color: AppColors.faint(context)),
                                 ),
                               ),
                             ],
@@ -1310,7 +1311,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                         const SizedBox(height: 4),
                         Text(
                           '本地 Agent 想执行：$tool',
-                          style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                          style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
                         ),
                         if (reason.isNotEmpty) ...[
                           const SizedBox(height: 4),
@@ -1474,9 +1475,9 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                         ),
                         InkWell(
                           onTap: () => chat.clearQuotedMessage(),
-                          child: const Padding(
-                            padding: EdgeInsets.all(2.0),
-                            child: Icon(Icons.close, size: 16, color: Colors.grey),
+                          child: Padding(
+                            padding: const EdgeInsets.all(2.0),
+                            child: Icon(Icons.close, size: 16, color: AppColors.faint(context)),
                           ),
                         ),
                       ],
@@ -1628,7 +1629,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                                         }
                                       });
                                     },
-                                    child: const Icon(Icons.close, size: 14, color: Colors.grey),
+                                    child: Icon(Icons.close, size: 14, color: AppColors.faint(context)),
                                   ),
                                 ],
                               ),

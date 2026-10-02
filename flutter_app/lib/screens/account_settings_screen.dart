@@ -11,6 +11,7 @@ import '../widgets/app_avatar.dart';
 import 'chat_search_screen.dart';
 import 'login_screen.dart';
 import 'session_management_screen.dart';
+import '../utils/app_colors.dart';
 
 class AccountSettingsScreen extends StatefulWidget {
   const AccountSettingsScreen({super.key});
@@ -325,7 +326,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
                         const Spacer(),
                         if (s.userAvatar.isNotEmpty)
                           IconButton(
-                            icon: const Icon(Icons.close, size: 18, color: Colors.grey),
+                            icon: Icon(Icons.close, size: 18, color: AppColors.faint(context)),
                             tooltip: '恢复默认',
                             onPressed: () {
                               s.userAvatar = '';
@@ -378,7 +379,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
                       const Spacer(),
                       if (s.aiAvatar.isNotEmpty)
                         IconButton(
-                          icon: const Icon(Icons.close, size: 18, color: Colors.grey),
+                          icon: Icon(Icons.close, size: 18, color: AppColors.faint(context)),
                           tooltip: '恢复默认',
                           onPressed: () {
                             s.aiAvatar = '';

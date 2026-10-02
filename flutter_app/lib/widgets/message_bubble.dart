@@ -15,6 +15,7 @@ import '../screens/agent_execution_detail_screen.dart';
 import 'reasoning_view.dart';
 import 'text_selection_modal.dart';
 import 'voice_message_bubble.dart';
+import '../utils/app_colors.dart';
 
 class MessageBubble extends StatelessWidget {
   final ChatMessage message;
@@ -407,7 +408,7 @@ class MessageBubble extends StatelessWidget {
                 errorBuilder: (ctx, err, stack) => Container(
                   height: 120,
                   alignment: Alignment.center,
-                  child: const Icon(Icons.broken_image_outlined, color: Colors.grey, size: 36),
+                  child: Icon(Icons.broken_image_outlined, color: AppColors.faint(context), size: 36),
                 ),
               ),
             ),

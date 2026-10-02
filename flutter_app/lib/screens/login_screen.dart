@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../config/app_config.dart';
 import '../providers/settings_provider.dart';
 import '../providers/chat_provider.dart';
+import '../utils/app_colors.dart';
 import '../utils/url_launcher_helper.dart';
 import '../widgets/legal_documents.dart';
 import 'chat_screen.dart';
@@ -258,7 +259,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   children: [
                     Text(
                       '我已阅读并同意',
-                      style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                      style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
                     ),
                     InkWell(
                       onTap: () => showLegalDocument(context, LegalDocument.terms),
@@ -267,7 +268,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         style: TextStyle(fontSize: 12, color: primaryColor, fontWeight: FontWeight.w600),
                       ),
                     ),
-                    Text('和', style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+                    Text('和', style: TextStyle(fontSize: 12, color: AppColors.secondary(context))),
                     InkWell(
                       onTap: () => showLegalDocument(context, LegalDocument.privacy),
                       child: Text(
@@ -277,7 +278,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     Text(
                       '，并确认只对自己拥有或已获授权的设备使用远程控制。',
-                      style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                      style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
                     ),
                   ],
                 ),

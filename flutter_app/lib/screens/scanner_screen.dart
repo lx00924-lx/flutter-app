@@ -5,6 +5,7 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/sync_service.dart';
+import '../utils/app_colors.dart';
 
 class ScannerScreen extends StatefulWidget {
   const ScannerScreen({super.key});
@@ -169,9 +170,9 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text(
+            Text(
               '请输入电脑终端上显示的 6 位配对授权码：',
-              style: TextStyle(fontSize: 13, color: Colors.grey),
+              style: TextStyle(fontSize: 13, color: AppColors.secondary(context)),
             ),
             const SizedBox(height: 12),
             TextField(

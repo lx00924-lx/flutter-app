@@ -505,6 +505,46 @@ export function apply(ctx) {
   //#region 一轮对话
 
   /**
+   * 从请求体里读出 App 带来的图片，转成宿主 `PromptContentPart` 的图片分支。
+   *
+   * 形状与 `@deepseek-ai/dsh-attachment` 的 `EncodedImageAttachment` 一致：
+   * `{ mediaType, data(裸 base64), name? }` —— App 侧 `toDshImagePart()` 生成的就是它。
+   *
+   * ⚠️ 三条不能想当然的地方（都对着宿主的实现核过）：
+   *  1. `data` 必须是**裸 base64**（不带 `data:image/png;base64,` 前缀），而且必须**规范**：
+   *     宿主会解码后重新编码逐字节比对，不一致直接 `INVALID_IMAGE_BASE64`。所以这里
+   *     只搬运、**绝不重新编码**（App 用 Dart 的 base64Encode，本身就是规范的）。
+   *  2. `mediaType` 只能是宿主声明支持的几种（png / jpeg / webp）；不支持的条目
+   *     **丢掉并记一条日志**，而不是让整轮失败 —— 一张 gif 不该把用户的文字也一起堵死。
+   *  3. 空的 `data` / 缺 `mediaType` 一律跳过：那是 App 侧占位没填满的产物。
+   *
+   * @param {unknown} raw - `body.images`
+   * @returns {Array<{type:'image', mediaType:string, data:string, name?:string}>}
+   */
+  function readImages(raw) {
+    if (!Array.isArray(raw) || raw.length === 0) return []
+    const supported = new Set(['image/png', 'image/jpeg', 'image/webp'])
+    const out = []
+    for (const item of raw) {
+      if (item === null || typeof item !== 'object') continue
+      const data = typeof item.data === 'string' ? item.data.trim() : ''
+      const mediaType = typeof item.mediaType === 'string' ? item.mediaType.trim().toLowerCase() : ''
+      if (data.length === 0 || mediaType.length === 0) continue
+      if (!supported.has(mediaType)) {
+        ctx.logger?.warn?.(`[app-bridge] 跳过不受支持的图片类型：${mediaType}`)
+        continue
+      }
+      out.push({
+        type: 'image',
+        mediaType,
+        data,
+        ...(typeof item.name === 'string' && item.name.length > 0 ? { name: item.name } : {}),
+      })
+    }
+    return out
+  }
+
+  /**
    * 起一轮对话：先对齐模型，再把 prompt 入队，然后开 SSE 帧流。
    * @returns {ReadableStream|null} SSE 流；入队失败时抛错。
    */
@@ -523,6 +563,18 @@ export function apply(ctx) {
       const created = await sessions().create(cwd === undefined ? {} : { cwd })
       sessionId = created?.sessionId
       if (typeof sessionId !== 'string') throw new Error('新建会话失败')
+    } else if ((await resolveSessionObject(sessionId)) === undefined) {
+      // ⚠️ 校验传进来的会话 id 是否真的存在（复用已有的 resolveSessionObject，不另造轮子）。
+      //
+      // 为什么必须在这里挡：宿主每次重启都会重新生成全部会话 id，而 App 可能还绑着
+      // 一个旧的。旧 id 不会被温和地当成"未知"——宿主认得这个格式，会明确拒绝
+      // （session-not-found），于是这一轮从主通道一路降级到备用通道，最后抛出与真因
+      // 毫不相干的 "HTTP 404"，用户只看到"消息发不出去、预设也切不了"。
+      // 在这里提前校验、给出能照着做的中文提示，比让错误在四段链路上变形好得多。
+      throw new Error(
+        `会话已失效：${sessionId} 在电脑端不存在（宿主重启会重新生成会话 id）。` +
+        `请在 App 顶部的 Agent 快捷栏把会话改为「自动（不指定）」，或重新选一个会话后再发。`,
+      )
     }
 
     // 2) 模型 / 推理档位
@@ -572,12 +624,33 @@ export function apply(ctx) {
       /* 读不到就从 0 开始 */
     }
 
-    // 5) 入队
+    // 6) 构造 prompt 内容并**入队**
+    //
+    // 图片必须走 `ctx.attachments.admitPromptContent()`：它会把裸 base64 校验、规范化、
+    // 持久化，再换成宿主认的持久引用（`{type:'image', attachment:{...}}`）。
+    // 直接把裸 base64 塞进 content 会被宿主拒收 —— 这正是"App 发了图、模型看不到"的
+    // 最后一道断点（前一道在桥接：它以前压根没把 images 传下来）。
+    const parts = [{ type: 'text', text: prompt }]
+    const imageParts = readImages(body.images)
+    for (const part of imageParts) parts.push(part)
+
+    let content = parts
+    if (imageParts.length > 0) {
+      const attachments = ctx.get('attachments')
+      if (attachments === undefined || typeof attachments.admitPromptContent !== 'function') {
+        // 宿主没挂附件服务（自己组 profile 时可能没装 dsh-attachment-local）。
+        // 明确失败好过静默丢图 —— 用户至少知道该去查什么。
+        throw new Error('本机宿主未启用附件服务（attachments），无法接收图片')
+      }
+      content = await attachments.admitPromptContent(parts)
+      ctx.logger?.info?.(`[app-bridge] 本轮已受理 ${imageParts.length} 张图片`)
+    }
+
     await sessions().prompt({
       requestId: randomUUID(),
       sessionId,
       mode: 'queue',
-      content: [{ type: 'text', text: prompt }],
+      content,
     }, turnSignal())
 
     return { sessionId, sinceSeq }

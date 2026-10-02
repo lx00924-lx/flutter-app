@@ -6,6 +6,7 @@ import '../models/chat_session.dart';
 import '../providers/chat_provider.dart';
 import '../services/storage_service.dart';
 import 'chat_search_screen.dart';
+import '../utils/app_colors.dart';
 
 class SessionManagementScreen extends StatefulWidget {
   const SessionManagementScreen({super.key});
@@ -155,7 +156,7 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
             const SizedBox(height: 4),
             Text('包含消息: ${messageList.length} 条', style: const TextStyle(fontSize: 14)),
             const SizedBox(height: 4),
-            Text('数据大小: $kbSize KB', style: const TextStyle(fontSize: 14, color: Colors.grey)),
+            Text('数据大小: $kbSize KB', style: TextStyle(fontSize: 14, color: AppColors.secondary(context))),
             const SizedBox(height: 12),
             Container(
               height: 120,
@@ -213,9 +214,9 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
+              Text(
                 '请粘贴导出的 JSON 备份数据：',
-                style: TextStyle(fontSize: 13, color: Colors.grey),
+                style: TextStyle(fontSize: 13, color: AppColors.secondary(context)),
               ),
               const SizedBox(height: 8),
               TextField(
@@ -418,7 +419,7 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
                         const SizedBox(height: 12),
                         Text(
                           _searchKeyword.isNotEmpty ? '未检索到匹配的会话' : '暂无会话记录',
-                          style: const TextStyle(fontSize: 15, color: Colors.grey),
+                          style: TextStyle(fontSize: 15, color: AppColors.secondary(context)),
                         ),
                       ],
                     ),
@@ -555,8 +556,8 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
                                                   : const Color(0xFF64748B),
                                             ),
                                           ),
-                                          const Text(' • ',
-                                              style: TextStyle(color: Colors.grey)),
+                                          Text(' • ',
+                                              style: TextStyle(color: AppColors.secondary(context))),
                                           Text(
                                             '$msgCount 条记录',
                                             style: TextStyle(
@@ -571,9 +572,9 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
                                       const SizedBox(height: 2),
                                       Text(
                                         '更新时间: ${s.updatedAt.month}月${s.updatedAt.day}日 ${s.updatedAt.hour.toString().padLeft(2, '0')}:${s.updatedAt.minute.toString().padLeft(2, '0')}',
-                                        style: const TextStyle(
+                                        style: TextStyle(
                                           fontSize: 11,
-                                          color: Colors.grey,
+                                          color: AppColors.secondary(context),
                                         ),
                                       ),
                                     ],

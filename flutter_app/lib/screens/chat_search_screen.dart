@@ -5,6 +5,7 @@ import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../providers/chat_provider.dart';
 import '../services/storage_service.dart';
+import '../utils/app_colors.dart';
 
 class ChatSearchScreen extends StatefulWidget {
   const ChatSearchScreen({super.key});
@@ -320,7 +321,7 @@ class _ChatSearchScreenState extends State<ChatSearchScreen> {
                           setState(() => _selectedDate = null);
                           _applyFilter();
                         },
-                        child: const Icon(Icons.cancel, size: 16, color: Colors.grey),
+                        child: Icon(Icons.cancel, size: 16, color: AppColors.faint(context)),
                       ),
                     ],
                     const SizedBox(width: 10),

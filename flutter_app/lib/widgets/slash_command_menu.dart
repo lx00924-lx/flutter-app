@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../utils/app_colors.dart';
+
 /// 命令名与输入串的匹配打分（越小越靠前；-1 表示不匹配）。
 ///
 /// 不要求把命令打全：
@@ -158,7 +160,7 @@ class SlashCommandMenu extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
           child: Text(
             '没有匹配的参数（可用：${expanded!.options.map((o) => o.value).join(' / ')}）',
-            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+            style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
           ),
         ));
       }
@@ -225,13 +227,13 @@ class SlashCommandMenu extends StatelessWidget {
             style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Color(0xFF0284C7)),
           ),
           const Spacer(),
-          Text(right, style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+          Text(right, style: TextStyle(fontSize: 10, color: AppColors.secondary(context))),
           const SizedBox(width: 4),
           InkWell(
             onTap: onClose,
-            child: const Padding(
+            child: Padding(
               padding: EdgeInsets.all(2),
-              child: Icon(Icons.close, size: 14, color: Colors.grey),
+              child: Icon(Icons.close, size: 14, color: AppColors.faint(context)),
             ),
           ),
         ],
@@ -270,7 +272,7 @@ class SlashCommandMenu extends StatelessWidget {
             Expanded(
               child: Text(
                 desc,
-                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                style: TextStyle(fontSize: 12, color: AppColors.secondary(context)),
               ),
             ),
           ],
