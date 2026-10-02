@@ -11,9 +11,11 @@ import { getApiBaseUrl } from '../config';
  * Turnstile 的 site key 走构建期环境变量 `VITE_TURNSTILE_SITE_KEY`：
  * 没配时（本地开发）不渲染组件，服务端在非 production 下也会跳过校验。
  */
-const TURNSTILE_SITE_KEY = String(
-  (import.meta as any)?.env?.VITE_TURNSTILE_SITE_KEY || '',
-).trim();
+// ⚠️ 必须写成 `import.meta.env.VITE_TURNSTILE_SITE_KEY` 这个**字面量**形式。
+// Vite 的环境变量是**构建时静态文本替换**，用 `(import.meta as any).env` 包一层会让替换失效，
+// 结果运行时读到 undefined、Site Key 永远为空 —— 实测踩过：构建产物里搜不到这个 key，
+// 页面上 Turnstile 组件根本不渲染。
+const TURNSTILE_SITE_KEY = String(import.meta.env.VITE_TURNSTILE_SITE_KEY || '').trim();
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
