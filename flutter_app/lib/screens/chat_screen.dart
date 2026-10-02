@@ -360,7 +360,11 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               const Divider(height: 1),
               ListTile(
-                leading: const Icon(Icons.tune_outlined, size: 20),
+                // 气泡类图标（会话）。刻意不用 `chat_bubble_outline` —— 那正是本抽屉
+                // 顶部「历史对话」用的图标，同一个抽屉里出现两个一样的不合适；
+                // 也不用原来的 `tune_outlined`（滑块），它和下面的「系统设置」齿轮观感太像，
+                // 用户反馈过"都用设置图标，有点误导"。
+                leading: const Icon(Icons.forum_outlined, size: 20),
                 title: const Text('会话管理与备份', style: TextStyle(fontSize: 13)),
                 trailing: const Icon(Icons.chevron_right, size: 18),
                 onTap: () async {

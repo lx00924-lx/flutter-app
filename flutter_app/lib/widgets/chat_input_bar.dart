@@ -53,6 +53,14 @@ class ChatInputBar extends StatefulWidget {
 }
 
 class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderStateMixin {
+  /// 是否是手机端（Android / iOS）。
+  ///
+  /// 与项目里其它平台判断保持同一写法（见 `keep_alive_service.dart` / `settings_screen.dart`）：
+  /// web 上 `Platform` 不可用，所以必须先判 `kIsWeb`。
+  ///
+  /// 用途：选择卡片在手机端**不给**"点一下即作答"（详见 `_buildQuestionCardBlock` 里的 `tapToSubmit`）。
+  static bool get _isMobilePlatform => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+
   final TextEditingController _controller = TextEditingController();
   late final FocusNode _focusNode;
   bool _hasText = false;
@@ -695,6 +703,13 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     final rawOptions = item['options'];
     final options = rawOptions is List ? rawOptions.whereType<Map>().toList() : const <Map>[];
     final instant = chat.isInstantAnswerQuestion(item);
+    // 「点一下即作答」只在**桌面端**保留。
+    //
+    // 手机端刻意去掉它：触屏误触代价太高 —— 手指蹭到某个选项就直接把答案提交出去，
+    // 而题目描述可能还没看完，答错了也没有挽回余地（实测用户反馈）。
+    // 改成和别的题一样的"点选项 = 选中、再点下面的『确认』= 提交"。
+    // 桌面端不动：鼠标精度高，用户也习惯了快速点选。
+    final tapToSubmit = instant && !_isMobilePlatform;
     final picked = chat.questionPicksFor(id);
     final custom = chat.questionCustomFor(id);
 
@@ -727,7 +742,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
               padding: const EdgeInsets.only(bottom: 6),
               child: InkWell(
                 borderRadius: BorderRadius.circular(8),
-                onTap: instant
+                onTap: tapToSubmit
                     ? () => chat.answerQuestion([
                           {
                             'id': id,
@@ -756,7 +771,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                       Padding(
                         padding: const EdgeInsets.only(top: 1),
                         child: Icon(
-                          instant
+                          tapToSubmit
                               ? Icons.touch_app_outlined
                               : (selected ? Icons.check_box : Icons.check_box_outline_blank),
                           size: 16,
@@ -783,10 +798,15 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                           ],
                         ),
                       ),
-                      if (instant)
+                      if (tapToSubmit)
                         const Padding(
                           padding: EdgeInsets.only(left: 6, top: 1),
                           child: Text('点击即作答', style: TextStyle(fontSize: 10, color: Color(0xFF94A3B8))),
+                        ),
+                      if (instant && !tapToSubmit)
+                        const Padding(
+                          padding: EdgeInsets.only(left: 6, top: 1),
+                          child: Text('选好后点确认', style: TextStyle(fontSize: 10, color: Color(0xFF94A3B8))),
                         ),
                     ],
                   ),
@@ -880,7 +900,18 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
   /// 为什么提交按钮只在最后一题出现（用户要求）：每一题都挂一个提交按钮，
   /// 很容易在只答了一题时就手快交卷（多题场景下漏答就是这么来的）；
   /// 放到最后一题，等于"翻完了才能交"。
-  Widget _buildQuestionNavRow(ChatProvider chat, int total, int step) {
+  ///
+  /// [submitLabel] / [submitEnabled] 是给**手机端的单题单选**用的：那种情况下
+  /// 没有"翻页"概念，只是需要把「点一下即作答」换成「选好后点确认」，
+  /// 所以按钮文案写「确认」，并且在**没选任何选项时保持禁用** —— 否则一个误触
+  /// 就会把空答案提交出去，正是这次要防的事。
+  Widget _buildQuestionNavRow(
+    ChatProvider chat,
+    int total,
+    int step, {
+    String submitLabel = '提交答案',
+    bool submitEnabled = true,
+  }) {
     final multiple = total > 1;
     final hasPrev = step > 0;
     final hasNext = step < total - 1;
@@ -930,15 +961,18 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
               ),
             ),
           const Spacer(),
-          // 单选一题时（点一下即作答）不需要提交按钮；多题时只在最后一题给
+          // 单选一题时（点一下即作答）桌面端不需要提交按钮；多题时只在最后一题给。
+          // 手机端例外：单题单选也要给 —— 文案是「确认」，见方法注释。
           if (isLast)
             FilledButton(
               style: FilledButton.styleFrom(
                 backgroundColor: const Color(0xFF3B82F6),
                 padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
               ),
-              onPressed: chat.pendingQuestion == null ? null : () => chat.submitPendingQuestion(),
-              child: const Text('提交答案', style: TextStyle(fontSize: 12.5)),
+              onPressed: (chat.pendingQuestion == null || !submitEnabled)
+                  ? null
+                  : () => chat.submitPendingQuestion(),
+              child: Text(submitLabel, style: const TextStyle(fontSize: 12.5)),
             ),
         ],
       ),
@@ -1335,8 +1369,13 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                   final total = items.length;
                   // 已答几题：用于标题行提示，避免多题时漏答（答过的题换个页也要看得出来）
                   final answered = _answeredQuestionCount(chat, items);
-                  // 多题必须显式提交（点选项只是勾选）；单题单选有选项时仍是点一下即作答
+                  // 多题必须显式提交（点选项只是勾选）；单题单选有选项时，
+                  // 桌面端仍是点一下即作答，**手机端改成选中后点「确认」**（见下）
                   final needsSubmit = chat.pendingQuestionNeedsSubmit;
+                  // 手机端的单题单选：没有"翻页"概念，但同样需要一行确认按钮。
+                  // 这是本次要补的核心 —— 以前这里 needsSubmit == false，底部那行根本不渲染。
+                  final mobileInstantConfirm =
+                      _isMobilePlatform && !needsSubmit && items.isNotEmpty;
                   // pending（刚问）/ waiting（等久了但**仍在等**，本轮不会交给模型）/
                   // orphaned（本轮已中止，答复走续跑）
                   final qState = chat.pendingQuestionState;
@@ -1382,8 +1421,16 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                                   const SizedBox(height: 8),
                                   // 一次只渲染当前这一题
                                   ..._buildQuestionCardBlock(context, chat, items[step], isDark),
-                                  if (needsSubmit)
-                                    _buildQuestionNavRow(chat, total, step),
+                                  if (needsSubmit || mobileInstantConfirm)
+                                    _buildQuestionNavRow(
+                                      chat,
+                                      total,
+                                      step,
+                                      submitLabel: mobileInstantConfirm ? '确认' : '提交答案',
+                                      // 手机端单题单选：没选东西就不让提交，
+                                      // 免得误触确认把空答案发出去
+                                      submitEnabled: !mobileInstantConfirm || answered > 0,
+                                    ),
                                 ],
                               ),
                             ),
