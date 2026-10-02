@@ -2577,6 +2577,18 @@ async def execute_local_harness(
             "（备用通道不支持图片）。请检查宿主 3080 的 /v1/agent/prompt/stream 是否正常。"
         )
 
+    # ⚠️ content_list 是**原生 WebSocket RPC 通道**的 payload（execute_dsh_via_ws 会把它
+    #    塞进 "prompt"/"parts"/"content" 三个字段），那条通道**只认纯文本块**
+    #    `{type:'text', text}`。
+    #
+    #    2026-10-01 在这里踩过一次大坑：为了"让备用通道也能带图"，往这个列表追加了
+    #    `{type:'image', data, mediaType}`。而这条 WS 通道位于候选循环**之前**、是最先
+    #    尝试的一条 —— 它一因非法块挂掉，整轮就往后降级，用户看到"主通道不可用"并落到
+    #    备用通道，图片反倒永远走不到真正能处理它的 HTTP 通道；更糟的是连正常的文字消息
+    #    和预设切换都被牵连。最后只能把整个图片功能回退掉。
+    #
+    #    图片只走两处 HTTP body：上面的 `payload["images"]`（SSE）与
+    #    `prompt_payload["images"]`（同步端点）—— 那才是插件按 `body.images` 读的地方。
     content_list = []
     if messages and isinstance(messages, list):
         for msg in messages:
@@ -2621,6 +2633,14 @@ async def execute_local_harness(
     }
     if real_session_id:
         prompt_payload["sessionId"] = real_session_id
+    # 图片的两个正确落点之一（另一个是上面 SSE 的 payload）。
+    # 这两个都是**发给插件 HTTP 端点**的 JSON body，插件按 `body.images` 读。
+    #
+    # ⚠️ 千万别往 content_list 里塞图片块 —— 那是「原生 WebSocket RPC 通道」的 payload，
+    #    它只认 {type:'text', text}。2026-10-01 踩过：那条通道位于候选循环之前、最先尝试，
+    #    一挂就整轮降级，连正常的文字消息和预设切换都被牵连，最后只能整体回退。
+    if isinstance(images, list) and len(images) > 0:
+        prompt_payload["images"] = images
 
     candidate_endpoints.append((
         f"{adapter_base}/v1/chat/completions",
