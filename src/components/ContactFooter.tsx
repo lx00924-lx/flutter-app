@@ -10,11 +10,20 @@ interface ContactFooterProps {
   userEmail?: string;
   /** 默认取 `VITE_GITHUB_REPO`（自建部署改 .env 即可，不用动源码） */
   githubUrl?: string;
+  /**
+   * 打开「注销账号」弹窗。
+   *
+   * 为什么页脚也要有这个入口：注销**只**能通过邮箱验证码自助完成，而这台服务器上
+   * 唯一能发起它的地方就是官网。入口只藏在注册弹窗里的话，用户得先点「注册」、
+   * 在一个注册表单里找一条 11px 的灰字才能找到它 —— 实测被反馈"有点难找"。
+   */
+  onDeleteAccount?: () => void;
 }
 
 export const ContactFooter: React.FC<ContactFooterProps> = ({
   userEmail = 'lx00924@gmail.com',
   githubUrl = GITHUB_URL,
+  onDeleteAccount,
 }) => {
   const [copiedEmail, setCopiedEmail] = useState(false);
   const [openDoc, setOpenDoc] = useState<LegalDoc | null>(null);
@@ -179,6 +188,14 @@ export const ContactFooter: React.FC<ContactFooterProps> = ({
             <button onClick={() => setOpenDoc(legalDocs.license)} className="hover:text-slate-400 transition">
               开源许可
             </button>
+            {onDeleteAccount && (
+              <button
+                onClick={onDeleteAccount}
+                className="text-rose-400/90 hover:text-rose-300 transition"
+              >
+                注销账号
+              </button>
+            )}
             <a href={githubUrl} target="_blank" rel="noreferrer" className="hover:text-slate-400 transition">
               GitHub
             </a>

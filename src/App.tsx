@@ -151,6 +151,9 @@ export default function App() {
       <ContactFooter
         userEmail="lx00924@gmail.com"
         githubUrl={GITHUB_URL}
+        /* 页脚也放一个注销入口：不进注册弹窗也能找到（注销只能靠邮箱验证码自助完成，
+           官网是唯一入口，藏在注册表单里等于没有） */
+        onDeleteAccount={() => setShowDeleteAccount(true)}
       />
 
       {/* 注册弹窗：邮箱验证码 + Turnstile + 一邮一号 */}

@@ -332,17 +332,27 @@ export function RegisterModal({ open, onClose, onDeleteAccount }: Props) {
             </p>
 
             {onDeleteAccount && (
-              <p className="text-center text-[11px] leading-relaxed text-slate-400">
-                已有账号想注销？
+              /*
+               * 「注销账号」入口。
+               *
+               * ⚠️ 以前这里是一条 `text-[11px] text-slate-400` 的灰字小链接，压在注册按钮
+               * 和上面那行协议说明下面 —— 实测用户反馈"有点难找"。它其实是这台服务器上
+               * **唯一**能自助注销的地方，不该长得像页脚免责声明。
+               * 现在做成带边框的次要按钮：看得见，但描边+玫红（不是实心）明确弱于主按钮，
+               * 不会诱导误点。
+               */
+              <div className="space-y-2 pt-1">
                 <button
                   type="button"
                   onClick={onDeleteAccount}
-                  className="ml-0.5 text-rose-500 underline-offset-2 transition hover:text-rose-600 hover:underline"
+                  className="w-full rounded-lg border border-rose-200 px-4 py-2 text-sm font-medium text-rose-600 transition hover:border-rose-300 hover:bg-rose-50 dark:border-rose-900/60 dark:text-rose-400 dark:hover:bg-rose-950/40"
                 >
-                  注销账号
+                  注销已有账号
                 </button>
-                （需邮箱验证码验证身份）
-              </p>
+                <p className="text-center text-[11px] leading-relaxed text-slate-400">
+                  注销需用账号绑定的邮箱收验证码验证身份，删除后无法恢复
+                </p>
+              </div>
             )}
           </form>
         )}
