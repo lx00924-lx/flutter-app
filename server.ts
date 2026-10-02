@@ -421,7 +421,12 @@ const CODE_MAX_ATTEMPTS = 5;                 // 同一个码最多试 5 次
 const CODE_PER_EMAIL_10MIN = 3;              // 同邮箱 10 分钟最多发 3 条
 const CODE_PER_IP_HOUR = 5;                  // 同 IP 1 小时最多发 5 条
 const CODE_PER_IP_DAY = 20;                  // 同 IP 24 小时最多发 20 条
-const REGISTER_PER_IP_DAY = 1;               // 同 IP 24 小时最多成功注册 1 个
+// 同 IP 24 小时最多**成功注册**多少个。
+// ⚠️ 是"成功注册"而不是"尝试注册" —— 见 rateLimitPeek/rateLimitHit 的分工：
+//    检查用 peek（不记账），只有真正写进 users.json 了才 hit 记账。
+//    早期版本用 hit 直接做检查，导致"用户名已被占用"这种失败尝试也扣掉当天名额，
+//    用户第一次撞名字冲突、第二次就被告知"今日已上限"（实测报上来的 bug）。
+const REGISTER_PER_IP_DAY = 3;
 
 /**
  * 取真实客户端 IP。
@@ -466,6 +471,34 @@ function rateLimitHit(
     }
   }
   return { ok: true, retryAfterSec: 0 };
+}
+
+/**
+ * 只查不记账：看这个配额还有没有余量。
+ *
+ * 为什么要和 `rateLimitHit` 分开：配额的语义基本都是"**成功的次数**"
+ * （成功注册几个号、成功发出几条验证码），而不是"尝试的次数"。
+ * 如果检查时就记账，一次失败的重试也会把名额吃掉 —— 实测到的 bug 就是这样：
+ * 用户第一次注册撞上"用户名已被占用"（请求走到了配额检查那行），
+ * 名额被扣掉，第二次换个名字就被告知"今日已上限，明日再试"。
+ *
+ * 正确姿势：**先用 peek 检查，等真的做成了再 hit 记账**。
+ */
+function rateLimitPeek(
+  key: string,
+  windowMs: number,
+  max: number,
+): { ok: boolean; used: number; retryAfterSec: number } {
+  const now = Date.now();
+  const arr = (rateBuckets.get(key) || []).filter((t) => now - t < windowMs);
+  if (arr.length >= max) {
+    return {
+      ok: false,
+      used: arr.length,
+      retryAfterSec: Math.max(1, Math.ceil((windowMs - (now - arr[0])) / 1000)),
+    };
+  }
+  return { ok: true, used: arr.length, retryAfterSec: 0 };
 }
 
 /**
@@ -1972,15 +2005,16 @@ async function startServer() {
     }
 
     // 4) 配额：同邮箱 / 同 IP 小时 / 同 IP 日
-    const emailQuota = rateLimitHit(`code:email:${email}`, 10 * 60 * 1000, CODE_PER_EMAIL_10MIN);
+    //    用 peek **只查不记账** —— 记账要等邮件真的发出去了才算（见 rateLimitPeek 的说明）
+    const emailQuota = rateLimitPeek(`code:email:${email}`, 10 * 60 * 1000, CODE_PER_EMAIL_10MIN);
     if (!emailQuota.ok) {
       return res.status(429).json({ error: "该邮箱发送过于频繁，请稍后再试", retryAfterSec: emailQuota.retryAfterSec });
     }
-    const ipHour = rateLimitHit(`code:ip:h:${ip}`, 60 * 60 * 1000, CODE_PER_IP_HOUR);
+    const ipHour = rateLimitPeek(`code:ip:h:${ip}`, 60 * 60 * 1000, CODE_PER_IP_HOUR);
     if (!ipHour.ok) {
       return res.status(429).json({ error: "发送过于频繁，请稍后再试", retryAfterSec: ipHour.retryAfterSec });
     }
-    const ipDay = rateLimitHit(`code:ip:d:${ip}`, 24 * 60 * 60 * 1000, CODE_PER_IP_DAY);
+    const ipDay = rateLimitPeek(`code:ip:d:${ip}`, 24 * 60 * 60 * 1000, CODE_PER_IP_DAY);
     if (!ipDay.ok) {
       return res.status(429).json({ error: "今日发送次数已达上限", retryAfterSec: ipDay.retryAfterSec });
     }
@@ -2000,6 +2034,11 @@ async function startServer() {
       console.error("[Register] 验证码邮件发送失败:", e?.message || e);
       return res.status(500).json({ error: "验证码邮件发送失败，请稍后重试" });
     }
+
+    // 邮件确实发出去了，这时才把三个配额记上账
+    rateLimitHit(`code:email:${email}`, 10 * 60 * 1000, CODE_PER_EMAIL_10MIN);
+    rateLimitHit(`code:ip:h:${ip}`, 60 * 60 * 1000, CODE_PER_IP_HOUR);
+    rateLimitHit(`code:ip:d:${ip}`, 24 * 60 * 60 * 1000, CODE_PER_IP_DAY);
 
     console.log(`[Register] 已向 ${email} 发送验证码（ip=${ip}）`);
     res.json({
@@ -2066,9 +2105,16 @@ async function startServer() {
     }
 
     // ── 同 IP 日注册配额（挡"一个 IP 批量开号"）──────────────
-    const regQuota = rateLimitHit(`reg:ip:${ip}`, 24 * 60 * 60 * 1000, REGISTER_PER_IP_DAY);
+    // ⚠️ 这里只**查**，真正的记账在下面「写进 users.json 成功之后」。
+    //    早期版本直接用 rateLimitHit 做检查，导致"用户名已被占用"这种**失败**尝试
+    //    也扣掉当天名额 —— 用户第一次撞名字冲突、第二次就被告知今日已上限（实测 bug）。
+    const regQuota = rateLimitPeek(`reg:ip:${ip}`, 24 * 60 * 60 * 1000, REGISTER_PER_IP_DAY);
     if (!regQuota.ok) {
-      return res.status(429).json({ error: "今日注册次数已达上限，请明天再试" });
+      console.warn(`[Register] 该 IP 今日注册额度已用尽（${regQuota.used}/${REGISTER_PER_IP_DAY}），ip=${ip}`);
+      return res.status(429).json({
+        error: `今日注册次数已达上限（${REGISTER_PER_IP_DAY} 个），请明天再试`,
+        retryAfterSec: regQuota.retryAfterSec,
+      });
     }
 
     try {
@@ -2108,6 +2154,8 @@ async function startServer() {
       }
 
       emailCodes.delete(email); // 用完即焚，防止同一个码重复使用
+      // 到这里才是"真的建号成功"—— 这时才扣当天的注册名额
+      rateLimitHit(`reg:ip:${ip}`, 24 * 60 * 60 * 1000, REGISTER_PER_IP_DAY);
       console.log(`[Register] 注册成功: ${username} <${email}> (ip=${ip})`);
       res.json({
         user: { id: registeredUser.id, username: registeredUser.username, email: registeredUser.email },
