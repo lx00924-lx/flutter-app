@@ -298,6 +298,25 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 
 ## 8. 运行环境事实（排查时容易找错地方）
 
+- **推 GitHub 要走 Clash 的混合端口，不能靠直连**（2026-10-02 实测）：
+  本机 `github.com:443` **直连不通**（`Test-NetConnection github.com -Port 443` = False），
+  而 **git 不读 Windows 的"系统代理"设置**（`HKCU\...\Internet Settings` 里那个 7890 只对 WinINET 程序生效），
+  所以不带参数直接 `git push` 会报 `Failed to connect to github.com port 443`。
+  正确姿势是**显式指定代理**（一次性 `-c`，不改仓库配置）：
+
+  ```powershell
+  git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push
+  ```
+
+  端口取自 `~/.config/clash/config.yaml` 的 **`mixed-port`**（当前 7890；换配置会变，
+  以 `Get-NetTCPConnection -LocalPort 7890 -State Listen` 为准）。
+  - 代理**没起来**时的现象是 `Empty reply from server` / `Recv failure: Connection was reset` /
+    `Failed to connect ... port 443`，**看起来像 GitHub 挂了，其实是本地代理断了**。
+  - 判据：**Clash 的 UI 进程活着不代表核心在跑** —— 实测出现过「4 个 `Clash for Windows` 进程都在、
+    但 7890 没有任何监听」，此时代理实际是断的。先确认端口有没有在监听，再怀疑网络。
+  - `web_fetch` 走的是同一条链路，代理断了它也会一起失败。
+  - 局域网内的其它目标（如 `F:\ai\flutter-app` 与 `F:\ai\flutter\123` 之间互 fetch）不受影响，代理断了也能用。
+
 - 桌面 App 的本地数据在 **`C:\Users\lx\Documents`**（Hive：`settings_box.hive` / `sessions_box.hive` / `messages_box.hive`），
   **不在安装目录**；清缓存或换机会丢登录态与本地会话。
 - 中继按 `NODE_ENV` 决定官网前端走 Vite 开发中间件还是 `dist/` 静态文件；`start-relay.bat` 已设 `NODE_ENV=production`，
