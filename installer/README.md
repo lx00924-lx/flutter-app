@@ -97,8 +97,14 @@ Inno 的 RestartManager 无法自动关闭它，安装会以「安装程序无�
 
 ## 修改安装器时的注意事项
 
-* `lxai-setup.iss` 里的 **`AppId` GUID 永远不要改** —— 卸载程序靠它识别同一个应用，
+* `lxai-setup.iss` 里的 **`AppId` GUID：同一条产品线内永远不要改** —— 卸载程序靠它识别同一个应用，
   改了会导致"装了新版、旧版留在控制面板里删不掉"。
+  ⚠️ 但 **fork 出去做成另一个产品时必须换成新的 GUID**（`{{新 GUID}}`，用
+  `[guid]::NewGuid()` 生成）—— 否则 Windows 会把两个应用当成同一个：互相顶掉、卸载一个会把另一个也带走。
+  两种要求看着相反，判据只有一句：**"这还是同一个应用吗？"** 是就别改，不是就换。
+* 改品牌要一起动的还有 `MyAppName` / `MyAppPublisher` / `OutputBaseFilename` / `DefaultDirName`
+  等文件头部的 `#define`，以及 `assets/wizard-{large,small}.png`。
+  完整清单见仓库根 `README.md` 的 §5.4 与 §5.5。
 * 卸载**刻意保留用户数据**：聊天记录与登录态在 `%USERPROFILE%\Documents`（Hive），
   不在安装目录。`[UninstallDelete]` 只清安装目录里运行时生成的文件。
 * 改了 `[Files]` 的来源目录后，记得同步更新 `build-installer.ps1` 里的校验路径。

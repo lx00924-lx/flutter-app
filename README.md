@@ -22,6 +22,11 @@ Flutter 纯原生多端客户端（Android / Windows） · Node + React 官网�
 
 核心能力：官网邮箱注册与自助注销、单点登录设备互斥（1 台手机 + 1 台电脑）、消息增量漫游、全局设置云端同步、扫码即配对。
 
+> ⚠️ **clone 下来自己部署，请先看 §五「自建 / fork 部署：必须修改的地方」。**
+> 仓库里有若干**写死的作者域名与仓库地址**（中继地址、官网下载源、App 更新检查源、Bridge 脚本兜底地址）——
+> 不改的话，你的官网会分发作者的安装包、你的 App 会提示更新成作者的包、你的用户桥接会连到作者的服务器。
+> 只想跑一个最小实例的话，照 §5.7 的「最小清单」做即可。
+
 ---
 
 ## 二、环境要求
@@ -202,7 +207,95 @@ cp .env.example .env
 
 ---
 
-## 五、连接你的本地 Agent（Bridge）
+## 五、自建 / fork 部署：必须修改的地方
+
+> 这一节是给「clone 下来自己部署」的人的核对清单。**每一项都实测过"不改会怎样"**，
+> 不是泛泛而谈。只想要一个能跑的最小实例，照文末的「最小清单」做即可。
+
+### 5.1 服务端（`server.ts` + `.env`）
+
+| 要改什么 | 在哪 | 不改会怎样 |
+| :--- | :--- | :--- |
+| **对外地址** | `.env` 的 `SERVER_BASE_URL` | 生成的 Bridge 启动命令、`run_bridge.bat`、配对二维码**全部指向作者的域名** —— 你的用户会把桥接连到别人的服务器上 |
+| **SMTP 发信** | `.env` 的 `SMTP_HOST/PORT/SECURE/USER/PASS/FROM/FROM_NAME` | 注册与注销的验证码发不出去（接口**明确返回 503**，不会假装成功）。用你自己的邮箱**授权码**，不是登录密码 |
+| **Turnstile** | `.env` 的 `TURNSTILE_SECRET` + **构建期**的 `VITE_TURNSTILE_SITE_KEY` | ⚠️ **必须在你自己的 Cloudflare 账号里、为"你自己的域名"新建一个 widget**。直接填作者的 key 会因为域名不匹配而**永远校验失败**，且报错只说"人机验证未通过" |
+| **反代的真实 IP** | 代码里无需改（`server.ts` 的 `clientIpOf()`），但**反代要配对** | `clientIpOf()` 先读 `CF-Connecting-IP`、再读 `X-Forwarded-For` 的**第一段**。用 nginx / Caddy 时，反代必须**覆盖**该头（`proxy_set_header X-Forwarded-For $remote_addr;`）而**不是追加**（`$proxy_add_x_forwarded_for`）—— 追加的话客户端可以自己塞一个假 IP，**绕过注册限流，还能栽赃到别人 IP 上**。作者的部署走 Cloudflare，源站没有公网端口，所以那个头伪造不了；你的部署不一定有这个前提 |
+| **加密主密钥** | `<部署目录>/.secrets/master.key`（可用 `SETTINGS_ENC_KEY` 覆盖） | 不备份 → 磁盘挂了以后所有用户的 API Key / Agent Token **永久解不开**；泄露 → 等于泄露全部用户的密钥。也可以设 `STORE_API_KEYS=0` 让密钥根本不落盘 |
+| **Vite Host 白名单** | `vite.config.ts` 的 `allowedHosts`，用 `.env` 的 `VITE_ALLOWED_HOSTS="a.com,b.com"` 追加 | 开发模式下 Vite 会拒绝你的域名 |
+| **HTTPS** | 反向代理 | 明文暴露登录口令、配对 Token 与全部消息 |
+
+### 5.2 官网（`src/`）
+
+| 要改什么 | 在哪 | 不改会怎样 |
+| :--- | :--- | :--- |
+| **Release 分发源** | `src/App.tsx` 的 `GITHUB_REPO` | 你的官网「下载」区会列出并分发**作者的安装包** |
+| **写死的仓库链接（6 处）** | `src/components/Hero.tsx`（3 处）、`Navbar.tsx`（1 处）、`Downloads.tsx`（2 处） | 导航栏、Hero、下载区的按钮全部跳到**作者的仓库** |
+| **页面文案里的域名** | `src/components/Architecture.tsx` 第 54 行 | 你的官网上白纸黑字写着 `lx00924ai.top` |
+
+> 后两项是**写死的字符串**，没有环境变量可以覆盖，只能改源码。
+
+### 5.3 App（`flutter_app/`）
+
+| 要改什么 | 在哪 | 不改会怎样 |
+| :--- | :--- | :--- |
+| **中继地址** | 打包时 `--dart-define=SERVER_BASE_URL=https://你的域名` | 登录、消息同步、设置漫游、扫码配对、桥接启动命令**全部指向作者的服务器**。登录页「前往官网注册」按钮打开的地址也取自它 |
+| **更新检查 / "官方仓库"** | `lib/models/app_settings.dart` 的 `officialGithubOwner` / `officialGithubRepo` | App 会去查**作者的** Releases 并提示"有新版本"，用户点下去就装成**作者的包**。⚠️ 这两个常量**故意设了空 setter 忽略缓存写入**（防篡改），所以**改不了配置、只能改源码重新打包** |
+| **包名 / 显示名** | `android/app/build.gradle` 的 `namespace` 与 `applicationId`；`AndroidManifest.xml` 的 `android:label`；`windows/CMakeLists.txt` 的 `BINARY_NAME` | 与官方包**签名冲突、无法并存安装**，覆盖安装还会清掉用户数据 |
+| **版本号（两处，要一致）** | `pubspec.yaml` 的 `version` **和** `lib/models/app_settings.dart` 的 `currentVersion` / `currentBuildNumber` | 更新判断错乱（App 以为自己是旧版，反复提示更新） |
+| **Bridge 脚本（两份！）** | 仓库根 `lxai_bridge.py` **和** `flutter_app/assets/scripts/lxai_bridge.py` | 这两份是**逐字节相同的副本**（当前 SHA256 一致），**没有自动同步机制**。只改一份的话，App 分发给用户 / 导出的桥接脚本会回落到作者的服务器（脚本里的 `FALLBACK_SERVERS` 也写死了作者域名和两个已失效的 Cloud Run 地址） |
+| **Android 签名** | `android/key.properties` + `android/app/AI.jks` | 用 debug 签名，无法发布。见 [4.4](#44-换成你自己的-android-签名) |
+
+### 5.4 Windows 安装器（`installer/`）
+
+| 要改什么 | 在哪 | 不改会怎样 |
+| :--- | :--- | :--- |
+| 应用名 / 发布者 / 产物名 | `installer/lxai-setup.iss` 的 `MyAppName`、`MyAppPublisher`、`OutputBaseFilename` 等（都在文件头部的 `#define` 区） | 装出来叫「LxAI」、发布者是作者 |
+| **安装标识 GUID** | 同文件 `MyAppId` | ⚠️ 这里要求**恰好相反的两件事**，别搞混：<br>• **同一条产品线内永远不要改** —— 卸载程序靠它认出"这是同一个应用"，改了会在控制面板留下**删不掉的旧版本**；<br>• **fork 出去做成另一个产品时必须换成新的 GUID** —— 否则两个应用被 Windows 当成同一个，互相顶掉、卸载一个会把另一个也带走。 |
+
+### 5.5 品牌（可选，但工作量大）
+
+`LxAI` 在源码里出现 **92 处**、`Aether-X` **10 处**。要整套改名，至少覆盖这些地方：
+
+- 官网：`index.html` 的 `<title>` 与 `og:*`、`metadata.json`
+- App：`flutter_app/pubspec.yaml` 的 `name` / `description`、`lib/widgets/legal_documents.dart`
+- 安装器：`installer/lxai-setup.iss` + `installer/assets/wizard-*.png`
+- 图标：**唯一来源是 `tools/make_icons.py`** —— 改脚本里的设计参数后跑 `python tools/make_icons.py`，
+  它会一次重生成 22 个文件（Android mipmap 全套 / Windows ico / 托盘 4 态）。**不要手工贴图**
+- `NOTICE`（署名与商标声明）
+- 邮件发件人显示名：`.env` 的 `SMTP_FROM_NAME`（**这个已经是环境变量，不用改代码**）
+
+### 5.6 许可（Apache-2.0，改了要怎么做）
+
+保留 `LICENSE` 与 `NOTICE` 里的版权与许可声明；**分发修改版时在 `NOTICE` 里说明你改了什么**
+（Apache-2.0 第 4(b) 条），并且**不得暗示官方背书**（第 6 条明确不授予商标权）。
+
+### 5.7 最小清单（只要一个能跑的自己实例）
+
+```bash
+# 1) 服务端
+cp .env.example .env
+#    SERVER_BASE_URL          = https://你的域名
+#    SMTP_*                   = 你自己的邮箱授权码
+#    TURNSTILE_SECRET         = 你自己 Cloudflare 账号里的 secret
+#    VITE_TURNSTILE_SITE_KEY  = 同一个 widget 的 site key
+#    VITE_ALLOWED_HOSTS       = 你的域名
+npm install && npm run build && npm start
+
+# 2) 反代 + HTTPS，并让反代【覆盖】X-Forwarded-For
+
+# 3) App
+cd flutter_app
+flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域名
+
+# 4) 只有"你也要对外分发安装包"时才需要：
+#    - src/App.tsx 的 GITHUB_REPO
+#    - src/components/{Hero,Navbar,Downloads}.tsx 里 6 处写死的链接
+#    - flutter_app/lib/models/app_settings.dart 的 officialGithubOwner / officialGithubRepo
+```
+
+---
+
+## 六、连接你的本地 Agent（Bridge）
 
 Bridge 跑在**无公网 IP** 的那台电脑上，主动向云端建立反向长连接。两种启动方式：
 
@@ -246,14 +339,14 @@ python lxai_bridge.py --token "<App 里显示的配对 Token>" \
   改完重启桥接即可。桥接同一时刻只连一个宿主，两种形态不需要同时跑。
 - **App 默认预填桌面版的 19387**（2026-10-01 起）。若你用 `dsh web` 或 `npx`，
   把它改成 `127.0.0.1:3080` —— 端口填错时桥接会一直报"连不上宿主"，
-  但中继侧仍显示在线，这一点容易误判（见 §七 常见问题）。
+  但中继侧仍显示在线，这一点容易误判（见 §八 常见问题）。
 
 两种方式下，App 内「设置 → 本地 Agent 设置」都会给出带 Token 的启动命令、
 `run_bridge.bat` 一键脚本与配对二维码。
 
 ---
 
-## 六、目录结构
+## 七、目录结构
 
 ```
 ├── server.ts                     # 云端中继服务端（鉴权/调度/持久化/漫游/桥接）
@@ -273,7 +366,7 @@ python lxai_bridge.py --token "<App 里显示的配对 Token>" \
 
 ---
 
-## 七、常见问题
+## 八、常见问题
 
 **Q：全新 clone 后直接打包会失败吗？**
 不会。三条链路都已验证过开箱可构建：`flutter build windows --release`、
@@ -302,11 +395,11 @@ Windows 端首次构建需要 VS C++ 工具链；Android 端需要 SDK 与 JDK�
 端口填错时，**中继侧照样显示桥接在线**（它连上的是云端，与宿主无关），但桥接连不上
 本机 DSH，于是任务永远发不出去 —— 症状很容易被误判成"桥接没起来"。判定方法：看桥接
 日志里有没有 `✓ 成功上线`（连上中继）**以及**后续的目录同步；只有前者就说明是宿主侧
-端口不对。详见 §五 ③。
+端口不对。详见 §六 ③。
 
 ---
 
-## 八、安全提醒
+## 九、安全提醒
 
 - **签名密钥（`key.properties` / `*.jks`）绝不能入库。** 一旦提交，任何 clone 仓库的人都能签出与你正式包同签名、可覆盖安装的 APK。
 - **`.env` 里的 SMTP 授权码与 Turnstile Secret 等同密码。** 拿到 SMTP 授权码就能用你的邮箱发信（会被用来发钓鱼邮件，后果算在你头上），拿到 Turnstile Secret 就能绕过人机验证批量注册。`.env` 已被 `.gitignore` 忽略，**不要提交、不要贴进聊天记录或截图**；怀疑泄露时去邮箱服务商后台重置授权码、在 Cloudflare 控制台轮换 Secret。
@@ -315,7 +408,7 @@ Windows 端首次构建需要 VS C++ 工具链；Android 端需要 SDK 与 JDK�
 
 ---
 
-## 九、开源许可
+## 十、开源许可
 
 本项目以 **Apache License 2.0** 发布，全文见 [`LICENSE`](./LICENSE)，第三方名称与商标说明见 [`NOTICE`](./NOTICE)。
 
@@ -328,7 +421,7 @@ Apache-2.0 第 6 条明确：**本许可不授予任何商标权**——不得�
 
 ---
 
-## 十、使用条款、隐私与免责（对外提供服务时必读）
+## 十一、使用条款、隐私与免责（对外提供服务时必读）
 
 本软件按**“现状”**提供，不附带任何担保；作者不对使用后果承担赔偿责任。**使用者只能对自己拥有所有权或已获合法授权的设备使用远程控制能力。**
 
@@ -339,7 +432,7 @@ App 内可在 **设置 → 用户协议 / 隐私政策** 查看，并在登录�
 
 ---
 
-## 十一、第三方名称与商标声明
+## 十二、第三方名称与商标声明
 
 - 本项目为**第三方独立开发**，与任何被兼容或被提及的产品、服务提供方**无任何隶属、合作、赞助或背书关系**。
 - 相关名称与标识归其各自权利人所有；本项目仅在**说明兼容性与互操作性**的范围内提及（指称性合理使用），不表示任何官方认证或授权。
