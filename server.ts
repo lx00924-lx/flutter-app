@@ -403,7 +403,7 @@ const SERVER_BASE_URL =
 
 const SMTP_HOST = (process.env.SMTP_HOST || "").trim();
 const SMTP_PORT = Number((process.env.SMTP_PORT || "465").trim()) || 465;
-const SMTP_SECURE = (process.env.SMTP_SECURE ?? "1").trim() !== "0"; // 465 端口 true；587 端口设 0
+const SMTP_SECURE = !/^(0|false|no|off)$/i.test((process.env.SMTP_SECURE ?? "1").trim()); // 465 端口 true；587 端口设 0/false
 const SMTP_USER = (process.env.SMTP_USER || "").trim();
 const SMTP_PASS = (process.env.SMTP_PASS || "").trim();
 const SMTP_FROM_NAME = (process.env.SMTP_FROM_NAME || "LxAI").trim();
