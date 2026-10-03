@@ -394,18 +394,31 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
   `AppLogger`。在此之前两者**互不相通** —— App 的诊断输出全是 `debugPrint`（只写 stdout，
   双击启动的桌面应用没有控制台，输出直接丢掉），而设置页「调试日志」读的是 `AppLogger`，
   全项目只有日志页自己在写它。所以用户报"抓不到日志"时，先确认这个桥接在不在，别去找日志文件。
-- **Windows 分发走安装器**（2026-09-29 新增，位于 `installer/`）：
-  - 一键构建 `pwsh -File installer/build-installer.ps1`（先校验 Flutter Release 产物，版本号自动读 `pubspec.yaml`）；
-    产物在 `installer\output\LxAI-Setup-<版本>.exe`（约 22 MB）。
-  - **捆绑私有 Python 运行时**到 `{app}\python`（Python 3.13 embeddable + websockets），
-    所以用户**不需要自己装 Python**；依赖只落在该私有目录，**不进用户的全局环境**。
-  - 安装目录由向导让用户选（默认 `{autopf}\LxAI`），并可切换「为所有用户 / 仅为我」（后者免管理员、不弹 UAC）。
-  - ⚠️ `.iss` 里的 **`AppId` GUID 永远不要改**：卸载程序靠它识别同一个应用，改了会在控制面板留下删不掉的旧版本。
-  - 卸载**刻意保留用户数据**（`Documents` 里的 Hive），只清安装目录里运行时生成的文件。
-  - ⚠️ **改了 App 代码后必须重新 `flutter build windows --release` 再编译安装器** ——
+- **Windows 分发走安装器 —— 2026-10-03 起主line 换成自研原生版（D 方案）**：
+  - **新主line**：独立仓库 **`lxai-setup-flutter`**（GitHub `lx00924-lx/lxai-setup-flutter`），
+    **C++ 管安装逻辑 + WebView2 渲染 HTML/CSS 界面**。
+    一键出**单文件**：`tool\build-installer.ps1` → `output\LxAI-Setup-<版本>.exe`（约 25.5 MB）。
+    - 界面（HTML/图标）由 `native\ui\ui.rc` 编进 exe 资源；
+      素材（私有 Python + App 本体）压缩后**追加在 exe 尾部**（32 字节定长尾部标记 `LXAIZIP1`），
+      运行时用 vendored 的 miniz 解到临时目录。**界面靠虚拟主机 `https://lxai.setup/` 供给**
+      （不能用 `NavigateToString`：那样页面没有基准 URL，`<img src="app_icon.png">` 会裂图）。
+    - 卸载器 = **同一个 exe 截掉素材段**（约 450 KB），靠 `--uninstall` 或"住在 `uninstaller\` 下"识别身份。
+      注册表卸载项用**与旧 Inno 版同一个 GUID**，所以是原地升级、控制面板里不会出现两个 LxAI。
+      卸载器的自毁交给 `wscript.exe` 跑 VBS（它删不掉自己）。
+    - 覆盖安装**先杀后装**：结束所有"可执行文件位于安装目录下"的进程（按路径判、不按进程名）。
+    - ⚠️ **`native\third_party\miniz\` 必须入库**（`.gitignore` 里特意开了例外）——
+      它是构建必需品，不像 WebView2 SDK 那样能现拉。
+  - **旧 Inno 版（`installer/`）仍在，但现在只是"私有 Python 运行时的存放与生成处"**：
+    - ✅ **必须保留**：`installer\runtime\python`（新安装器的 `tool\build-payload.ps1` 直接读它）
+      与 **`installer\prepare-runtime.ps1`**（它是**唯一**能重建那份运行时的脚本，
+      新安装器报错时提示的就是它）。`cache\` 是它的 wheel 缓存，离线重建靠它。
+    - ❌ 已废但**先别删**：`lxai-setup.iss` / `build-installer.ps1` / `assets\wizard-*` / `languages\`
+      —— 留作回退路径，等新安装器在真实机器上跑够再清。
+    - 安装目录由向导让用户选（默认 `{autopf}\LxAI`），并可切换「为所有用户 / 仅为我」（后者免管理员、不弹 UAC）。
+    - ⚠️ `.iss` 里的 **`AppId` GUID 永远不要改**：卸载程序靠它识别同一个应用，改了会在控制面板留下删不掉的旧版本。
+    - 卸载**刻意保留用户数据**（`Documents` 里的 Hive）—— 新旧两版都是这个口径。
+  - ⚠️ **改了 App 代码后必须先 `flutter build windows --release` + 重打素材**（`tool\build-payload.ps1`）**再编安装器** ——
     安装器打包的是 Release 目录的产物，曾出现「源码比 app.so 新」导致装出来的 App 不含最新改动。
-  - 仓库只入库脚本 + `.iss` + 语言包（合计约 40 KB）；`cache/` `runtime/` `output/` 已在 `.gitignore`，
-    clone 后跑一次构建脚本即可重建。细节与注意事项见 `installer/README.md`。
 - 生产中继目录 `F:\ai\flutter-app` **是同仓库的一份老旧克隆，但日常只能手工同步**（2026-09-29 核实）：
   - 它确实是 `https://github.com/lx00924-lx/flutter-app` 的 clone，但 **HEAD 停在 `3e3f2a5`（2026-09-20），落后远端 19 个提交**，
     而且有 **27 处本地改动/删除** —— 就是这一路手工覆盖上去的 `server.ts`、`docs/`、`AGENTS.md`、`package.json` 等；

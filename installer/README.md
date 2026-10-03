@@ -1,110 +1,88 @@
-# LxAI Windows 安装器
+# `installer/` —— 私有 Python 运行时的存放与生成处
 
-用 **Inno Setup 6** 把 Flutter 的 Windows Release 产物 + 一份**私有 Python 运行时**
-打包成标准安装程序（中文向导、可选安装目录、快捷方式、标准卸载入口）。
+> ⚠️ **先读这段，别按目录名想当然。**
+>
+> 这个目录**曾经**是 Inno Setup 版的安装器（2026-09-29 ～ 2026-10-03）。
+> 2026-10-03 起 Windows 分发的**主线换成了自研原生版**，在**独立仓库**
+> `lxai-setup-flutter`（GitHub `lx00924-lx/lxai-setup-flutter`，C++ + WebView2）。
+>
+> 但**这个目录不能删** —— 新安装器要用的那份「私有 Python 运行时」就住在这里。
 
-## 一键构建
+---
+
+## 一、这里的东西分别归谁
+
+| 内容 | 归谁用 | 能不能动 |
+| :--- | :--- | :--- |
+| **`runtime/python/`**（118 文件 / 21.4 MB，gitignored） | **新安装器**：`lxai-setup-flutter\tool\build-payload.ps1` 硬编码读 `$RepoRoot\installer\runtime\python` | ✅ 留着。**删了/挪了新安装器直接造不出安装包** |
+| **`prepare-runtime.ps1`** | **新安装器**：这是**唯一**能重建上面那份运行时的脚本 | ✅ 留着。新机器 clone 后 `runtime/` 是空的（gitignored），必须靠它 |
+| `cache/`（gitignored） | `prepare-runtime.ps1` 的 wheel 缓存 | ✅ 留着 —— 见下面「为什么缓存不能删」 |
+| `lxai-setup.iss` / `build-installer.ps1` / `assets/wizard-*` / `languages/` | 旧 Inno 版，**已不再迭代** | ⏸ 先别删，留作回退路径 |
+| `output/`（22 MB，gitignored） | 旧 Inno 版的产物 | 🗑 可随时删，纯占地方 |
+
+---
+
+## 二、新安装器怎么用这里的东西
+
+新安装器**不读这个目录**，它读的是**由这里产出的素材**。完整链路：
 
 ```powershell
-# 前置：先出 Flutter 产物
-cd ..\flutter_app
-flutter build windows --release
+# ① 在打包目录构建 App（必须，安装器打包的是构建产物）
+cd F:\ai\flutter\flutter-app
+git fetch origin ; git reset --hard origin/main      # 绝不用 git clean -fdx（会删签名密钥）
+cd flutter_app ; flutter build windows --release
 
-# 回到这里构建安装器
-cd ..\installer
-pwsh -File build-installer.ps1
+# ② 组装素材 —— 这一步会从 installer\runtime\python 取私有运行时
+cd F:\ai\flutter\lxai-setup-flutter
+powershell -ExecutionPolicy Bypass -File tool\build-payload.ps1
+#   产出：payload\app\（App 产物）+ payload\python\（私有运行时）+ 许可与图标
+#   ⚠️ 它优先读「打包目录」的 Release，其次才是源码仓 123 的 —— 源码仓那份可能更旧
+
+# ③ 打单文件安装包
+powershell -ExecutionPolicy Bypass -File tool\build-installer.ps1
+#   产出：output\LxAI-Setup-1.0.1.exe（约 25.5 MB，双击即装的单文件）
 ```
 
-产物：`output\LxAI-Setup-<版本>.exe`（约 22 MB）。版本号默认从 `flutter_app/pubspec.yaml` 读取。
+**`prepare-runtime.ps1` 什么时候用**：只在 `installer/runtime/python` 不存在或损坏时。
+`build-payload.ps1` 发现缺了会提示「先跑 `installer\prepare-runtime.ps1`」，照做即可：
 
-## 依赖（都只需一次）
-
-| 依赖 | 说明 |
-| :--- | :--- |
-| **Inno Setup 6** | 编译器 `ISCC.exe`。下载 <https://jrsoftware.org/isdl.php>；静默安装：<br>`innosetup-6.7.3.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-` |
-| **本机 Python** | 仅用于 `pip download` 取 wheel（脚本会自己找 `python` 或 `py`），**不参与最终产物** |
-| 网络 | 首次备料要下 Python embeddable 与 websockets wheel，之后走 `cache\` 缓存 |
-
-## 目录说明
-
-```
-installer/
-├── lxai-setup.iss            Inno Setup 脚本（入库）
-├── prepare-runtime.ps1       备料：组装私有 Python 运行时（入库）
-├── build-installer.ps1       一键构建（入库）
-├── languages/
-│   └── ChineseSimplified.isl 简体中文语言包（入库）
-├── assets/                   向导外观素材（入库）
-│   ├── wizard-large.png      向导侧边大图（纯白底 + 产品图标）
-│   ├── wizard-small.png      向导右上角小图
-│   └── slides/               安装过程中的轮播图（4 张功能截图）
-├── cache/                    ⛔ 下载缓存        （.gitignore）
-├── runtime/python/           ⛔ 私有 Python 运行时（.gitignore）
-└── output/                   ⛔ 编译产物        （.gitignore）
+```powershell
+powershell -ExecutionPolicy Bypass -File installer\prepare-runtime.ps1
 ```
 
-## 为什么内置一份 Python
+它做的事：拉 Python 3.13 **embeddable** 包 → 解开 `python313._pth` 打开 `site`
+（否则 `import` 不到 `site-packages`）→ 解压 `websockets` 的 `cp313` wheel →
+跑一次导入自检。**不用 pip**（embeddable 版没有 pip，装不进去）。
 
-桥接 `lxai_bridge.py` 是 Python 脚本，第三方依赖是 `websockets`。此前只能要求用户
-自己装 Python 并 `pip install websockets` —— 既抬高门槛，又会把依赖装进用户的**全局**
-Python 环境。内置一份私有运行时后：
+### 为什么 `cache/` 不能删
 
-* 用户装完 App 就能用远程遥控，**不需要任何额外步骤**；
-* 依赖只落在 `{app}\python` 里，**不污染用户的 Python**（用户自己装没装、装什么版本都不影响）；
-* 不同用户的 Python 版本差异不再影响桥接行为。
+`prepare-runtime.ps1` 的注释里记着实测结论：本机（以及不少国内网络环境）**走代理/透明网关时，
+`pypi.org` 会被解析到不可达的内网地址**（实测 `198.18.0.41`，与 `github.com → 198.18.0.x` 同源）。
+旧写法"无条件先下载"会让整个构建卡死在这一步，而 `cache/` 里其实早就躺着版本完全匹配的 wheel。
+所以在缓存时**就不再联网**：既能离线重建，重复构建也快得多。
 
-App 侧 `BridgeProcessManager._resolvePythonExecutable()` 会**优先**使用 `{应用目录}\python\python.exe`，
-找不到才回退 PATH 里的 `python`（覆盖"开发机直接跑构建产物"与"免安装绿色版"两种场景）。
+---
 
-实现细节见 `prepare-runtime.ps1` 的注释（要点：Python **embeddable** 默认关闭
-`site-packages`，必须打开 `python3xx._pth` 里的 `import site`，否则 `import websockets` 会失败）。
+## 三、旧 Inno 版（已弃用，留档）
 
-## 外观与安装过程（这块踩过三个坑，改之前务必看）
+万一新安装器出了没法快速修的问题，可以用它顶一次 —— 脚本齐全，一键出 22 MB 单文件：
 
-| 现象 | 根因 | 做法 |
-| :--- | :--- | :--- |
-| 编译报 `Unknown type 'TTimer'` | Inno 的 Pascal Script **没有 `TTimer` 支持类**，脚本层也没有自己的消息循环 | 轮播改由 `CurInstallProgressChanged` 驱动 —— 按安装进度把 4 张图均匀铺开（0~25% 第 1 张、25~50% 第 2 张…），比定时器更贴合安装流程 |
-| 编译报 `Unknown identifier 'PICTURE'` | `TBitmapImage` 的属性是 **`Bitmap` / `PngImage`**，**没有 `Picture`** | 素材是 PNG，所以用 `SlideImage.PngImage.LoadFromFile(...)` |
-| 安装时反复抛「内部错误：Cannot call file extractor recursively」 | `CurInstallProgressChanged` 发生在 Inno **正在写文件**的过程中，此时不允许再调 `ExtractTemporaryFile` | 改为进入安装页时用 `ExtractTemporaryFiles('*.png')` **一次性全部提取**，之后只做 `LoadFromFile` |
+```powershell
+powershell -File installer\build-installer.ps1     # 产物在 installer\output\
+```
 
-另外两条容易踩的点：
+它自带卸载器、快捷方式、注册表卸载项与 UAC 提权，久经使用。
 
-* **Pascal 的花括号本身就是注释定界符** —— 注释正文里不能再写花括号（例如写 `{tmp}` 会把外层注释提前闭合，报出位置莫名其妙的 Syntax error）。
-* **轮播图用 `dontcopy`**：只打进安装包、**不落到目标目录**（实测确认目标目录里没有这些 png），安装结束后由 Inno 自动清理临时目录。
+⚠️ 与旧版的兼容点：`lxai-setup.iss` 里的 **`AppId` GUID 永远不要改**
+（`{8CC1E567-9691-46FF-914C-B7A24B230C39}`）—— 卸载程序靠它识别同一个应用，
+改了会在控制面板留下删不掉的旧版本。新安装器的注册表卸载项**用的是同一个 GUID**，
+所以新旧两版之间是原地升级，控制面板里不会出现两个 LxAI。
 
-## 安装前会停掉占用目标目录的桥接
+---
 
-桥接跑的是 App 自带的私有 Python（应用目录下的 `python` 子目录）。它一旦变成孤儿进程
-（App 退出时没带走 —— 旧版本的行为，现已在托盘退出项里修掉），就占着安装目录里的 `python.exe`，
-Inno 的 RestartManager 无法自动关闭它，安装会以「安装程序无法自动关闭所有应用程序」**直接中止**
-（实测：退出码 5，日志里可见 `RestartManager found an application using one of our files: Python`）。
+## 四、两版共同的口径
 
-所以 `[Code]` 的 `PrepareToInstall` 会先跑 `StopBridgeInAppDir()`：用 PowerShell 精确结束
-**「可执行文件路径位于应用目录下」**的 python —— **绝不动用户自己环境里的 Python**。
-实测对比：同一场景下，加这段之前安装失败（退出码 5），加了之后安装成功（退出码 0）且占用进程被清掉。
-
-## 已知事项
-
-* **未做代码签名**：用户首次运行会看到 Windows SmartScreen 的"未知发布者"提示，
-  需点"仍要运行"。这是 Windows 的机制，与安装器本身无关；要消除它需购买代码签名证书
-  （EV 证书可立即获得信任）。
-* **Inno Setup 的许可**：其 `license.txt` 明确允许"any purpose, including commercial
-  applications"；官网对商业用户是"请求"购买许可（非强制）。本项目的安装器按
-  `license.txt` 条款使用。
-* 语言包 `languages/ChineseSimplified.isl` 取自社区翻译项目
-  <https://github.com/kira-96/Inno-Setup-Chinese-Simplified-Translation>，
-  Inno Setup 官方包不含简体中文。
-
-## 修改安装器时的注意事项
-
-* `lxai-setup.iss` 里的 **`AppId` GUID：同一条产品线内永远不要改** —— 卸载程序靠它识别同一个应用，
-  改了会导致"装了新版、旧版留在控制面板里删不掉"。
-  ⚠️ 但 **fork 出去做成另一个产品时必须换成新的 GUID**（`{{新 GUID}}`，用
-  `[guid]::NewGuid()` 生成）—— 否则 Windows 会把两个应用当成同一个：互相顶掉、卸载一个会把另一个也带走。
-  两种要求看着相反，判据只有一句：**"这还是同一个应用吗？"** 是就别改，不是就换。
-* 改品牌要一起动的还有 `MyAppName` / `MyAppPublisher` / `OutputBaseFilename` / `DefaultDirName`
-  等文件头部的 `#define`，以及 `assets/wizard-{large,small}.png`。
-  完整清单见仓库根 `README.md` 的 §5.4 与 §5.5。
-* 卸载**刻意保留用户数据**：聊天记录与登录态在 `%USERPROFILE%\Documents`（Hive），
-  不在安装目录。`[UninstallDelete]` 只清安装目录里运行时生成的文件。
-* 改了 `[Files]` 的来源目录后，记得同步更新 `build-installer.ps1` 里的校验路径。
+- **卸载刻意保留用户数据**：`Documents` 下的 Hive（聊天记录、登录态、设置）不动，
+  只清安装目录。重装后数据原样回来。
+- **改了 App 代码 → 必须先 `flutter build windows --release` + 重打素材再编安装器**。
+  曾出现过「源码比 `app.so` 新」导致装出来的 App 不含最新改动。
