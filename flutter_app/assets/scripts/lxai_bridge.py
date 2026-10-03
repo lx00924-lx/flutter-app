@@ -1003,6 +1003,40 @@ def merge_session_row(sessions, index, row):
         if key not in existing:
             existing[key] = value
 
+def extract_plugin_error(obj) -> str:
+    """从插件的响应体里挑出错误说明；没有错误就返回空串。
+
+    插件的 promptStream 在 startTurn 抛错时返回的是 **HTTP 200** + 这样的 JSON：
+
+        {"status":"error","error":{"code":"start-failed",
+         "message":"prompt rejected","where":"at admit (...)"},"choices":[]}
+
+    它既不是 SSE、也没有 HTTP 错误码，所以**必须显式识别** —— 否则
+    "响应里没找到正文"这条判断会顺手把唯一的线索丢掉，用户只看到兜底的 404。
+    （2026-10-03 实测：正是这个吞错误让"图片发不出去"排查多绕了一大圈。）
+    """
+    if not isinstance(obj, dict):
+        return ""
+    err = obj.get("error")
+    if isinstance(err, dict):
+        msg = str(err.get("message") or "").strip()
+        code = str(err.get("code") or "").strip()
+        where = str(err.get("where") or "").strip()
+        if not msg and not code:
+            return ""
+        out = msg if msg else "（插件未给出说明）"
+        if code:
+            out += "  [" + code + "]"
+        if where:
+            out += "  " + where
+        return out
+    if isinstance(err, str) and err.strip():
+        return err.strip()
+    if str(obj.get("status") or "").lower() == "error":
+        return "插件返回了错误但没有给出说明"
+    return ""
+
+
 def is_html_content(content: str) -> bool:
     if not content or not isinstance(content, str):
         return False
@@ -2120,6 +2154,15 @@ async def execute_dsh_sse_stream(
             if ev_type == "sync_json":
                 try:
                     j = json.loads(ev_data)
+                    # ⚠️ 插件在 startTurn 抛错时返回的是 **HTTP 200 + `{status:'error',
+                    #    error:{code,message}}`**（不是 SSE，也不是 4xx/5xx）。以前这里只找正文，
+                    #    错误信息被整个吞掉 —— 用户只看到兜底的"HTTP 404 (Not Found)"，
+                    #    真因（2026-10-03 那次是 `prompt rejected`）永远浮不出来，
+                    #    排查时白绕一大圈。所以先把错误挑明。
+                    plugin_err = extract_plugin_error(j)
+                    if plugin_err:
+                        await on_step_callback(f"❌ 宿主拒绝了本轮任务：{plugin_err}")
+                        return False, f"宿主拒绝本轮任务：{plugin_err}"
                     extracted = extract_text_from_obj(j)
                     if extracted and not is_html_content(extracted):
                         return True, extracted

@@ -626,25 +626,17 @@ export function apply(ctx) {
 
     // 6) 构造 prompt 内容并**入队**
     //
-    // 图片必须走 `ctx.attachments.admitPromptContent()`：它会把裸 base64 校验、规范化、
-    // 持久化，再换成宿主认的持久引用（`{type:'image', attachment:{...}}`）。
-    // 直接把裸 base64 塞进 content 会被宿主拒收 —— 这正是"App 发了图、模型看不到"的
-    // 最后一道断点（前一道在桥接：它以前压根没把 images 传下来）。
-    const parts = [{ type: 'text', text: prompt }]
-    const imageParts = readImages(body.images)
-    for (const part of imageParts) parts.push(part)
-
-    let content = parts
-    if (imageParts.length > 0) {
-      const attachments = ctx.get('attachments')
-      if (attachments === undefined || typeof attachments.admitPromptContent !== 'function') {
-        // 宿主没挂附件服务（自己组 profile 时可能没装 dsh-attachment-local）。
-        // 明确失败好过静默丢图 —— 用户至少知道该去查什么。
-        throw new Error('本机宿主未启用附件服务（attachments），无法接收图片')
-      }
-      content = await attachments.admitPromptContent(parts)
-      ctx.logger?.info?.(`[app-bridge] 本轮已受理 ${imageParts.length} 张图片`)
-    }
+    // ⚠️ 图片块必须是**未受理的编码形态**（`{type:'image', mediaType, data}`），
+    //    由宿主自己去受理 —— **这里千万不要先调 `ctx.attachments.admitPromptContent()`**。
+    //
+    //    为什么（2026-10-03 实测踩出来的）：`sessions().prompt()` 内部那条 admit 路径
+    //    本来就会 `await this.ctx.attachments.admitPromptContent(request.content)`
+    //    （见 dsh-api-session-controller/lib/index.js 的 admit()）。如果我们在外面先受理一次，
+    //    传下去的就已经是 `{type:'image', attachment:{...}}`，宿主再受理时读不到 `data`，
+    //    而 `Buffer.from(undefined,'base64')` 抛的是普通 TypeError、不是 AttachmentError，
+    //    于是被兜底成一句毫无信息量的 **"prompt rejected"**（错误码 session/agent-busy），
+    //    排查时完全看不出跟图片有关。
+    const content = [{ type: 'text', text: prompt }, ...readImages(body.images)]
 
     await sessions().prompt({
       requestId: randomUUID(),
