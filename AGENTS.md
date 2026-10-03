@@ -514,6 +514,37 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - **判据**：这类 bug 的共同形状是「**用旧快照覆盖新状态**」＋「**失败被静默吞掉**」。
   写任何异步回调前先问一句：这个闭包捕获的值，在回调真正跑起来的时候还成立吗？
 
+### 9.8 图片消息链路（App → 中继 → 桥接 → 插件 → DSH）
+
+四段各司其职，**任何一段缺失都表现为"图发了但模型没看到"**。2026-10-03 全链路打通并实测。
+
+- **载荷形状**：App `toDshImagePart()` 产出 `{data, mediaType, name?}` —— 与宿主
+  `@deepseek-ai/dsh-attachment` 的 `EncodedImageAttachment` **逐字段一致**。
+  `data` 必须是**裸的规范 base64**（无 `data:` 前缀）；宿主会解码后重新编码逐字节比对，
+  不一致就 `INVALID_IMAGE_BASE64`。所以**中间任何一段都只准搬运、不准重新编码**。
+  只放行 png/jpeg/webp（宿主声明支持的三种）。
+- **图片只走 HTTP body 的两个位置**：桥接 SSE 的 `payload["images"]` 与同步端点的
+  `prompt_payload["images"]`。
+  ⚠️ **绝不能往 `content_list` 塞图片块** —— 那是「原生 WebSocket RPC 通道」的 payload，
+  只认纯文本块；它位于候选循环**之前、最先尝试**，一挂就整轮降级，把正常的文字消息与
+  预设切换一起牵连（2026-10-01 为此整体回退过图片功能）。
+- ⚠️ **插件不要自己调 `ctx.attachments.admitPromptContent()`**。`sessions().prompt()`
+  内部的 admit 路径**本来就会受理**（`dsh-api-session-controller` 的 `admit()`）。
+  先受理一次的话，传下去的是 `{type:'image', attachment:{...}}`，宿主再受理时读不到
+  `data`，而 `Buffer.from(undefined,'base64')` 抛的是**普通 TypeError、不是
+  `AttachmentError`**，于是被兜底成一句毫无信息量的 `"prompt rejected"`
+  （错误码还是 `session/agent-busy`），排查时完全看不出跟图片有关。
+  **正确做法：把未受理的编码块原样交给宿主。**
+- **桥接必须挑明插件的错误**：插件在 `startTurn` 抛错时返回的是
+  **HTTP 200 + `{status:'error', error:{code,message,where}}`** —— 既不是 SSE 也没有
+  错误码。桥接曾经只找正文、找不到就放弃，于是唯一的线索被丢掉，用户只看到兜底的
+  "HTTP 404"。见 `extract_plugin_error()`。
+- **诊断手法**（这次就是靠它定位的）：拿安装目录的私有 Python 直接调端点做对照实验 ——
+  `dsh_headers()` 可以复用桥接自己的签名逻辑。同一提示词**不带图 200 / 带一张 1×1 PNG
+  就失败**，一步就把范围从"整条链路"缩到"图片专属分支"。比反复在 App 里试点快得多。
+- **手机端要单独重打 APK**：`LxAI-1.0.1.apk`（09-29 上传）比发图代码（10-01）还早，
+  那份 App **根本没有发图功能**。
+
 ## 10. PowerShell 脚本必须带 UTF-8 BOM（本机只有 PS 5.1）
 
 - **现象**：脚本在别处直接语法报错，错误信息里夹着乱码 ——
