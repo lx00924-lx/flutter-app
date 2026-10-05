@@ -697,6 +697,88 @@ interface DeviceSession {
 }
 
 /**
+ * 【安全】身份校验守卫 —— 认「登录凭证」，不认「请求里报出来的名字」。
+ *
+ * 背景（2026-10-06 实测确认）：`/api/messages/:userId`、`/api/sync-messages`、
+ * `delete-message`、`delete-session`、`settings/:userId`、`agent/bridge-command`
+ * 这几个接口此前**只把 URL/body 里的 userId 当作身份**，而 userId 是公开的
+ * （顺序数字 / 手机号，扫一遍就能猜到）。后果实测如下（隔离沙箱，非推断）：
+ *   · 无任何凭据即可读取该用户全部聊天记录（含用户随手粘贴的密码等）；
+ *   · 可**往聊天记录里注入伪造消息**、删消息、一次请求删掉整个会话；
+ *   · 可改写该用户的云端设置；可远程把该用户的桥接停掉（日志里发起方
+ *     自称 "attacker" 也照样执行）。
+ *   · 响应头带 `Access-Control-Allow-Origin: *`，浏览器端也能直接读走。
+ *
+ * 凭证从哪来：客户端本来就一直在发 `x-client-session-id`
+ * （`SyncService._createOptions()` 注入，登录时由服务端签发、存进
+ * active_sessions.json 的槽位里）。所以这里**不需要发明新机制**，只是把
+ * "这个 id 是否属于该用户"这一条校验补上 —— 与 `/api/check-session`、
+ * `/ws/app` 握手用的是同一份数据、同一套语义。
+ *
+ * 为什么每次请求都读盘：`active_sessions.json` 只有几百字节，相对聊天记录
+ * （MB 级）可以忽略；而且**不能让被顶下线的旧 id 继续通行**，内存缓存会带来
+ * 失效窗口，所以宁可每次都读。
+ *
+ * @returns true = 校验通过，路由继续；false = 已回 403，路由必须立即 return。
+ */
+async function verifyUserIdentity(
+  req: any,
+  res: any,
+  claimedUserId: string,
+  action: string,
+): Promise<boolean> {
+  const userId = (claimedUserId || "").toString().trim();
+  const headerUserId = ((req.headers["x-user-id"] as string) || "").toString().trim();
+  const clientSessionId = ((req.headers["x-client-session-id"] as string) || "").toString().trim();
+  const rawDevice = ((req.headers["x-device-type"] as string) || "").toString().trim().toLowerCase();
+  const deviceType: 'mobile' | 'desktop' | '' =
+    rawDevice === 'mobile' || rawDevice === 'phone' || rawDevice === 'android' || rawDevice === 'ios'
+      ? 'mobile'
+      : rawDevice === 'desktop' || rawDevice === 'windows' || rawDevice === 'pc' || rawDevice === 'macos'
+        ? 'desktop'
+        : '';
+
+  const deny = (error: string, code: string) => {
+    console.warn(
+      `[安全] 已拦截未通过身份校验的请求：${action}（目标用户 ${userId || "?"}，` +
+        `来源 x-user-id=${headerUserId || "无"}，x-client-session-id=${clientSessionId ? "有" : "无"}）`,
+    );
+    // 用 403 而不是 401：App 侧 `_checkAndTriggerForceLogout` 只在 401 + FORCE_LOGOUT
+    // 时触发顶号流程，用 403 不会把"被拦截"误报成"账号在别处登录了"。
+    res.status(403).json({ error, code });
+  };
+
+  if (!userId || userId === 'guest' || userId === 'default_user') {
+    deny('缺少有效的用户标识', 'IDENTITY_REQUIRED');
+    return false;
+  }
+  // 请求里自报的名字必须与它要访问的资源一致 —— 否则拿自己的合法凭证就能读别人。
+  if (headerUserId && headerUserId !== userId) {
+    deny('请求身份与目标账号不一致', 'IDENTITY_MISMATCH');
+    return false;
+  }
+  if (!clientSessionId) {
+    deny('缺少登录凭证，请重新登录后重试', 'SESSION_ID_REQUIRED');
+    return false;
+  }
+
+  try {
+    const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
+    const slots = sessions[userId];
+    // 设备类型识别不出来时，退化为「该用户的任一槽位匹配即可」：
+    // 仍挡得住"光知道用户名"的陌生人，又不会因为头不规范而误伤正常用户。
+    const candidates = deviceType ? [deviceType] : (['mobile', 'desktop'] as const);
+    const matched = candidates.some((slot) => slots?.[slot]?.clientSessionId === clientSessionId);
+    if (matched) return true;
+    deny('登录凭证已失效（该设备可能已在别处登录），请重新登录后重试', 'SESSION_INVALID');
+  } catch (e) {
+    console.error('[安全] 身份校验读取会话槽位失败：', e);
+    res.status(500).json({ error: '身份校验失败，请稍后重试', code: 'IDENTITY_CHECK_ERROR' });
+  }
+  return false;
+}
+
+/**
  * 待下发的「桥接控制指令」队列：userId -> { command, createdAt }。
  *
  * 用途：手机端点「启动 / 停止 / 重启」时无法直接操作电脑上的脚本，
@@ -2635,6 +2717,7 @@ async function startServer() {
       if (!userId || userId === "guest") {
         return res.status(401).json({ error: "缺少 userId，无法下发指令" });
       }
+      if (!(await verifyUserIdentity(req, res, userId, "下发桥接指令"))) return;
       if (!allowed.includes(command)) {
         return res.status(400).json({ error: `不支持的指令：${command}，可选 ${allowed.join(" / ")}` });
       }
@@ -2743,6 +2826,7 @@ async function startServer() {
 
   // REST API for messages (Per user)
   app.get("/api/messages/:userId", async (req, res) => {
+    if (!(await verifyUserIdentity(req, res, req.params.userId, "读取聊天记录"))) return;
     try {
       const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
       const userMsgs = (allMessages[req.params.userId] || []).filter(
@@ -2756,6 +2840,7 @@ async function startServer() {
 
   app.post("/api/sync-messages", async (req, res) => {
     const { userId, messages } = req.body;
+    if (!(await verifyUserIdentity(req, res, userId, "写入消息"))) return;
     try {
       await withFileLock(MESSAGES_FILE, async () => {
         const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
@@ -2782,6 +2867,7 @@ async function startServer() {
     if (!userId || !messageId) {
       return res.status(400).json({ error: "Missing userId or messageId" });
     }
+    if (!(await verifyUserIdentity(req, res, userId, "删除消息"))) return;
     try {
       await withFileLock(MESSAGES_FILE, async () => {
         const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
@@ -2804,6 +2890,7 @@ async function startServer() {
     if (!userId || !cleanSessionId) {
       return res.status(400).json({ error: "Missing userId or sessionId" });
     }
+    if (!(await verifyUserIdentity(req, res, userId, "删除会话"))) return;
     try {
       await withFileLock(MESSAGES_FILE, async () => {
         const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
@@ -2826,6 +2913,7 @@ async function startServer() {
 
   // REST API for active session IDs of a user
   app.get("/api/active-sessions/:userId", async (req, res) => {
+    if (!(await verifyUserIdentity(req, res, req.params.userId, "读取会话编号"))) return;
     try {
       const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
       const userMessages = allMessages[req.params.userId] || [];
@@ -3204,6 +3292,7 @@ async function startServer() {
   };
 
   app.get("/api/settings/:userId", async (req, res) => {
+    if (!(await verifyUserIdentity(req, res, req.params.userId, "读取设置"))) return;
     try {
       const allSettings = await loadSettingsFile();
       res.json(sanitizeSettings(allSettings[req.params.userId] || {}));
@@ -3244,6 +3333,7 @@ async function startServer() {
     if (!userId || userId === 'guest') {
       return res.json({ success: true, message: "Guest settings ignored" });
     }
+    if (!(await verifyUserIdentity(req, res, userId, "写入设置"))) return;
     if (settingsPayloadGuard(req.body, userId, res)) return;
     const newSettings = sanitizeSettings(req.body || {});
     try {
@@ -3271,6 +3361,7 @@ async function startServer() {
     if (!cleanUserId || cleanUserId === 'guest') {
       return res.json({ success: true, message: "Guest settings ignored" });
     }
+    if (!(await verifyUserIdentity(req, res, cleanUserId, "同步设置"))) return;
     if (settingsPayloadGuard(settings, cleanUserId, res)) return;
     const cleanSettings = sanitizeSettings(settings || {});
     try {
