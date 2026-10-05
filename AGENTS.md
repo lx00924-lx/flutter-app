@@ -701,17 +701,22 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - 顺带：登录日志原先把 `clientSessionId` 整串打出来 —— 那是**凭证**，不该落日志。
   现只打印"已提供(N 字符)"。
 
-### 13.2 仍未修（已确认存在，按优先级排序）
+### 13.2 已加固（原 P3/P4）
 
-1. **`app.use(cors())` 默认允许任意来源，且 `Allow-Headers` 是动态反射**（P3，纵深防御）：
-   预检会把你请求的任何头都回显（实测 `x-client-session-id`、`x-user-id`、
-   `authorization` 都能过）。当前**不能直接利用**：`Access-Control-Allow-Credentials`
-   没设、凭证是自定义头而非 cookie（`/ws/app` 的 `?clientSessionId=` 只是查询串，
-   fetch 也不带），所以恶意网站拿不到凭证值。但只要凭证经任何途径泄漏，
-   CORS 宽配置会立刻放大成"任意网站可读走全部数据"。建议把 origin 收敛成白名单
-   （官网自身域名；原生 App 不发 Origin，不受影响）。
-2. 响应头缺 `X-Content-Type-Options` / `X-Frame-Options` / `HSTS`（P4，低危）。
-   中继出口是 Cloudflare Tunnel，HSTS 可能由 CF 补齐；前两个加上是零成本的。
+- **CORS 收敛成白名单**（HTTP 与 socket.io 用**同一个** `isCorsOriginAllowed()`）：
+  原先 `app.use(cors())` 允许任意来源且 `Allow-Headers` 动态反射（预检会把请求的任何头
+  回显）；socket.io 那边也是 `cors: { origin: "*" }` —— 两处一起收紧。
+  白名单 = 同源（官网就是本服务下发的）+ `SERVER_BASE_URL` 主机（**比较前先剥掉
+  `www.`**，否则裸域会被拦，实测踩过）+ `localhost/127.0.0.1`（本机 `npm run dev`，
+  不放开开发会白屏）+ 环境变量 `ALLOWED_ORIGINS` 追加。`Allow-Headers` 改为显式列表，
+  `credentials` 保持关闭。
+- **无 Origin 的请求一律放行**：原生 App、桥接脚本、curl、服务端之间都不发 Origin，
+  而 CORS 只是**浏览器**的约束 —— 拦它们纯属自伤。
+- 补上 `X-Content-Type-Options: nosniff` 与 `X-Frame-Options: DENY`。
+  **HSTS 刻意不做**：中继自己跑 HTTP，TLS 由 Cloudflare 终止，该头应由 CF 下发；
+  在应用里按 `X-Forwarded-Proto` 判断很容易在本地开发时把自己锁死。
+- 回归：`.sandbox-demo/_test-cors.mjs`（15 项：恶意来源拒绝、自己的来源放行、
+  无 Origin 不受影响、任意头不再被反射、安全头到位）。
 
 ### 13.3 复核过、确认安全的边界
 
