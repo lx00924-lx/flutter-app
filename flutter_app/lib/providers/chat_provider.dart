@@ -2509,6 +2509,9 @@ class ChatProvider extends ChangeNotifier {
         SyncService.instance.pushMessages(
           userId: settingsProvider.syncUserId,
           messages: [_messages.last],
+          // 服务端已对写入类接口做身份校验（认 clientSessionId，不认请求里报的
+          // userId），这里漏传会被 403 拦下、这轮消息就上不了云。
+          clientSessionId: settingsProvider.clientSessionId,
         );
       }
     }
