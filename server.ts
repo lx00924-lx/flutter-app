@@ -2076,10 +2076,98 @@ async function startServer() {
   await ensureDirs();
 
   const app = express();
-  app.use(cors());
+  /**
+   * ── CORS 收紧 + 安全响应头（2026-10-06 渗透测试 P3/P4）──────────────
+   *
+   * 原先是一句 `app.use(cors())`：**允许任意来源**，而且 `Allow-Headers` 是
+   * **动态反射**的 —— 预检时你请求什么头它就回显什么（实测
+   * `x-client-session-id`、`x-user-id`、`authorization` 都能过）。
+   *
+   * 为什么仍然要改（当前它**不能**被直接利用）：`credentials` 没开、身份靠自定义头
+   * 而不是 cookie，所以恶意网站拿不到凭证值。但这是个**放大器** —— 一旦凭证经任何
+   * 途径泄漏，"任意网站可读走全部数据"就成立了。
+   *
+   * 白名单怎么定的：
+   *   · **同源放行**：官网前端与中继本来就是同一个服务
+   *     （`src/config.ts` 的 `getApiBaseUrl()` 优先取 `window.location.origin`，
+   *     而中继自己下发 `dist/`），所以这条覆盖了绝大多数真实流量；
+   *   · **`SERVER_BASE_URL` 的主机**放行：官网静态产物单独部署时走这条；
+   *   · **localhost / 127.0.0.1 放行**：本机 `npm run dev`（Vite 5173 调中继 3000）
+   *     要用；不这么做开发环境会直接白屏，而"为了安全把开发打死"最后一定会被回滚；
+   *   · **额外域名**用环境变量 `ALLOWED_ORIGINS`（逗号分隔）加，不用改代码。
+   *
+   * 无 Origin 头的请求（原生 App、桥接脚本、curl、服务端之间）一律放行 ——
+   * CORS 是**浏览器**的约束，这些调用方根本不受它管，拦它们只会自伤。
+   *
+   * `credentials` 保持关闭：我们的身份凭证走自定义头，不需要 cookie 跨域，
+   * 开着反而会把"浏览器自动附带 cookie"这条风险引进来。
+   */
+  const corsAllowedExtra = (process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  let serverBaseOrigin = "";
+  try {
+    serverBaseOrigin = new URL(SERVER_BASE_URL).origin;
+  } catch {
+    /* SERVER_BASE_URL 配错了就不参与白名单 */
+  }
+  const isCorsOriginAllowed = (origin: string): boolean => {
+    if (!origin) return true;
+    let host = "";
+    try {
+      host = new URL(origin).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    } catch {
+      return false;
+    }
+    // 同源（官网就是本服务下发的）
+    if (serverBaseOrigin && origin === serverBaseOrigin) return true;
+    // 本机开发
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") return true;
+    // 配置的对外主机（含其子域，例如 www.）
+    if (serverBaseOrigin) {
+      try {
+        // 归一到裸域再比较：SERVER_BASE_URL 通常写成 `https://www.example.com`，
+        // 若不剥掉 `www.` 就只放行 `*.www.example.com`，**裸域反而被拦** ——
+        // 用户从 `https://example.com` 打开官网时接口全部失败（实测踩过）。
+        const baseHost = new URL(serverBaseOrigin).hostname.toLowerCase().replace(/^www\./, "");
+        if (host === baseHost || host.endsWith(`.${baseHost}`)) return true;
+      } catch {
+        /* ignore */
+      }
+    }
+    return corsAllowedExtra.includes(origin);
+  };
+
+  app.use(
+    cors({
+      origin: (origin: any, cb: any) => cb(null, isCorsOriginAllowed(String(origin || ""))),
+      // 显式列出允许的头，不再反射请求方的任意头
+      allowedHeaders: [
+        "Content-Type",
+        "Authorization",
+        "x-user-id",
+        "x-device-type",
+        "x-client-session-id",
+      ],
+      methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      credentials: false,
+      maxAge: 600,
+    }) as any,
+  );
+
+  // 零成本的两个安全头（HSTS 交给 Cloudflare —— 中继本身跑 HTTP，由 CF 终止 TLS）
+  app.use((_req: any, res: any, next: any) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    next();
+  });
   const httpServer = createServer(app);
   const io = new Server(httpServer, {
-    cors: { origin: "*" },
+    // 与上面的 HTTP CORS 用**同一个白名单**：socket.io 原先也是 `origin: "*"`，
+    // 等于任意网站都能对推送通道发起跨域连接（虽然没凭证连上也会被踢，
+    // 但没必要把连接机会也给出去）。
+    cors: { origin: (origin: any, cb: any) => cb(null, isCorsOriginAllowed(String(origin || ""))) } as any,
     maxHttpBufferSize: 1e8,
   });
 
