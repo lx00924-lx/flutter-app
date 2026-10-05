@@ -650,3 +650,24 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
   打完必须 `npx esbuild server.ts ... --outfile=dist/server.cjs` 重编，
   再用**生产产物**跑一遍 `_regression.mjs`。
 
+### 12.4 ⚠️「凭证失效」只能用 `401 + FORCE_LOGOUT` 表述（改服务端必读）
+
+2026-10-06 清空 `active_sessions.json` 时实测踩透的一条：**服务端说"这个凭证我不认了"
+时，必须用 `401 + error:'FORCE_LOGOUT'`，形状与顶号完全一致**（带 `kickedSessionId`，
+且 `canTakeover:false`）。原因：
+
+- 客户端的掉线判定只有**两条路**：4 秒轮询 `/api/check-session`，以及 `/ws/app`
+  推送通道的 `force_logout` 事件。而真正生效的那条判定是
+  `_checkAndTriggerForceLogout()` 里的 `401 && error=='FORCE_LOGOUT'`。
+- **新造错误码（当初用过 `SESSION_UNKNOWN`）会被旧版 App 整条忽略** —— 它会继续带着
+  废弃凭证轮询，而每个请求都被身份守卫 403 拦下：**界面一切正常、云端同步静默失效、两头都不报错**。
+  实测就是这样：App 每 12 秒发一次请求，全部 403，用户看不出来。
+- `canTakeover` 必须 `false`：为 `true` 时客户端会先"静默重登接管"，那会**立刻把槽位
+  写回来，把"清空凭证"这件事故意抹掉**。
+- `/api/check-session` 里同一个毛病有两个出口，都堵上了：槽位**完全不存在**时不再落到
+  `{valid:true}` 兜底；`/ws/app` 握手也不再对"槽位不存在"直接放行（它会 `send` 完
+  `force_logout` 再 `close(4002)`）—— 实测这条路径 14ms 内就能把载荷送到客户端。
+- 客户端的 403 分支**刻意没做**（加过又撤了）：服务端守卫回 403 是安全的（守卫只负责
+  拦请求），但客户端的 403 分支在运行时走不到，是"要重打包才生效的死代码"。
+  规矩记在 `sync_service.dart` 的 `_checkAndTriggerForceLogout()` 注释里。
+
