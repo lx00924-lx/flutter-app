@@ -671,3 +671,52 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
   拦请求），但客户端的 403 分支在运行时走不到，是"要重打包才生效的死代码"。
   规矩记在 `sync_service.dart` 的 `_checkAndTriggerForceLogout()` 注释里。
 
+## 13. 渗透测试结论（2026-10-06 全量跑过一遍，改安全相关代码前先看这节）
+
+> 脚本：`.sandbox-demo/_pentest-prod.mjs`（生产只读，37 项边界）、
+> `_pentest-sandbox.mjs`（沙箱双账号越权，13 项）、`_cors-test.mjs`（跨域/滥用）。
+> **结论：第 12 节那批修复有效（37/37 + 13/13），但测试又挖出 3 个新的未修项。**
+
+### 13.1 已修（本次实测发现并修复）
+
+- `/api/agent/pending-approvals` 与 `/api/agent/pending-questions` 的过滤器写成
+  **"参数为空就不过滤"**（`if (token && …) if (userId && …) return true`）→ 不登录就能
+  读**所有人**的待办，泄漏 `approvalId` / `sessionId` / **Agent Token** /
+  `reason`（命令原文，例如"rm -rf /backup/prod-db —— bob 的电脑正在等 bob 批准"）。
+  沙箱实测：陌生人拿得到；alice 也同样拿得到 bob 的；泄漏的 token 还能反过来读该账号的
+  Agent 会话目录。**修法**：过 `verifyUserIdentity` + **强制** `item.userId !== userId` 剔除。
+  ⚠️ 教训：**"参数为空就不过滤"是一类反复出现的写法**，新写列表接口时先问一句
+  "不传参数时它返回什么？"。
+
+### 13.2 仍未修（已确认存在，按优先级排序）
+
+1. **`/api/login` 没有任何失败限流**（P1）：实测连打 8 次错误密码全是 `401`，
+   没有退避、没有锁定、没有验证码。bcrypt 只让每次尝试变慢，不阻止在线爆破；
+   且用户名是手机号/顺序数字，**知道用户名就能无限试**。建议加"同账号/同 IP 失败计数 +
+   指数退避 + 超阈值要求人机验证"。
+2. **非法 JSON 会回一个带服务器绝对路径的 HTML 错误页**（P2，信息泄露）：
+   发 `{bad json` 给 `/api/register`，响应体里出现
+   `F:\ai\flutter-app\node_modules\body-parser\...` 与完整堆栈 —— 泄露部署路径、
+   依赖版本、框架结构。建议在 `express.json()` 之后加一个错误中间件，
+   统一回 `400 + {error:'请求体不是合法 JSON'}`，不再吐堆栈。
+3. **`app.use(cors())` 默认允许任意来源，且 `Allow-Headers` 是动态反射**（P3，纵深防御）：
+   预检会把你请求的任何头都回显（实测 `x-client-session-id`、`x-user-id`、
+   `authorization` 都能过）。当前**不能直接利用**：`Access-Control-Allow-Credentials`
+   没设、凭证是自定义头而非 cookie（`/ws/app` 的 `?clientSessionId=` 只是查询串，
+   fetch 也不带），所以恶意网站拿不到凭证值。但只要凭证经任何途径泄漏，
+   CORS 宽配置会立刻放大成"任意网站可读走全部数据"。建议把 origin 收敛成白名单
+   （官网自身域名；原生 App 不发 Origin，不受影响）。
+4. 响应头缺 `X-Content-Type-Options` / `X-Frame-Options` / `HSTS`（P4，低危）。
+   中继出口是 Cloudflare Tunnel，HSTS 可能由 CF 补齐；前两个加上是零成本的。
+
+### 13.3 复核过、确认安全的边界
+
+- 守卫的错配组合全部 403：无凭证 / 空凭证 / 乱编 UUID / **大小写变换** /
+  尾部多一个字符 / 前缀注入 / 超长（10KB）/ 乱填 `x-device-type`（含冒充另一设备类型）/
+  头报 A 路径要 B / URL 编码 / 路径加斜杠 / 路径穿越 / 不存在的用户。
+- Agent / 桥接通道无 token 一律 401：`agent/sessions|status|models|permission-presets|
+  poll|archive-session|rename-session`。
+- 公开接口符合设计：`/api/health`、`/api/model-limits`；`register` 与
+  `account/delete-code` 都要求人机验证（实测无凭据直接 `403 缺少人机验证凭据`）。
+- 跨域读受保护数据**打不通**：不猜凭证 / 猜 UUID / 拿用户名当凭证，全部 403。
+
