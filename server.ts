@@ -2483,18 +2483,167 @@ async function startServer() {
     res.json({ ok: true, removed });
   });
 
+  /**
+   * ── 登录失败限流 ────────────────────────────────────────────────
+   *
+   * 背景（2026-10-06 渗透测试实测）：这个接口原先**没有任何失败限流** ——
+   * 连打 8 次错误密码全是 401，没有退避、没有锁定、没有验证码。而本项目的
+   * 用户名是手机号 / 顺序数字，等于"知道用户名就能无限试密码"。
+   * bcrypt 只让单次校验变慢，不阻止在线爆破（攻击者可以并发）。
+   *
+   * 设计取舍：
+   *   · **按用户名与来源 IP 各记一份**，两个维度都限 —— 只限账号会被"打一枪换一个
+   *     账号"绕过，只限 IP 会被"一个 IP 试很多账号"绕过；
+   *   · 前 `threshold` 次失败不锁（正常用户手滑几次很常见），之后按失败次数
+   *     **指数退避**，最长 `maxLock`。退避而不是永久锁定：本服务没有"解锁"入口，
+   *     永久锁会把用户彻底挡在门外；
+   *   · 失败窗口 `window` 内没有新失败就自动恢复；成功登录立刻清零；
+   *   · 响应里给 `retryAfterSeconds`，客户端能显示"请 N 秒后再试"；
+   *   · 落盘（60 秒节流）—— 否则攻击者只要让中继重启一次就能把计数清零。
+   */
+  const LOGIN_FAIL_WINDOW_MS = 15 * 60 * 1000;
+  const LOGIN_FAIL_THRESHOLD = 5;
+  const LOGIN_LOCK_STEPS_MS = [60_000, 5 * 60_000, 15 * 60_000];
+  const LOGIN_ATTEMPTS_FILE = path.join(DATA_DIR, "login_attempts.json");
+  const loginFailures = new Map<string, number[]>();
+  let loginFailuresDirty = false;
+
+  const readClientIp = (req: any): string => {
+    // 生产走 Cloudflare Tunnel：真实客户端 IP 在 cf-connecting-ip 里，
+    // req.socket.remoteAddress 永远是对端的 127.0.0.1，按它限流等于全局限流。
+    const raw = String(
+      req.headers["cf-connecting-ip"] ||
+        (req.headers["x-forwarded-for"] || "").toString().split(",")[0] ||
+        req.socket?.remoteAddress ||
+        "unknown",
+    ).trim();
+    // 只留 IPv4/IPv6 字符，避免把畸形头写进日志与状态文件
+    return /^[0-9a-fA-F:.]{3,45}$/.test(raw) ? raw : "unknown";
+  };
+
+  const pruneLoginFailures = () => {
+    const now = Date.now();
+    for (const [key, times] of loginFailures) {
+      const alive = times.filter((t) => now - t < LOGIN_FAIL_WINDOW_MS);
+      if (alive.length) loginFailures.set(key, alive);
+      else loginFailures.delete(key);
+    }
+  };
+
+  const loadLoginFailures = () => {
+    try {
+      if (!fsSync.existsSync(LOGIN_ATTEMPTS_FILE)) return;
+      const raw = JSON.parse(fsSync.readFileSync(LOGIN_ATTEMPTS_FILE, "utf-8"));
+      for (const [key, times] of Object.entries(raw?.failures ?? {})) {
+        if (Array.isArray(times)) loginFailures.set(key, times.map(Number).filter((n) => Number.isFinite(n)));
+      }
+      pruneLoginFailures();
+      if (loginFailures.size) console.log(`[Security] 已恢复登录失败计数：${loginFailures.size} 个来源`);
+    } catch (err: any) {
+      console.error("[Security] 读取登录失败计数失败:", err?.message ?? err);
+    }
+  };
+
+  const persistLoginFailures = (immediate = false) => {
+    loginFailuresDirty = true;
+    if (!immediate) return; // 由下面的定时器节流写盘
+    loginFailuresDirty = false;
+    try {
+      const failures: Record<string, number[]> = {};
+      for (const [k, v] of loginFailures) failures[k] = v;
+      fsSync.writeFileSync(LOGIN_ATTEMPTS_FILE, JSON.stringify({ version: 1, savedAt: Date.now(), failures }), "utf-8");
+    } catch (err: any) {
+      console.error("[Security] 登录失败计数落盘失败:", err?.message ?? err);
+    }
+  };
+
+  /** 返回还需等待的毫秒数（0 = 未锁定）。 */
+  const loginLockRemainingMs = (username: string, ip: string): number => {
+    pruneLoginFailures();
+    const now = Date.now();
+    let wait = 0;
+    for (const key of [`u:${(username || "").trim()}`, `ip:${ip}`]) {
+      const times = loginFailures.get(key) ?? [];
+      if (times.length < LOGIN_FAIL_THRESHOLD) continue;
+      const step = Math.min(times.length - LOGIN_FAIL_THRESHOLD, LOGIN_LOCK_STEPS_MS.length - 1);
+      const lockUntil = times[times.length - 1] + LOGIN_LOCK_STEPS_MS[step];
+      if (lockUntil > now) wait = Math.max(wait, lockUntil - now);
+    }
+    return wait;
+  };
+
+  const recordLoginFailure = (username: string, ip: string) => {
+    const now = Date.now();
+    let isFirst = false;
+    for (const key of [`u:${(username || "").trim()}`, `ip:${ip}`]) {
+      if (key === "u:" || key === "ip:") continue; // 空用户名 / 未知 IP 不单独计数
+      const times = (loginFailures.get(key) ?? []).filter((t) => now - t < LOGIN_FAIL_WINDOW_MS);
+      times.push(now);
+      if (times.length === 1) isFirst = true;
+      loginFailures.set(key, times);
+    }
+    // **首次失败立即落盘**：否则攻击者只要在每次尝试后重启中继，计数就永远归零，
+    // 限流形同虚设。后续失败走 60 秒节流即可。
+    persistLoginFailures(isFirst);
+  };
+
+  const clearLoginFailures = (username: string, ip: string) => {
+    for (const key of [`u:${(username || "").trim()}`, `ip:${ip}`]) {
+      if (key !== "u:" && key !== "ip:") loginFailures.delete(key);
+    }
+    persistLoginFailures(true);
+  };
+
+  loadLoginFailures();
+  setInterval(() => {
+    pruneLoginFailures();
+    if (loginFailuresDirty) persistLoginFailures(true);
+  }, 60_000).unref?.();
+
+  /**
+   * 登录尝试日志 —— **刻意不打印 clientSessionId**。
+   *
+   * 它不只是"会话标识"，而是登录成功后客户端用来证明身份、守卫据此放行的**凭证**
+   * （见 AGENTS.md §12.2）。原实现把它整串写进 server-run.log，等于把凭证复制到
+   * 磁盘上的另一个文件里 —— 谁能读日志谁就能冒充该设备。这里只留长度与设备类型，
+   * 排查"客户端没传 id"够用了。
+   */
+  const logLoginAttempt = (username: unknown, deviceType: unknown, clientSessionId: unknown) => {
+    const sidLen = String(clientSessionId ?? "").trim().length;
+    console.log(
+      `Login attempt for username: ${username ?? ""}, deviceType: ${deviceType ?? ""}, clientSessionId: ${sidLen ? `已提供(${sidLen} 字符)` : "未提供"}`,
+    );
+  };
+
   app.post("/api/login", async (req, res) => {
     if (!req.body || typeof req.body !== 'object') {
       return res.status(400).json({ error: "Invalid request body" });
     }
     const { username, password, deviceType, clientSessionId } = req.body;
-    console.log(`Login attempt for username: ${username}, deviceType: ${deviceType}, clientSessionId: ${clientSessionId}`);
+    logLoginAttempt(username, deviceType, clientSessionId);
+
+    // 限流判定要在读 users.json / 跑 bcrypt **之前**：被锁时不该还替攻击者做一次
+    // bcrypt 计算（那正是拖垮服务的办法）。锁定窗口内不区分密码对错，一律 429。
+    const clientIp = readClientIp(req);
+    const lockedMs = loginLockRemainingMs(username, clientIp);
+    if (lockedMs > 0) {
+      const retryAfter = Math.ceil(lockedMs / 1000);
+      console.warn(`[Security] 登录被限流：user=${username} ip=${clientIp}，还需等待 ${retryAfter}s`);
+      res.set("Retry-After", String(retryAfter));
+      return res.status(429).json({
+        error: `尝试过于频繁，请 ${retryAfter} 秒后再试`,
+        code: "LOGIN_RATE_LIMITED",
+        retryAfterSeconds: retryAfter,
+      });
+    }
+
     try {
       const users = await safeReadJSON<any[]>(USERS_FILE, []);
       const user = users.find((u: any) => u.username === username);
       
       if (!user) {
         console.log(`Login failed for username: ${username}. User not found.`);
+        recordLoginFailure(username, clientIp);
         return res.status(401).json({ error: "账号不存在" });
       }
       
@@ -2503,8 +2652,12 @@ async function startServer() {
       const { matched, needsRehash } = await verifyPassword(password || "", storedSecret);
       if (!matched) {
         console.log(`Login failed for username: ${username}. Incorrect password.`);
+        recordLoginFailure(username, clientIp);
         return res.status(401).json({ error: "密码错误" });
       }
+
+      // 成功即清零：正常用户不该因为之前手滑过几次而被继续惩罚
+      clearLoginFailures(username, clientIp);
 
       // 存量明文账号：登录成功即升级为 bcrypt 哈希，并清除明文
       if (needsRehash) {
@@ -2573,6 +2726,36 @@ async function startServer() {
       console.error(`Login error for ${username}:`, e);
       res.status(500).json({ error: "Login failed" });
     }
+  });
+
+  /**
+   * ── 请求体错误：统一回干净的 JSON，不再吐堆栈 ──────────────────────
+   *
+   * 背景（2026-10-06 渗透测试实测）：往 `/api/register` 发一段非法 JSON
+   * （`{bad json`），得到的是 Express 默认的 **HTML 错误页**，正文里带着
+   * `F:\ai\flutter-app\node_modules\body-parser\lib\types\json.js:92:19`
+   * 与完整调用栈 —— 一次请求就白送出部署绝对路径、依赖版本、框架结构。
+   *
+   * 注意：**错误信息不能原样回显**。body-parser 的 SyntaxError 消息里会带
+   * 请求体片段（`... in JSON at position 1`），原样返回等于把我方解析细节
+   * 连同用户数据一起回显。所以这里按错误类型给固定文案。
+   *
+   * 位置说明：Express 的错误中间件对"它注册之前就已匹配过的路由"同样生效，
+   * 放在这里能覆盖上面全部 /api 路由；放在文件最末尾则只能覆盖它之后注册的
+   * SPA 兜底路由，等于没修。
+   */
+  app.use("/api", (err: any, _req: any, res: any, next: any) => {
+    if (!err) return next();
+    if (err.type === "entity.too.large") {
+      return res.status(413).json({ error: "请求体过大，已拒绝", code: "PAYLOAD_TOO_LARGE" });
+    }
+    const isJsonParseError =
+      err.type === "entity.parse.failed" || err instanceof SyntaxError || err.status === 400;
+    if (isJsonParseError && !res.headersSent) {
+      console.warn(`[Security] 请求体不是合法 JSON：${err.type || err.name || "SyntaxError"}`);
+      return res.status(400).json({ error: "请求体不是合法的 JSON", code: "INVALID_JSON_BODY" });
+    }
+    return next(err);
   });
 
   app.get("/api/health", (req, res) => {

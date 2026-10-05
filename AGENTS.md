@@ -679,34 +679,38 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 
 ### 13.1 已修（本次实测发现并修复）
 
-- `/api/agent/pending-approvals` 与 `/api/agent/pending-questions` 的过滤器写成
-  **"参数为空就不过滤"**（`if (token && …) if (userId && …) return true`）→ 不登录就能
-  读**所有人**的待办，泄漏 `approvalId` / `sessionId` / **Agent Token** /
-  `reason`（命令原文，例如"rm -rf /backup/prod-db —— bob 的电脑正在等 bob 批准"）。
-  沙箱实测：陌生人拿得到；alice 也同样拿得到 bob 的；泄漏的 token 还能反过来读该账号的
-  Agent 会话目录。**修法**：过 `verifyUserIdentity` + **强制** `item.userId !== userId` 剔除。
+- **`/api/agent/pending-approvals` 与 `/api/agent/pending-questions` 不登录就能读所有人的待办**：
+  过滤器写成**"参数为空就不过滤"**（`if (token && …) if (userId && …) return true`）→ 泄漏
+  `approvalId` / `sessionId` / **Agent Token** / `reason`（命令原文，例如
+  "rm -rf /backup/prod-db —— bob 的电脑正在等 bob 批准"）。沙箱实测：陌生人拿得到；
+  alice 也同样拿得到 bob 的；泄漏的 token 还能反过来读该账号的 Agent 会话目录。
+  **修法**：过 `verifyUserIdentity` + **强制** `item.userId !== userId` 剔除。
   ⚠️ 教训：**"参数为空就不过滤"是一类反复出现的写法**，新写列表接口时先问一句
   "不传参数时它返回什么？"。
+- **`/api/login` 无失败限流**（原 P1）：实测连打 8 次错密码全是 `401`。现已加
+  "按**用户名 + 来源 IP**双维度计数 → 超过 5 次指数退避（60s / 5min / 15min）"，
+  成功登录清零，计数落盘（**首次失败立即写**，否则攻击者每次尝试后重启中继就能清零）。
+  ⚠️ 取真实 IP 必须读 `cf-connecting-ip`：生产走 Cloudflare Tunnel，
+  `req.socket.remoteAddress` 永远是 `127.0.0.1`，按它限流 = 全局限流。
+  被限流时**在读 users.json / 跑 bcrypt 之前**就返回 429（否则攻击者能用 bcrypt 拖垮服务）。
+- **非法 JSON 会回带服务器绝对路径的 HTML 错误页**（原 P2）：发 `{bad json` 给
+  `/api/register`，响应体里出现 `F:\ai\flutter-app\node_modules\body-parser\…` 与完整堆栈。
+  现加错误中间件统一回 `400 + {code:'INVALID_JSON_BODY'}`（`entity.too.large` → 413），
+  **不原样回显解析器消息**（它含请求体片段）。位置必须在 `/api/health` 之前 ——
+  Express 错误中间件对"注册在它之前的路由"才生效，放文件末尾等于没修。
+- 顺带：登录日志原先把 `clientSessionId` 整串打出来 —— 那是**凭证**，不该落日志。
+  现只打印"已提供(N 字符)"。
 
 ### 13.2 仍未修（已确认存在，按优先级排序）
 
-1. **`/api/login` 没有任何失败限流**（P1）：实测连打 8 次错误密码全是 `401`，
-   没有退避、没有锁定、没有验证码。bcrypt 只让每次尝试变慢，不阻止在线爆破；
-   且用户名是手机号/顺序数字，**知道用户名就能无限试**。建议加"同账号/同 IP 失败计数 +
-   指数退避 + 超阈值要求人机验证"。
-2. **非法 JSON 会回一个带服务器绝对路径的 HTML 错误页**（P2，信息泄露）：
-   发 `{bad json` 给 `/api/register`，响应体里出现
-   `F:\ai\flutter-app\node_modules\body-parser\...` 与完整堆栈 —— 泄露部署路径、
-   依赖版本、框架结构。建议在 `express.json()` 之后加一个错误中间件，
-   统一回 `400 + {error:'请求体不是合法 JSON'}`，不再吐堆栈。
-3. **`app.use(cors())` 默认允许任意来源，且 `Allow-Headers` 是动态反射**（P3，纵深防御）：
+1. **`app.use(cors())` 默认允许任意来源，且 `Allow-Headers` 是动态反射**（P3，纵深防御）：
    预检会把你请求的任何头都回显（实测 `x-client-session-id`、`x-user-id`、
    `authorization` 都能过）。当前**不能直接利用**：`Access-Control-Allow-Credentials`
    没设、凭证是自定义头而非 cookie（`/ws/app` 的 `?clientSessionId=` 只是查询串，
    fetch 也不带），所以恶意网站拿不到凭证值。但只要凭证经任何途径泄漏，
    CORS 宽配置会立刻放大成"任意网站可读走全部数据"。建议把 origin 收敛成白名单
    （官网自身域名；原生 App 不发 Origin，不受影响）。
-4. 响应头缺 `X-Content-Type-Options` / `X-Frame-Options` / `HSTS`（P4，低危）。
+2. 响应头缺 `X-Content-Type-Options` / `X-Frame-Options` / `HSTS`（P4，低危）。
    中继出口是 Cloudflare Tunnel，HSTS 可能由 CF 补齐；前两个加上是零成本的。
 
 ### 13.3 复核过、确认安全的边界
