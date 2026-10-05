@@ -605,3 +605,48 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - ⚠️ **Windows 有图标缓存**：覆盖 exe 后任务栏/开始菜单可能仍显示旧图标，
   必要时 `ie4uinit.exe -show` 或重建图标缓存，别误判成"没替换成功"。
 
+## 12. 接口身份校验（2026-10-06 补上，改这些接口前必读）
+
+### 12.1 背景：6 个接口曾经"认名字不认人"
+
+`userId` 是**公开可猜**的（顺序数字 / 手机号），而下面这些接口原先**只把 URL/body 里的
+`userId` 当作身份**。隔离沙箱实测（非推断）后果：无任何凭据即可读全部聊天记录；
+可**注入伪造消息**、删消息、一次请求删掉整个会话；可改写云端设置；可远程停掉桥接
+（日志里发起方自称 `attacker` 也照样执行）；响应头还带 `Access-Control-Allow-Origin: *`，
+浏览器端能直接读走。
+
+**已接守卫（9 处）**：
+`GET /api/messages/:userId`、`GET /api/active-sessions/:userId`、
+`POST /api/sync-messages`、`POST /api/delete-message`、`POST /api/delete-session`、
+`GET|POST /api/settings/:userId`、`POST /api/sync-settings`、`POST /api/agent/bridge-command`。
+
+### 12.2 凭证 = `x-client-session-id`（不要另发明一套）
+
+客户端 `SyncService._createOptions()` **早就在发** `x-user-id` / `x-device-type` /
+`x-client-session-id`；`x-client-session-id` 是登录时服务端签发并写进
+`messages_data/active_sessions.json` 槽位的 **UUID v4**。守卫 `verifyUserIdentity()`
+只做一件事：**这个 id 是否属于该用户** —— 与 `/api/check-session`、`/ws/app` 握手
+同一份数据、同一套语义。校验规则：
+
+- 头里的 `x-user-id` 与目标 `userId` 必须一致（否则拿自己的凭证就能读别人）；
+- 该 id 必须命中该用户的设备槽位；设备类型识别不出时退化为"任一槽位命中"；
+- **每次请求都读盘**，不做内存缓存 —— 被顶下线的旧 id 必须立刻失效（有回归用例）；
+- 失败一律 **403**（不是 401）：App 的 `_checkAndTriggerForceLogout` 只在
+  `401 + FORCE_LOGOUT` 时触发顶号流程，用 403 不会把"被拦截"误报成"账号在别处登录"。
+
+### 12.3 边界与兼容
+
+- **只加校验、不改客户端协议**，所以**旧版 App 也能用**（它本来就在发这些头）。
+  已知的老版本（`F:\ai\flutter-app` 那份 10-03 的源码）`_createOptions` 里同样有这两个头。
+- **官网 `src/` 不调用这 6 个接口**，不受影响。
+- 未受影响的接口（本来就有校验，别顺手改）：`change-password`（要原密码）、
+  `account/delete`（要邮箱验证码）、`login`（要密码）、`/api/agent/sessions|status`
+  （要 Agent Token）、`/ws/agent`、`/ws/app`。
+- 回归测试：`.sandbox-demo/_regression.mjs`（32 项，含"被顶下线后旧凭证失效"）；
+  越权探测：`.sandbox-demo/_attack-test.mjs`。跑法见 `.sandbox-demo/README.md`。
+  **`.sandbox-demo/` 已在 `.gitignore` 里**，是本地沙箱，不要把生产数据放进去。
+- ⚠️ 生产 `F:\ai\flutter-app\server.ts` 是 **CRLF**、仓库是 LF。给它打补丁要用
+  `.sandbox-demo/_patch-prod.cjs`（10 处插入 + 守卫函数，逐处校验"只匹配 1 次"才写入），
+  打完必须 `npx esbuild server.ts ... --outfile=dist/server.cjs` 重编，
+  再用**生产产物**跑一遍 `_regression.mjs`。
+

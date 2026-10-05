@@ -44,3 +44,7 @@ flutter_app/windows/flutter/generated_plugin_registrant.h
 installer/cache/
 installer/runtime/
 installer/output/
+
+# 接口安全沙箱：本地复现/回归用的隔离实例与假数据，不入库。
+# 说明见 .sandbox-demo/README.md，接口校验规则见 AGENTS.md §12。
+.sandbox-demo/
