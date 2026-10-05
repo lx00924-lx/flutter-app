@@ -278,16 +278,33 @@ class SyncService {
   }
 
   void _checkAndTriggerForceLogout(dynamic error) {
-    if (error is DioException && error.response?.statusCode == 401) {
-      final data = error.response?.data;
-      if (data is Map && data['error'] == 'FORCE_LOGOUT') {
-        final reason = data['reason']?.toString() ?? '您的账号已在另一台设备上登录，当前设备已被下线。';
-        // canTakeover：服务端判定该设备槽位早已没人活跃（对方关掉了 / 本地与服务端
-        // 的 clientSessionId 分叉），客户端可凭账号密码静默重登接管，无需弹假顶号。
-        final canTakeover = data['canTakeover'] == true;
-        stopSessionWatcher();
-        onForceLogout?.call(reason, canTakeover);
-      }
+    if (error is! DioException) return;
+    final status = error.response?.statusCode ?? 0;
+    final data = error.response?.data;
+
+    // 401 + FORCE_LOGOUT：真被顶号（服务端在 /api/check-session、/ws/app 里下发）。
+    if (status == 401 && data is Map && data['error'] == 'FORCE_LOGOUT') {
+      final reason = data['reason']?.toString() ?? '您的账号已在另一台设备上登录，当前设备已被下线。';
+      // canTakeover：服务端判定该设备槽位早已没人活跃（对方关掉了 / 本地与服务端
+      // 的 clientSessionId 分叉），客户端可凭账号密码静默重登接管，无需弹假顶号。
+      final canTakeover = data['canTakeover'] == true;
+      stopSessionWatcher();
+      onForceLogout?.call(reason, canTakeover);
+      return;
+    }
+
+    // 403 / SESSION_INVALID|SESSION_ID_REQUIRED|IDENTITY_*：服务端**不认识当前凭证**
+    // （凭证被清空、服务端数据回滚、换了服务器…）。服务端身份守卫对写入类接口一律
+    // 回 403，早先这里只认 401 —— 于是 App 界面一切正常、还继续发消息，但每条请求都
+    // 被拦下，云端同步**静默失效**，两端都不报错。
+    // 这里不传 canTakeover：静默重登需要用户密码，若密码也已失效会变成无限重试风暴，
+    // 宁可明确要求用户重新登录。
+    if (status == 403 || (status == 401 && data is Map && data['error'] == 'SESSION_UNKNOWN')) {
+      final reason = (data is Map ? data['reason']?.toString() : null)?.trim().isNotEmpty == true
+          ? data['reason'].toString()
+          : '登录状态已失效，请重新登录。';
+      stopSessionWatcher();
+      onForceLogout?.call(reason, false);
     }
   }
 

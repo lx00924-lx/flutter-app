@@ -2656,6 +2656,32 @@ async function startServer() {
         });
       }
 
+      // 【关键】槽位完全不存在 = 服务端**从来不认识**这个凭证（被清空 / 数据回滚 /
+      // 换了服务器）。必须在这里判掉，否则会一路落到下面 `valid: true` 的兜底，
+      // 客户端据此认为"我还能用"—— 实测（2026-10-06 清空 active_sessions.json 后）：
+      // App 界面一切正常、每 10 秒照常发请求，但**所有读写都被身份守卫 403 拦下**，
+      // 云端同步静默失效，两端都不报错，用户完全看不出来。
+      // 早期这里直接落到 valid:true，是当时"查不到就放行"的宽松兜底；
+      // 那样语义上等于"服务端从未见过这个凭证也算有效"，与新增的身份校验自相矛盾。
+      //
+      // ⚠️ error 用 `FORCE_LOGOUT` 而不是新造一个码：**旧版 App 的轮询只认这一种**
+      // （`_checkAndTriggerForceLogout` 里判 `401 && error=='FORCE_LOGOUT'`），
+      // 用别的码老客户端会整条忽略、继续带着废弃凭证轮询（实测踩过）。
+      // 载荷形状保持与顶号完全一致，老客户端因此能原样走"提示 + 回登录页"的既有路径。
+      // `canTakeover:false` 是关键：老客户端在 canTakeover=true 时会先尝试**静默重登**，
+      // 那会立刻把槽位重新写回来、把"清空凭证"这件事抹掉。
+      if (!active || !active.clientSessionId) {
+        console.log(`[Session] ${deviceType} 槽位不存在，客户端持有的凭证服务端无记录，要求重新登录（user=${userId}）`);
+        return res.status(401).json({
+          valid: false,
+          error: "FORCE_LOGOUT",
+          reason: "登录状态已失效，请重新登录。",
+          deviceType,
+          kickedSessionId: clientSessionId,
+          canTakeover: false,
+        });
+      }
+
       if (active && active.clientSessionId === clientSessionId) {
         // 命中即刷新活跃时间，并且**必须落盘**：早先这里只改了内存副本就返回，
         // lastActive 永远停在登录时间，于是"槽位是否已过期"（canTakeover 的判据）
@@ -5505,6 +5531,29 @@ if %errorlevel% neq 0 (
       // 与 check-session 同一套单点互斥校验：被顶下线的设备不允许再挂长连接
       const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
       const active = sessions[userId]?.[deviceType === "mobile" ? "mobile" : "desktop"];
+
+      // 【关键】槽位完全不存在 = 服务端从来不认识这个凭证（被清空 / 数据回滚 / 换了服务器）。
+      // 早先这里只判"槽位冲突"，槽位不存在时**直接放行** —— 与 check-session 的
+      // `{valid:true}` 兜底是同一个毛病的两个出口。
+      // 实测（2026-10-06 清空 active_sessions.json 后）：App 拿着废弃凭证照样挂上推送通道、
+      // 界面一切正常，而所有 API 都被身份守卫 403 拦下，云端同步静默失效、两端都不报错。
+      // 这条路径必须用 force_logout（而不是 auth_error）：客户端对它已有完整处理
+      // （停轮询 → 弹"账号已下线" → 回登录页），**老版本 App 同样认这个事件**。
+      if (!active || !active.clientSessionId) {
+        console.log(`[App WS] ${deviceType} 端槽位不存在，拒绝挂长连接并要求重新登录（user=${userId}）`);
+        clientWs.send(JSON.stringify({
+          event: "force_logout",
+          data: {
+            reason: "登录状态已失效，请重新登录。",
+            deviceType: deviceType === "mobile" ? "mobile" : "desktop",
+            kickedSessionId: clientSessionId,
+            canTakeover: false,
+          },
+        }));
+        clientWs.close(4002, "session-unknown");
+        return;
+      }
+
       if (active && active.clientSessionId && active.clientSessionId !== clientSessionId) {
         // 载荷里必须带上 kickedSessionId：少了它，客户端只能退化成"按设备类型判断"，
         // 于是同类型的每个实例（包括刚启动的这个）都会把自己当成被顶下线的那一个，
