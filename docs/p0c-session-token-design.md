@@ -1,9 +1,25 @@
 # P0-c 设计：会话令牌替代「传 userId 即身份」
 
-> 状态：**设计完成，未实现**（P0-a / P0-b 已实现并推送：`698f66b`、`b746886`）
-> 影响面实测：服务端 **15 处**接收 userId，Flutter 端 **45 处**发送 userId
+> 状态：**已完结（原方案未采用，问题已由其它方式覆盖）** —— 2026-10-03 结项。
+> 本文保留作**设计留档**，不是待办。
+>
+> 原方案（不透明会话令牌 + `Authorization: Bearer`）**不做了**。回头核代码，
+> 文档里点名的那批接口大多已被别的手段堵上，实际剩下的比文档写的窄得多：
+>
+> | 当时的担忧 | 现在的实情（2026-10-03 逐条核实） |
+> | :--- | :--- |
+> | Agent 通道可被他人使用 | ✅ P0-a 已堵（`698f66b`，`verifyAgentOwnership` + Agent Token） |
+> | 口令明文 | ✅ P0-b 已堵（`users.json` 存 bcrypt 哈希，60 字符） |
+> | 设置里泄露 API Key | ✅ `sanitizeSettings()` 在**读和写两侧**都把 `apiKey` / `asrApiKey` / `accountPassword` / `password` 及每个 endpoint 的 `apiKey` 清空 —— 服务端**根本不存**密钥（生产库里这些字段全为空） |
+> | `change-password` 无需登录 | ✅ 要**旧密码**（`bcrypt.compare`），不是"任何人都能改" |
+> | `/api/bridge/current-token` 漏 Token | ✅ 要 `deviceToken`，无则 401 |
+> | Socket.IO 房间未鉴权 | ✅ 两条推送通道**都不是裸连**（`server.ts` L5400 / L5492）：<br>`/ws/agent` 要 Agent Token，缺失或占位值直接 `close(4001)`；<br>`/ws/app` 要 `userId` + `clientSessionId`，并按单点互斥槽位校验 —— 槽位被别的 sessionId 占着就 `close(4002)` 踢掉，所以拿不到对方 clientSessionId 就连不上 |
+>
+> ⚠️ **唯一仍未保护的一条**：`GET /api/messages/:userId`（`server.ts` 约 2745 行）
+> 仅凭用户名就能读走该用户**全部聊天记录**。它是**读**接口，且不涉及密钥。
+> 将来要收紧的话，从这一条入手即可 —— 不必再上整套会话令牌。
 
-## 1. 要解决的问题
+## 1. 要解决的问题（历史背景，已不适用）
 
 当前服务端把请求体/查询串里的 `userId` 直接当作身份：
 
