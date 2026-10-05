@@ -5,7 +5,8 @@
 
 ---
 
-**当前没有待办。**（下面第 1 条是**已决定"以后再做"**的规划项，保留着备查。）
+**当前没有待办。** 下面两条都是**已完结或"以后再做"**的规划项，留在这里只为备查：
+第 1 条是将来才启动的 Linux 适配，第 2 条是安装器的收尾记录（只剩一条未实测）。
 
 ---
 
@@ -63,29 +64,22 @@ Platform.isLinux             15 处   ← 当初留过口子，但没成体系
 2. **打包**：`.deb` + AppImage，几十行脚本，放 CI 跑；
 3. **自定义 UI 的安装向导只做 Windows**，Linux 走包管理器那套标准流程。
 
-## 2. Windows 安装器：现状与选型（供 Linux 那节参照）
+## 2. Windows 安装器：已完结，只剩一条未实测
 
-主仓库的 `installer/` 是**旧的 Inno Setup 版**，已不再迭代 —— 自研安装器迁到了**独立仓库**
-`F:\ai\flutter\lxai-setup-flutter`（GitHub `lx00924-lx/lxai-setup-flutter`）。
+主仓库的 `installer/` 是**旧的 Inno Setup 版**，已不再迭代；自研安装器在**独立仓库**
+`F:\ai\flutter\lxai-setup-flutter`（GitHub `lx00924-lx/lxai-setup-flutter`），
+**D 方案（C++ 安装逻辑 + WebView2 渲染 HTML/CSS 界面）已实现并发布** ——
+`tool\build-installer.ps1` 一键出单文件 `output\LxAI-Setup-<版本>.exe`（约 25.5 MB），
+单文件、卸载器、注册表卸载项、快捷方式、开机自启全部落地并实测过。
 
 ⚠️ 但 `installer/runtime/python` **不能删也不能挪**：新安装器的
 `tool/build-payload.ps1` 硬编码从这里取私有 Python 运行时（`$RepoRoot\installer\runtime\python`）。
+（完整口径见根 `AGENTS.md` §8 的安装器一节。）
 
-单文件打包（M3）的四条候选路线、以及"为什么 Flutter 的 exe 做不到单文件直接跑"的实测结论，
-记在 `lxai-setup-flutter` 仓库的 `README.md`（「单文件安装包」一节）。这里只留结论：
-
-- 不要 Flutter、走原生（C++ / DuiLib / WebView2）→ 单文件 ~22–26 MB；
-- 保留 Flutter 向导 + 自解压外壳 → 单文件 ~37 MB；
-- 那条走不通的路（素材追加到 exe 尾部让 Flutter 自己解包）**别再试**：Flutter 的 exe
-  单独拷到别的目录都起不来，引擎没机会启动就没人解包。
-
-**用户当前倾向 D（C++ 底层安装 + WebView2 渲染 HTML/CSS 界面）**，理由是它同时满足
-"单文件 + 自定义 UI"，且界面层用 HTML/CSS 比 B 的 DuiLib XML 表达力强得多、换皮不用重编译。
-B（NSIS + DuiLib）是同一思路的备选，胜在零运行时依赖。**尚未开工，选型未最终敲定。**
-
-实测过的可行性前提（2026-10-04）：本机 **WebView2 运行时已装（154.0.4258.48）**、
-MSVC 14.51 + Windows SDK 10.0.26100 可用、WebView2 SDK 需从 NuGet 拉（2–5 MB）；
-NSIS / Qt / Rust / Go 均未安装。
+**唯一没验证过的**：UAC 提权路径（`RelaunchElevated`，`ShellExecuteEx` + `runas`）。
+默认安装目录是 `%LOCALAPPDATA%\Programs\LxAI`（免管理员、不弹 UAC），
+所以"装到 `Program Files`"这条分支**至今没在真机上跑过**。
+等哪天真要装到 `Program Files` 时，先按 `AGENTS.md` §8 的沙箱流程隔离验证。
 
 ---
 
