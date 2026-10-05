@@ -4501,14 +4501,22 @@ if %errorlevel% neq 0 (
   });
 
   // App 启动/重连时补拉：推送通道断线期间挂起的选择框不会丢
-  app.get("/api/agent/pending-questions", (req, res) => {
+  app.get("/api/agent/pending-questions", async (req, res) => {
     try {
       prunePendingQuestions();
       const userId = ((req.query.userId as string) || "").trim();
       const token = ((req.query.token as string) || "").trim();
+
+      // 【安全】认证 + 必须指明"要谁的"。
+      // 原实现的过滤器是"参数为空就不过滤"：token / userId 都不传 → 返回**所有人**的
+      // 待办。2026-10-06 沙箱实测：不登录就能拿到别人的 questionId / sessionId /
+      // **Agent Token** / 问题原文（"真的要删除生产数据库备份吗？"这种）。
+      // 现在：先过身份守卫（顺序/空值都对不上的直接 403），再强制按 userId 过滤。
+      if (!(await verifyUserIdentity(req, res, userId, "读取待回答"))) return;
       const questions = [...pendingQuestions.values()].filter((item) => {
+        if (item.userId !== userId) return false;
+        // token 是账号级凭证，只用来做二次收窄（传了就得更精确地匹配）
         if (token && item.token && item.token !== token) return false;
-        if (userId && item.userId && item.userId !== userId) return false;
         return true;
       });
       res.json({ success: true, questions });
@@ -4714,14 +4722,19 @@ if %errorlevel% neq 0 (
   });
 
   // App 启动/重连时补拉：断线期间挂起的审批不会丢
-  app.get("/api/agent/pending-approvals", (req, res) => {
+  app.get("/api/agent/pending-approvals", async (req, res) => {
     try {
       prunePendingApprovals();
       const userId = ((req.query.userId as string) || "").trim();
       const token = ((req.query.token as string) || "").trim();
+
+      // 【安全】同 pending-questions：原实现"参数为空就不过滤"，等于把**所有人**的
+      // 待审批（含 reason 里的命令原文、sessionId、**Agent Token**）挂在公网上。
+      // 实测：陌生人以及任意其他登录用户都能读到，进而可读对方的 Agent 会话目录。
+      if (!(await verifyUserIdentity(req, res, userId, "读取待审批"))) return;
       const approvals = [...pendingApprovals.values()].filter((item) => {
+        if (item.userId !== userId) return false;
         if (token && item.token && item.token !== token) return false;
-        if (userId && item.userId && item.userId !== userId) return false;
         return true;
       });
       res.json({ success: true, approvals });

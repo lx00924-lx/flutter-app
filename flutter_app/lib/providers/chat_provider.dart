@@ -1133,6 +1133,7 @@ class ChatProvider extends ChangeNotifier {
       final items = await SyncService.instance.fetchPendingApprovals(
         token: settingsProvider.settings.harnessToken,
         userId: settingsProvider.syncUserId,
+        clientSessionId: settingsProvider.clientSessionId,
       );
       if (items.isEmpty || _pendingApproval != null) return;
       final first = items.first;
@@ -1157,6 +1158,7 @@ class ChatProvider extends ChangeNotifier {
       final items = await SyncService.instance.fetchPendingQuestions(
         token: settingsProvider.settings.harnessToken,
         userId: settingsProvider.syncUserId,
+        clientSessionId: settingsProvider.clientSessionId,
       );
       if (items.isEmpty || _pendingQuestion != null) return;
       final first = items.first;

@@ -1252,6 +1252,7 @@ class SyncService {
   Future<List<Map<String, dynamic>>> fetchPendingQuestions({
     String token = '',
     String userId = '',
+    String clientSessionId = '',
   }) async {
     try {
       final resp = await _dio.get(
@@ -1260,6 +1261,9 @@ class SyncService {
           if (token.trim().isNotEmpty) 'token': token.trim(),
           if (userId.trim().isNotEmpty) 'userId': userId.trim(),
         },
+        // 服务端已对这两个接口加身份校验（原先"参数为空就返回所有人的待办"）。
+        // userId 既是查询条件也是身份声明，二者必须一致。
+        options: _createOptions(userId: userId, clientSessionId: clientSessionId),
       );
       if (resp.statusCode == 200 && resp.data is Map) {
         final list = (resp.data as Map)['questions'];
@@ -1281,6 +1285,7 @@ class SyncService {
   Future<List<Map<String, dynamic>>> fetchPendingApprovals({
     String token = '',
     String userId = '',
+    String clientSessionId = '',
   }) async {
     try {
       final resp = await _dio.get(
@@ -1289,6 +1294,8 @@ class SyncService {
           if (token.trim().isNotEmpty) 'token': token.trim(),
           if (userId.trim().isNotEmpty) 'userId': userId.trim(),
         },
+        // 同 fetchPendingQuestions：服务端要身份校验，别漏了这两个头。
+        options: _createOptions(userId: userId, clientSessionId: clientSessionId),
       );
       if (resp.statusCode == 200 && resp.data is Map) {
         final list = (resp.data as Map)['approvals'];
