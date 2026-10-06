@@ -3881,6 +3881,11 @@ async function startServer() {
     if (u.protocol !== "http:" && u.protocol !== "https:") {
       return `协议 ${u.protocol} 不允许（只放行 http/https）`;
     }
+    // 带用户名/密码的 URL：既没必要，又会把凭证原样转给第三方（`user:pass@host`）。
+    // 现在是被 fetch 抛 500 挡住的，这里提前拦住并给出可读原因。
+    if (u.username || u.password) {
+      return "URL 不允许携带用户名/密码";
+    }
     const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
     if (!host) return "缺少主机名";
     // 字面 IP：直接判
