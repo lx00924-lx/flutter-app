@@ -666,6 +666,19 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 它有 agentToken 校验（不是未授权），但伪造 Host 会让下载到的 bat 指向攻击者域名 ——
 **诱导下载**场景下的风险，目前记为低危、未处理。
 
+✅ **已修**（同日）：地址来自请求头这件事本身就是**命令注入**隐患 —— 它会被原样插进
+bat 的 `urlretrieve('<地址>/…')` 与 `--server "<地址>"`，只要 host 里塞进一个引号就能
+闭合出去执行任意命令。现在：
+- `run_bridge.bat` **不再信任任何请求头**，直接用服务端配置的 `SERVER_BASE_URL`
+  （生成脚本本来就该指向本服务的对外地址）；
+- `/api/agent/download-bat` 的 `server` / `harness` 参数**有意保留**（那是给用户自定义
+  地址用的），但过一遍新增的 `safeScriptUrl()`：必须是 http/https 合法 URL，
+  且**含引号/反斜杠/空白的一律拒绝**（返回 `400 INVALID_SERVER_URL` / `INVALID_HARNESS_URL`）。
+- 验证：生产实测伪造 `x-forwarded-host` 完全无效（脚本地址恒为配置值），
+  双引号注入 / 单引号闭合 `urlretrieve` / `file://` / 带空格 / harness 带引号 —— **6/6 全 400**。
+  ⚠️ 测这类端点时**记得给 token 做 URL 编码**：它是 `enc:v1:…` 形态、base64 里可能带
+  `+` `/`，不编码会被 query 截断，于是参数丢失、走默认值**误报成"校验没生效"**（踩过）。
+
 **按外部清单补测的验证点**（脚本 `_test-ssrf2.mjs`、`_test-ssrf-redirect.mjs`）：
 `file://`、本机端口、内网 IP、`127.0.0.2`、八进制 `0177.0.0.1`、`127.0.0.1.`、IPv6 全写回环、
 `gopher://`/`dict://`/`ftp://`、`api.xxx@127.0.0.1`（@ 劫持）—— 全部 403。

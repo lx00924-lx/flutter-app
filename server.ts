@@ -391,8 +391,37 @@ const startRetentionSweeper = (): void => {
 const SERVER_BASE_URL =
   (process.env.SERVER_BASE_URL || "").trim().replace(/\/+$/, "") || "https://www.lx00924ai.top";
 
+/**
+ * 校验「要写进 .bat / 脚本里的地址」。
+ *
+ * 为什么需要：这类地址会被**原样插进批处理的内容**，例如
+ * `python -c "urllib.request.urlretrieve('<地址>/api/…')"` 与
+ * `python lxai_bridge.py --server "<地址>"`。只要地址里能塞进一个引号，
+ * 就能把命令行闭合出去执行任意命令 —— 这是一条**命令注入**路径
+ * （2026-10-06 渗透测试发现：`run_bridge.bat` 的地址取自 `x-forwarded-host` 请求头，
+ * 攻击者可完全控制）。
+ *
+ * 规则：必须是 http/https 的合法 URL，且**只允许** URL 里本来就合法的字符，
+ * 绝不允许引号、反斜杠、空白、换行等能破坏命令行结构的字符。
+ *
+ * @returns 合法则返回归一化后的地址（去掉末尾斜杠）；不合法返回 null。
+ */
+const safeScriptUrl = (raw: unknown): string | null => {
+  const s = String(raw ?? "").trim();
+  if (!s) return null;
+  if (/["'`\\\s]/.test(s)) return null; // 引号/反斜杠/空白/换行 —— 直接毙掉
+  let u: URL;
+  try {
+    u = new URL(s);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+  if (!u.hostname) return null;
+  return `${u.protocol}//${u.host}`.replace(/\/+$/, "");
+};
+
 // ==================== 注册与邮箱验证码（官网注册专用） ====================
-//
 // 为什么这一块要单独做：注册是全站**唯一允许陌生人写数据**的入口，防线必须在服务端，
 // 不能指望前端。四层限制缺一不可：
 //   1) Turnstile 人机验证 —— 挡脚本；
@@ -4472,10 +4501,12 @@ async function startServer() {
     }
     const harnessUrl = ((req.query.harnessUrl as string) || "http://127.0.0.1:3080").trim();
     
-    // Determine host URL
-    const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
-    const host = req.headers["x-forwarded-host"] || req.headers.host || "localhost:3000";
-    const serverUrl = `${protocol}://${host}`;
+    // 【安全】这里原先用 `x-forwarded-proto` / `x-forwarded-host` 拼服务器地址 ——
+    // 而这两个头**完全由请求方控制**，地址又会被原样插进 bat 的
+    // `urlretrieve('<地址>/…')` 与 `--server "<地址>"` 里，等于给了一条命令注入路径
+    // （2026-10-06 渗透测试发现）。改用服务端配置的 SERVER_BASE_URL：
+    // 生成脚本本来就该指向本服务的对外地址，不需要听客户端的。
+    const serverUrl = safeScriptUrl(SERVER_BASE_URL) || SERVER_BASE_URL.split("?")[0];
 
     const batContent = `@echo off
 chcp 65001 >nul
@@ -5626,8 +5657,27 @@ if %errorlevel% neq 0 (
       if (!isPlausibleAgentToken(token)) {
         return res.status(401).json({ error: "无效或缺失的 Agent Token" });
       }
-      const serverUrl = (req.query.server as string)?.trim() || SERVER_BASE_URL;
-      const harnessUrl = (req.query.harness as string)?.trim() || "http://127.0.0.1:3080";
+      // 【安全】这两个地址会被插进 bat 的命令行里（`urlretrieve('<地址>/…')`、
+      // `--server "<地址>"`），所以**只允许合法 http/https URL**，把引号/反斜杠/
+      // 空白这类能破坏命令行结构的字符全部挡掉（2026-10-06 渗透测试加固）。
+      const serverUrlRaw = (req.query.server as string)?.trim();
+      const harnessUrlRaw = (req.query.harness as string)?.trim();
+      const serverUrl = serverUrlRaw ? safeScriptUrl(serverUrlRaw) : safeScriptUrl(SERVER_BASE_URL);
+      if (!serverUrl) {
+        return res.status(400).json({
+          error: "server 参数不是合法的 http/https 地址",
+          code: "INVALID_SERVER_URL",
+        });
+      }
+      const harnessUrl = harnessUrlRaw
+        ? safeScriptUrl(harnessUrlRaw)
+        : "http://127.0.0.1:3080";
+      if (!harnessUrl) {
+        return res.status(400).json({
+          error: "harness 参数不是合法的 http/https 地址",
+          code: "INVALID_HARNESS_URL",
+        });
+      }
       const batContent = `@echo off
 chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
