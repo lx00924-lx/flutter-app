@@ -5,6 +5,7 @@ import nodemailer, { type Transporter } from "nodemailer";
 import { randomBytes, randomUUID, randomInt, createCipheriv, createDecipheriv } from "crypto";
 import FormData from "form-data";
 import { createServer } from "http";
+import dns from "dns";
 import { Server } from "socket.io";
 import { WebSocketServer, WebSocket as WSWebSocket } from "ws";
 import { EventEmitter } from "events";
@@ -3791,6 +3792,116 @@ async function startServer() {
     res.json({ url: `/uploads/${req.file.filename}` });
   });
 
+  /**
+   * ── SSRF 防护（2026-10-06 实测发现并修复）──────────────────────────
+   *
+   * `/api/funasr-transcribe`、`/api/asr/transcribe`、`/api/asr/speech-to-text`
+   * 是**代理**端点：客户端把 endpoint/target 传上来，中继照着去请求（这样 App 不必
+   * 把 ASR 密钥交给第三方 CORS）。问题在于那个地址**完全由请求方指定**，而原实现
+   * 只做"补前缀、补路径"，**没有任何地址校验**。
+   *
+   * 实测（本机起诱饵服务，让中继去请求它）：中继**确实发出**了请求，而且把上传的
+   * 文件一起转发了 —— 这就是标准的 SSRF。可被用来打内网（`http://192.168.x.x`）、
+   * 云元数据（`http://169.254.169.254/…`：这台机器成了"跳板"）、本机其它服务。
+   *
+   * 防护策略（按顺序）：
+   *   1. 只允许 http/https，禁掉 file:/gopher:/dict: 这类协议；
+   *   2. 显式白名单（`ASR_ALLOWED_HOSTS` 环境变量）直接放行 —— 本机 ASR 这类
+   *      私有地址必须由部署者自己显式声明，**不预设任何内网例外**；
+   *   3. 字面 IP 是内网/回环/链路本地/唯一本地（含 IPv6 的 `::1`、`fc00::/7`、
+   *      `fe80::/10`，以及 `::ffff:` 映射形式）→ 拒绝；
+   *   4. 域名先解析一遍，解析结果命中上面任何一类 → 拒绝（挡 `localhost`、
+   *      `*.internal`，以及"域名指向内网"）；
+   *   5. 请求**不跟随重定向** —— 否则公网地址可以 302 到内网绕过以上全部检查。
+   *
+   * ⚠️ 别把"字符串黑名单"当成防护（原代码的思路）：大小写、进制、IPv6 映射写法
+   * 都能绕过去，必须解析成真实 IP 再判。
+   */
+  const ASR_ALLOWED_HOSTS = new Set(
+    (process.env.ASR_ALLOWED_HOSTS || "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+
+  const isBlockedIp = (rawIp: string): boolean => {
+    // 注意剥掉方括号：Node 的 `new URL(...).hostname` 对 IPv6 是**带方括号**的
+    // （实测 `new URL('http://[::ffff:127.0.0.1]:1/').hostname === '[::ffff:7f00:1]'`）。
+    const v = rawIp.trim().toLowerCase().replace(/^\[|\]$/g, "");
+    if (v === "::1" || v === "::") return true;
+    const v4 = v.startsWith("::ffff:") ? v.slice(7) : v;
+
+    // IPv4 点分十进制
+    const m = v4.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (m) {
+      const [a, b] = [Number(m[1]), Number(m[2])];
+      if (a === 0 || a === 10) return true; // 0.0.0.0/8、10/8
+      if (a === 127) return true; // 回环
+      if (a === 169 && b === 254) return true; // 链路本地（含云元数据 169.254.169.254）
+      if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12
+      if (a === 192 && b === 168) return true; // 192.168/16
+      if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+      if (a >= 224) return true; // 组播/保留
+      return false;
+    }
+
+    // ⚠️ IPv4-mapped IPv6 的**十六进制**写法：Node 把 `::ffff:127.0.0.1` 规范化为
+    // `::ffff:7f00:1`，`::ffff:10.0.0.7` 变成 `::ffff:a00:7` —— 只按前缀
+    // （fc/fd/fe8x）判断**认不出来**，等于给内网留了一条绕过路径（实测发现）。
+    // 这里把后两段十六进制还原成 IPv4 再判。
+    const mapped = v.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (mapped) {
+      const hi = parseInt(mapped[1], 16);
+      const lo = parseInt(mapped[2], 16);
+      const ip4 = `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+      if (isBlockedIp(ip4)) return true;
+    }
+
+    // IPv6 唯一本地 fc00::/7、链路本地 fe80::/10
+    if (/^f[cd]/.test(v) || /^fe[89ab]/.test(v)) return true;
+    return false;
+  };
+
+  const ssrfViolation = async (target: string): Promise<string> => {
+    const t = (target || "").trim();
+    if (!t) return "empty";
+    if (ASR_ALLOWED_HOSTS.size > 0) {
+      try {
+        if (ASR_ALLOWED_HOSTS.has(new URL(t).hostname.toLowerCase())) return "";
+      } catch {
+        /* 解析失败走下面统一判定 */
+      }
+    }
+    let u: URL;
+    try {
+      u = new URL(t);
+    } catch {
+      return "URL 解析失败";
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      return `协议 ${u.protocol} 不允许（只放行 http/https）`;
+    }
+    const host = u.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    if (!host) return "缺少主机名";
+    // 字面 IP：直接判
+    if (/^[0-9a-f:.]+$/.test(host) && isBlockedIp(host)) return `目标地址属于内网/回环（${host}）`;
+    // 域名：解析后判（挡 localhost / *.internal / 域名指向内网）
+    if (!/^[0-9a-f:.]+$/.test(host)) {
+      if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".internal") || host.endsWith(".local")) {
+        return `本地主机名不允许（${host}）`;
+      }
+      try {
+        const addrs = await dns.promises.lookup(host, { all: true });
+        for (const a of addrs) {
+          if (isBlockedIp(a.address)) return `域名 ${host} 解析到内网地址（${a.address}）`;
+        }
+      } catch {
+        return `域名 ${host} 无法解析`;
+      }
+    }
+    return "";
+  };
+
   // Universal Proxy route for Voice Transcription (FunASR, SenseVoice & OpenAI/Whisper compatible APIs)
   app.post(["/api/funasr-transcribe", "/api/asr/transcribe", "/api/asr/speech-to-text"], upload.any(), async (req, res) => {
     let file: any = null;
@@ -3830,6 +3941,24 @@ async function startServer() {
         } else {
           sanitized = `https://${sanitized}`;
         }
+      }
+
+      // SSRF 校验：地址完全由请求方指定，必须先确认它**不是内网/本机**才发请求。
+      // 放在这里（而不是更早）是因为此时 sanitized 已经补齐了协议与路径。
+      const ssrfReason = await ssrfViolation(sanitized);
+      if (ssrfReason) {
+        console.warn(`[Security] 拒绝 ASR 代理请求（SSRF 防护）：${ssrfReason}；目标 = ${sanitized.slice(0, 120)}`);
+        if (file?.path) {
+          try {
+            await fs.unlink(file.path);
+          } catch {
+            /* 清理失败不影响拒绝 */
+          }
+        }
+        return res.status(403).json({
+          error: `该转写地址不被允许：${ssrfReason}`,
+          code: "SSRF_BLOCKED",
+        });
       }
 
       // Check if this is an OpenAI/Whisper compatible endpoint
@@ -3912,6 +4041,8 @@ async function startServer() {
             'Content-Length': formBuffer.length.toString()
           },
           body: formBuffer,
+          // 不跟随重定向：否则公网地址可以 302 到内网绕过 ssrfViolation 的全部检查
+          redirect: 'manual',
         });
       } else {
         // Fallback for non-OpenAI compatible endpoints (FunASR C++ / Python server)
@@ -3933,6 +4064,7 @@ async function startServer() {
             'Content-Length': formBuffer.length.toString()
           },
           body: formBuffer,
+          redirect: 'manual', // 同上一处：禁止重定向绕过 SSRF 检查
         });
       }
 
