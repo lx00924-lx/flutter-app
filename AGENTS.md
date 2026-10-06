@@ -517,200 +517,51 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - ⚠️ **Windows 有图标缓存**：覆盖 exe 后任务栏/开始菜单可能仍显示旧图标，
   必要时 `ie4uinit.exe -show` 或重建图标缓存，别误判成"没替换成功"。
 
-## 12. 接口身份校验（2026-10-06 补上，改这些接口前必读）
+## 12. 接口安全的既有约定（改接口 / 加接口前必读）
 
-### 12.1 背景：6 个接口曾经"认名字不认人"
+> 完整审计记录（当时哪里有缺口、怎么验证、踩过什么坑）在
+> [`docs/SECURITY-AUDIT.md`](./docs/SECURITY-AUDIT.md) —— ⚠️ **那份是内部参考，不要对外发布**。
+> 本节只列**必须遵守的约定**，不写历史细节，也不列"已加固接口清单"。
 
-`userId` 是**公开可猜**的（顺序数字 / 手机号），而下面这些接口原先**只把 URL/body 里的
-`userId` 当作身份**。隔离沙箱实测（非推断）后果：无任何凭据即可读全部聊天记录；
-可**注入伪造消息**、删消息、一次请求删掉整个会话；可改写云端设置；可远程停掉桥接
-（日志里发起方自称 `attacker` 也照样执行）；响应头还带 `Access-Control-Allow-Origin: *`，
-浏览器端能直接读走。
+### 12.1 身份与授权
 
-**已接守卫（9 处）**：
-`GET /api/messages/:userId`、`GET /api/active-sessions/:userId`、
-`POST /api/sync-messages`、`POST /api/delete-message`、`POST /api/delete-session`、
-`GET|POST /api/settings/:userId`、`POST /api/sync-settings`、`POST /api/agent/bridge-command`。
+- **身份一律走 `verifyUserIdentity()`**：认 `x-client-session-id`（登录时服务端签发、写进
+  `messages_data/active_sessions.json` 槽位的 UUID v4），**不要**把 URL/body 里的 `userId`
+  当身份 —— 它是公开可猜的（本项目就是顺序数字 / 手机号）。
+  新加接口时先问一句：「**不传任何凭据时它返回什么？**」
+- **列表类接口必须强制按 `userId` 过滤，且失败方向是拒绝**：
+  写成 `if (item.userId !== userId) return false`，**不要**写成「参数为空就不过滤」——
+  那等于把所有人的数据一次性给出去（这个写法本项目踩过一次）。
+- **守卫失败一律回 403**，不要用 401：客户端只在 `401 + FORCE_LOGOUT` 时才走顶号流程，
+  用 403 不会把"被拦截"误报成"账号在别处登录"。
+- **校验不要做内存缓存**：被顶下线的旧凭证必须立刻失效，每次读盘（文件只有几百字节）。
 
-### 12.2 凭证 = `x-client-session-id`（不要另发明一套）
+### 12.2 「凭证失效」的表述（改服务端必读）
 
-客户端 `SyncService._createOptions()` **早就在发** `x-user-id` / `x-device-type` /
-`x-client-session-id`；`x-client-session-id` 是登录时服务端签发并写进
-`messages_data/active_sessions.json` 槽位的 **UUID v4**。守卫 `verifyUserIdentity()`
-只做一件事：**这个 id 是否属于该用户** —— 与 `/api/check-session`、`/ws/app` 握手
-同一份数据、同一套语义。校验规则：
+- 只能是 **`401 + error:"FORCE_LOGOUT"`**，形状与顶号一致（带 `kickedSessionId`、
+  `canTakeover:false`）。**别新造错误码**：客户端的掉线判定只认这一个，换个码它整条忽略，
+  于是 App 看着一切正常、其实每个请求都被守卫拦着，**云端同步静默失效**（实测过）。
+- 另有两个出口必须一起管：`/api/check-session` 在**槽位完全不存在**时不能落到 `{valid:true}`；
+  `/ws/app` 握手不能对空槽位直接放行（要 `send` 完 `force_logout` 再 `close(4002)`）。
 
-- 头里的 `x-user-id` 与目标 `userId` 必须一致（否则拿自己的凭证就能读别人）；
-- 该 id 必须命中该用户的设备槽位；设备类型识别不出时退化为"任一槽位命中"；
-- **每次请求都读盘**，不做内存缓存 —— 被顶下线的旧 id 必须立刻失效（有回归用例）；
-- 失败一律 **403**（不是 401）：App 的 `_checkAndTriggerForceLogout` 只在
-  `401 + FORCE_LOGOUT` 时触发顶号流程，用 403 不会把"被拦截"误报成"账号在别处登录"。
+### 12.3 限流与真实 IP
 
-### 12.3 边界与兼容
+- **取真实 IP 用 `cf-connecting-ip`**：生产走 Cloudflare Tunnel，`socket.remoteAddress`
+  恒为 127.0.0.1 —— 按它限流等于全局限流，会把所有用户一起锁掉。
+- 登录失败计数按「用户名 + IP」双维度，且**首次失败立即落盘**（否则每次尝试后重启中继就能清零）。
+  限流判定要放在读用户表 / 跑 bcrypt **之前**。
 
-- **只加校验、不改客户端协议**，所以**旧版 App 也能用**（它本来就在发这些头）。
-  已知的老版本（`F:\ai\flutter-app` 那份 10-03 的源码）`_createOptions` 里同样有这两个头。
-- **官网 `src/` 不调用这 6 个接口**，不受影响。
-- 未受影响的接口（本来就有校验，别顺手改）：`change-password`（要原密码）、
-  `account/delete`（要邮箱验证码）、`login`（要密码）、`/api/agent/sessions|status`
-  （要 Agent Token）、`/ws/agent`、`/ws/app`。
-- 回归测试：`.sandbox-demo/_regression.mjs`（32 项，含"被顶下线后旧凭证失效"）；
-  越权探测：`.sandbox-demo/_attack-test.mjs`。跑法见 `.sandbox-demo/README.md`。
-  **`.sandbox-demo/` 已在 `.gitignore` 里**，是本地沙箱，不要把生产数据放进去。
-- ⚠️ 生产 `F:\ai\flutter-app\server.ts` 是 **CRLF**、仓库是 LF。给它打补丁要用
-  `.sandbox-demo/_patch-prod.cjs`（10 处插入 + 守卫函数，逐处校验"只匹配 1 次"才写入），
-  打完必须 `npx esbuild server.ts ... --outfile=dist/server.cjs` 重编，
-  再用**生产产物**跑一遍 `_regression.mjs`。
+### 12.4 不要信任请求头
 
-### 12.4 ⚠️「凭证失效」只能用 `401 + FORCE_LOGOUT` 表述（改服务端必读）
-
-2026-10-06 清空 `active_sessions.json` 时实测踩透的一条：**服务端说"这个凭证我不认了"
-时，必须用 `401 + error:'FORCE_LOGOUT'`，形状与顶号完全一致**（带 `kickedSessionId`，
-且 `canTakeover:false`）。原因：
-
-- 客户端的掉线判定只有**两条路**：4 秒轮询 `/api/check-session`，以及 `/ws/app`
-  推送通道的 `force_logout` 事件。而真正生效的那条判定是
-  `_checkAndTriggerForceLogout()` 里的 `401 && error=='FORCE_LOGOUT'`。
-- **新造错误码（当初用过 `SESSION_UNKNOWN`）会被旧版 App 整条忽略** —— 它会继续带着
-  废弃凭证轮询，而每个请求都被身份守卫 403 拦下：**界面一切正常、云端同步静默失效、两头都不报错**。
-  实测就是这样：App 每 12 秒发一次请求，全部 403，用户看不出来。
-- `canTakeover` 必须 `false`：为 `true` 时客户端会先"静默重登接管"，那会**立刻把槽位
-  写回来，把"清空凭证"这件事故意抹掉**。
-- `/api/check-session` 里同一个毛病有两个出口，都堵上了：槽位**完全不存在**时不再落到
-  `{valid:true}` 兜底；`/ws/app` 握手也不再对"槽位不存在"直接放行（它会 `send` 完
-  `force_logout` 再 `close(4002)`）—— 实测这条路径 14ms 内就能把载荷送到客户端。
-- 客户端的 403 分支**刻意没做**（加过又撤了）：服务端守卫回 403 是安全的（守卫只负责
-  拦请求），但客户端的 403 分支在运行时走不到，是"要重打包才生效的死代码"。
-  规矩记在 `sync_service.dart` 的 `_checkAndTriggerForceLogout()` 注释里。
-
-## 13. 渗透测试结论（2026-10-06 全量跑过一遍，改安全相关代码前先看这节）
-
-> 脚本：`.sandbox-demo/_pentest-prod.mjs`（生产只读，37 项边界）、
-> `_pentest-sandbox.mjs`（沙箱双账号越权，13 项）、`_cors-test.mjs`（跨域/滥用）。
-> **结论：第 12 节那批修复有效（37/37 + 13/13），但测试又挖出 3 个新的未修项。**
-
-### 13.1 已修（本次实测发现并修复）
-
-- **`/api/agent/pending-approvals` 与 `/api/agent/pending-questions` 不登录就能读所有人的待办**：
-  过滤器写成**"参数为空就不过滤"**（`if (token && …) if (userId && …) return true`）→ 泄漏
-  `approvalId` / `sessionId` / **Agent Token** / `reason`（命令原文，例如
-  "rm -rf /backup/prod-db —— bob 的电脑正在等 bob 批准"）。沙箱实测：陌生人拿得到；
-  alice 也同样拿得到 bob 的；泄漏的 token 还能反过来读该账号的 Agent 会话目录。
-  **修法**：过 `verifyUserIdentity` + **强制** `item.userId !== userId` 剔除。
-  ⚠️ 教训：**"参数为空就不过滤"是一类反复出现的写法**，新写列表接口时先问一句
-  "不传参数时它返回什么？"。
-- **`/api/login` 无失败限流**（原 P1）：实测连打 8 次错密码全是 `401`。现已加
-  "按**用户名 + 来源 IP**双维度计数 → 超过 5 次指数退避（60s / 5min / 15min）"，
-  成功登录清零，计数落盘（**首次失败立即写**，否则攻击者每次尝试后重启中继就能清零）。
-  ⚠️ 取真实 IP 必须读 `cf-connecting-ip`：生产走 Cloudflare Tunnel，
-  `req.socket.remoteAddress` 永远是 `127.0.0.1`，按它限流 = 全局限流。
-  被限流时**在读 users.json / 跑 bcrypt 之前**就返回 429（否则攻击者能用 bcrypt 拖垮服务）。
-- **非法 JSON 会回带服务器绝对路径的 HTML 错误页**（原 P2）：发 `{bad json` 给
-  `/api/register`，响应体里出现 `F:\ai\flutter-app\node_modules\body-parser\…` 与完整堆栈。
-  现加错误中间件统一回 `400 + {code:'INVALID_JSON_BODY'}`（`entity.too.large` → 413），
-  **不原样回显解析器消息**（它含请求体片段）。位置必须在 `/api/health` 之前 ——
-  Express 错误中间件对"注册在它之前的路由"才生效，放文件末尾等于没修。
-- 顺带：登录日志原先把 `clientSessionId` 整串打出来 —— 那是**凭证**，不该落日志。
-  现只打印"已提供(N 字符)"。
-
-### 13.2 已加固（原 P3/P4）
-
-- **CORS 收敛成白名单**（HTTP 与 socket.io 用**同一个** `isCorsOriginAllowed()`）：
-  原先 `app.use(cors())` 允许任意来源且 `Allow-Headers` 动态反射（预检会把请求的任何头
-  回显）；socket.io 那边也是 `cors: { origin: "*" }` —— 两处一起收紧。
-  白名单 = 同源（官网就是本服务下发的）+ `SERVER_BASE_URL` 主机（**比较前先剥掉
-  `www.`**，否则裸域会被拦，实测踩过）+ `localhost/127.0.0.1`（本机 `npm run dev`，
-  不放开开发会白屏）+ 环境变量 `ALLOWED_ORIGINS` 追加。`Allow-Headers` 改为显式列表，
-  `credentials` 保持关闭。
-- **无 Origin 的请求一律放行**：原生 App、桥接脚本、curl、服务端之间都不发 Origin，
-  而 CORS 只是**浏览器**的约束 —— 拦它们纯属自伤。
-- 补上 `X-Content-Type-Options: nosniff` 与 `X-Frame-Options: DENY`。
-  **HSTS 刻意不做**：中继自己跑 HTTP，TLS 由 Cloudflare 终止，该头应由 CF 下发；
-  在应用里按 `X-Forwarded-Proto` 判断很容易在本地开发时把自己锁死。
-- 回归：`.sandbox-demo/_test-cors.mjs`（15 项：恶意来源拒绝、自己的来源放行、
-  无 Origin 不受影响、任意头不再被反射、安全头到位）。
-
-### 13.3 第二轮：按"常见攻击清单"逐类实测（2026-10-06 晚）
-
-> 脚本：`.sandbox-demo/_test-traversal.mjs`（路径遍历/编码绕过/鉴权绕过，30 项）、
-> `_test-ssrf.mjs`（SSRF，22 项）、`_ssrf-demo.mjs`（真实利用演示）。
-
-**发现并修复一个 SSRF（比前面那批更严重）**：
-
-- **`/api/funasr-transcribe` / `/api/asr/transcribe` / `/api/asr/speech-to-text`
-  是代理端点**：客户端把 `endpoint`/`target` 传上来、中继照着去请求（这样 App 不必把
-  ASR 密钥交给第三方 CORS）。问题在于那个地址**完全由请求方指定**，而原实现只做
-  "补前缀、补路径"，**没有任何地址校验**，而且这个端点**没有身份校验**。
-- **实测利用**：本机起一个诱饵服务，让中继去请求它 —— 中继**确实发出**了请求，
-  并把上传的文件一起转发了（诱饵记录 `POST /internal-probe`，请求体 674 字节）。
-  也就是说任何人都能拿这台中继当跳板打内网 / 云元数据（`169.254.169.254`）/
-  本机其它服务（**包括你本机 3080 上的 DSH 宿主**）。
-- **修法**（`ssrfViolation()` + `isBlockedIp()`）：只放行 http/https；内网/回环/
-  链路本地/唯一本地/CGNAT 一律拒绝；域名先 DNS 解析再判（挡 `localhost`、
-  `*.internal`、域名指向内网）；**请求禁止跟随重定向**（否则公网地址可以 302 到内网
-  绕过全部检查）；私有地址要用 `ASR_ALLOWED_HOSTS` 环境变量**显式声明**，
+- `Host` / `X-Forwarded-Host` / `X-Forwarded-Proto` 都由请求方控制。这类值可能被写进 `.bat`
+  （**命令注入**）或被当作请求目标（**SSRF**）。
+- 服务自身的对外地址一律取 `SERVER_BASE_URL`；确实要让用户自定义的地址，过 `safeScriptUrl()`
+  （只允许 http/https，且禁掉引号/反斜杠/空白）。
+- **服务端主动发起的请求要过 `ssrfViolation()`，并且不要跟随重定向**；只放行 http/https，
+  内网 / 回环 / 链路本地 / CGNAT 一律拒；私有地址只能用 `ASR_ALLOWED_HOSTS` 显式声明，
   **不预设任何内网例外**。
-- ⚠️ **踩过的坑**：Node 的 `new URL('http://[::ffff:127.0.0.1]:1/').hostname` 返回的是
-  **十六进制** `[::ffff:7f00:1]`（`::ffff:10.0.0.7` → `[::ffff:a00:7]`）。
-  只按字符串前缀判断会**漏掉这一族写法**，必须把后两段十六进制还原成 IPv4 再判。
-  另外 `127.0.0.1`、`2130706433`、`0x7f000001` 会被 Node 规范化成同一个地址，
-  所以"先规范化再判"是天然正确的，不用自己处理各种进制。
 
-**路径遍历 / 编码绕过 / 路由鉴权绕过：30 项全部没打穿**。判据要注意 ——
-很多畸形路径会返回 **200 + SPA 兜底页**（`<!doctype html>`），那是 `app.get("*")`
-把前端页面发出来了，**不是** API 被访问到；只有返回 **JSON** 才说明路由真的匹配上、
-被守卫按预期拦下（403）。
+### 12.5 其它
 
-**同类提醒**：`/api/download/run_bridge.bat` 用 `req.headers.host` /
-`x-forwarded-host` 拼脚本里的"服务器地址"（`server.ts` 的 `serverUrl`）。
-它有 agentToken 校验（不是未授权），但伪造 Host 会让下载到的 bat 指向攻击者域名 ——
-**诱导下载**场景下的风险，目前记为低危、未处理。
-
-✅ **已修**（同日）：地址来自请求头这件事本身就是**命令注入**隐患 —— 它会被原样插进
-bat 的 `urlretrieve('<地址>/…')` 与 `--server "<地址>"`，只要 host 里塞进一个引号就能
-闭合出去执行任意命令。现在：
-- `run_bridge.bat` **不再信任任何请求头**，直接用服务端配置的 `SERVER_BASE_URL`
-  （生成脚本本来就该指向本服务的对外地址）；
-- `/api/agent/download-bat` 的 `server` / `harness` 参数**有意保留**（那是给用户自定义
-  地址用的），但过一遍新增的 `safeScriptUrl()`：必须是 http/https 合法 URL，
-  且**含引号/反斜杠/空白的一律拒绝**（返回 `400 INVALID_SERVER_URL` / `INVALID_HARNESS_URL`）。
-- 验证：生产实测伪造 `x-forwarded-host` 完全无效（脚本地址恒为配置值），
-  双引号注入 / 单引号闭合 `urlretrieve` / `file://` / 带空格 / harness 带引号 —— **6/6 全 400**。
-  ⚠️ 测这类端点时**记得给 token 做 URL 编码**：它是 `enc:v1:…` 形态、base64 里可能带
-  `+` `/`，不编码会被 query 截断，于是参数丢失、走默认值**误报成"校验没生效"**（踩过）。
-
-**按外部清单补测的验证点**（脚本 `_test-ssrf2.mjs`、`_test-ssrf-redirect.mjs`）：
-`file://`、本机端口、内网 IP、`127.0.0.2`、八进制 `0177.0.0.1`、`127.0.0.1.`、IPv6 全写回环、
-`gopher://`/`dict://`/`ftp://`、`api.xxx@127.0.0.1`（@ 劫持）—— 全部 403。
-**302 重定向那条要先让入口被放行才测得到**（用 `ASR_ALLOWED_HOSTS` 放行跳板主机，
-实测：请求到达跳板、`跳板命中=1`，但**内网诱饵零命中** → 重定向确实没被跟随）。
-云厂商元数据一并拒：`169.254.169.254`、**`100.100.100.100`（阿里云，属 CGNAT）**、
-`metadata.google.internal`（`.internal` 后缀）。带 `user:pass@` 的 URL 直接拒。
-
-**两项后续加固（同日完成）**：
-
-1. **连接阶段再判一次内网（防 DNS 重绑定）**：`ssrfViolation()` 是先解析域名判一次，
-   而 `fetch` 连接时**会再解析一次** —— 中间窗口正是重绑定的可乘之机。现在 ASR 代理
-   不再用 `fetch`，改用 `requestAsrPinned()`（`http(s).request` + 自定义 `lookup`）：
-   **解析结果直接交给连接使用**，并在 `lookup` 里对每个解析出的地址再判一次内网，
-   命中就掐断连接（日志打"连接阶段拦下内网地址（疑似 DNS 重绑定）"）。
-   ⚠️ 踩坑：Node 调这个 `lookup` 时 `options` 可能是 **`{hints:0, all:true}`** ——
-   那种情况**回调必须给数组** `cb(null, [{address, family}])`；给单个地址会直接抛
-   `ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined`（在 `node:net` 的 emitLookup）。
-   按 `all` 标志分两种回法即可。重定向语义保持 `manual`（3xx 原样返回，不跟随）。
-2. **ASR 代理端点加身份守卫**：它是个**开放的出站代理**，不加校验任何人都能拿它当免费
-   代理打公网（烧本机带宽 / 被当中转跳板）。现在要求 `userId` + 登录凭证；被拒时顺手
-   删掉 multer 已落盘的临时文件。
-   ✅ **不影响任何现有客户端**：Flutter 的 `AsrService.transcribeAudio()` 是
-   **直连用户配置的 ASR 端点**（`asr_service.dart` 里 `dio.post(endpoint)`），
-   压根不走中继这条路；`src/`（官网）也不调。所以这道守卫只挡"自己拼请求的脚本调用者"。
-
-- 守卫的错配组合全部 403：无凭证 / 空凭证 / 乱编 UUID / **大小写变换** /
-  尾部多一个字符 / 前缀注入 / 超长（10KB）/ 乱填 `x-device-type`（含冒充另一设备类型）/
-  头报 A 路径要 B / URL 编码 / 路径加斜杠 / 路径穿越 / 不存在的用户。
-- Agent / 桥接通道无 token 一律 401：`agent/sessions|status|models|permission-presets|
-  poll|archive-session|rename-session`。
-- 公开接口符合设计：`/api/health`、`/api/model-limits`；`register` 与
-  `account/delete-code` 都要求人机验证（实测无凭据直接 `403 缺少人机验证凭据`）。
-- 跨域读受保护数据**打不通**：不猜凭证 / 猜 UUID / 拿用户名当凭证，全部 403。
-
+- 引入新依赖前先确认它在 `node_modules` 里（服务端用 `--packages=external` 打包，运行时从本地解析）。
+- 生产 `F:\ai\flutter-app` 与仓库的同步方式见 §8.2；那份是**运行副本**，改完要重编再重启。
