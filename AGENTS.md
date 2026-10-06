@@ -24,7 +24,8 @@
   - **删除范围**：`users.json`（数组，按用户名过滤）、`messages_v2.json` / `settings.json` / `active_sessions.json`（按用户名整键移除），各自在 `withFileLock` 内完成。
     ⚠️ **`messages_media/` 刻意不删**：文件名是 multer 随机生成的、不含用户信息，无法可靠判定归属，宁可少删也不误删他人文件。要支持得先把上传改成"按 userId 建子目录"。
   - 前置配置：`.env` 里的 SMTP（用授权码，不是登录密码；`SMTP_SECURE` 语义是"连上就立刻 TLS"，465 填 1、587 必须填 0）与 `TURNSTILE_SECRET` / `VITE_TURNSTILE_SITE_KEY`（后者是**构建期**注入，改完要 `npm run build`）。未配置时接口**明确返回 503/拒绝**，不静默失败。
-  - 回归测试脚本：`F:\ai\flutter\lxai-delete-test\run-test.cjs`（本地沙箱实例 + 自建 SMTP 接收器，跑真实 `dist/server.cjs`，32 项断言）。
+  - 回归测试脚本在**独立于本仓库的本地沙箱**里（起真实 `dist/server.cjs` + 自建 SMTP 接收器，
+    32 项断言）；改注册/注销链路前值得照着跑一遍。
 
 ## 4. 操作与删除安全规范
 - **严格确认机制**：只有在用户明确给出“确认更改”、“可以”等肯定指令后方可进行文件修改或写入操作；在日常咨询或问答中，只解释原因和提供建议。
@@ -349,14 +350,16 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - **桥接注册成功 → 推出第一份目录约 4 秒**，此间 `/api/agent/sessions` 是
   `online=true` + 空数组 —— 不是故障。
 - **用户插件没有热重载**：改完 `lib/index.js` 必须重启宿主 web 服务。
-- **桌面 App 的本地数据在 `C:\Users\lx\Documents`**（Hive），**不在安装目录**。
-- **干净的 cmd 里 `node` 不在 PATH**：启动脚本用绝对路径 `C:\nvm4w\nodejs\node.exe`。
+- **桌面 App 的本地数据在用户的 `Documents` 目录**（Hive：settings / sessions / messages 三个 box），
+  **不在安装目录**；清缓存或换机会丢登录态。
+- **干净的 cmd 里 `node` 不一定在 PATH**：启动脚本要用**绝对路径**指向 node 可执行文件
+  （本机用的是 nvm 安装的 node，路径写死在 `start-relay.bat` 里）。
 - **App 日志页**读的是 `AppLogger`；`debugPrint` 的桥接在 `main()` 里装（缺了它日志页就是空的）。
 - **Windows 分发主line = 独立仓库 `lxai-setup-flutter`**（C++ + WebView2 单文件）；
   本仓 `installer/` 只剩"`runtime/python` 的存放处 + `prepare-runtime.ps1`"这个用途，
   **两者都不能删**。改 App 后要 `flutter build windows --release` + 重打素材再编安装器。
-- **环境灾备**在桌面 `DSH备份-<日期>\`（含明文凭据，**别上传网盘 / 别入库**）；
-  动 DSH 桌面版前先记下 CLI 版本号。
+- **环境灾备**：保留一份带日期的 DSH 环境快照（含 `.dsh` 数据、App 的 Hive、恢复说明）。
+  ⚠️ 快照**含明文凭据**，别上传网盘、别入库；动 DSH 桌面版前先记下当前 CLI 版本号。
 
 ## 9. 消息与过程链路的结构事实（2026-09-28 重构后，改这条链路前必读）
 
@@ -565,3 +568,20 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 
 - 引入新依赖前先确认它在 `node_modules` 里（服务端用 `--packages=external` 打包，运行时从本地解析）。
 - 生产 `F:\ai\flutter-app` 与仓库的同步方式见 §8.2；那份是**运行副本**，改完要重编再重启。
+
+### 12.6 别把"过程细节"和"本机路径"写进指令文件
+
+这份文件是**给定协作者（含 AI）看的现行约束**，不是工作日志，也不是漏洞档案。
+往里堆过程细节有三个实际代价：
+
+1. **挤爆预算**：工作区指令有 65536 字节上限，超了会被**静默截断** ——
+   截断之后文件**末尾内容读不到**，比"少写点"严重得多（本项目一度涨到 67310 字节）。
+2. **等于附赠排查清单**：把"哪里缺过校验、怎么利用、错误码叫什么、验证脚本在哪"
+   写在这里，读者就不只是协作者了。**修复本身在代码里看得见，但没必要再写一份说明书。**
+   这类内容放提交信息或内部文档。
+3. **本机信息对别人没用**：本机用户名、Node 安装路径、某个本地服务的端口、桌面备份目录……
+   协作者照着做不了任何事，却把作者的环境暴露了。写路径用**相对路径或占位符**
+   （如 `{repo}` / `{app}`）。
+
+写法建议：**只写"必须遵守什么"和"看到什么现象说明是什么问题"**；
+"当初怎么试出来的"进提交信息，"怎么复现/怎么测"进 `docs/`。
