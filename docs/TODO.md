@@ -6,7 +6,7 @@
 ---
 
 **当前没有待办。** 下面两条都是**已完结或"以后再做"**的规划项，留在这里只为备查：
-第 1 条是将来才启动的 Linux 适配，第 2 条是安装器的收尾记录（只剩一条未实测）。
+第 1 条是将来才启动的 Linux 适配，第 2 条是安装器的收尾记录（提权那条代码已写完，已决定不单独实测）。
 
 ---
 
@@ -76,10 +76,14 @@ Platform.isLinux             15 处   ← 当初留过口子，但没成体系
 `tool/build-payload.ps1` 硬编码从这里取私有 Python 运行时（`$RepoRoot\installer\runtime\python`）。
 （完整口径见根 `AGENTS.md` §8 的安装器一节。）
 
-**唯一没验证过的**：UAC 提权路径（`RelaunchElevated`，`ShellExecuteEx` + `runas`）。
-默认安装目录是 `%LOCALAPPDATA%\Programs\LxAI`（免管理员、不弹 UAC），
-所以"装到 `Program Files`"这条分支**至今没在真机上跑过**。
-等哪天真要装到 `Program Files` 时，先按 `AGENTS.md` §8 的沙箱流程隔离验证。
+**已有但未实测**：UAC 提权路径（`RelaunchElevated`，`ShellExecuteEx` + `runas`）。**代码是完整的，已决定不专门去测。**
+
+- 链路：安装报"没权限"→ 界面露出「以管理员身份重试」→ `elevate` 消息 → 原生 `ShellExecuteEx(runas)`
+  带 `--elevated --auto --dir` 把自己重新拉起 → 新进程自动开装并关掉旧窗口。参数解析、自动安装触发
+  都在（`native/src/main.cpp` 的 `RelaunchElevated` / `g_autoInstallDir`，界面在 `native/ui/index.html`）。
+- **为什么不必测**：默认装到 `%LOCALAPPDATA%\Programs\LxAI`（免管理员、不弹 UAC），用户不改路径就永远走不到
+  这条分支；真走到时的行为也是良性的（UAC 点"否"→ 旧窗口原地不动、错误说明还在，用户仍可改目录）。
+- 真要验证时再按 `AGENTS.md` §8 的沙箱流程隔离跑，别拿真机当试验场。
 
 ---
 
