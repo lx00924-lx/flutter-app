@@ -674,6 +674,24 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 云厂商元数据一并拒：`169.254.169.254`、**`100.100.100.100`（阿里云，属 CGNAT）**、
 `metadata.google.internal`（`.internal` 后缀）。带 `user:pass@` 的 URL 直接拒。
 
+**两项后续加固（同日完成）**：
+
+1. **连接阶段再判一次内网（防 DNS 重绑定）**：`ssrfViolation()` 是先解析域名判一次，
+   而 `fetch` 连接时**会再解析一次** —— 中间窗口正是重绑定的可乘之机。现在 ASR 代理
+   不再用 `fetch`，改用 `requestAsrPinned()`（`http(s).request` + 自定义 `lookup`）：
+   **解析结果直接交给连接使用**，并在 `lookup` 里对每个解析出的地址再判一次内网，
+   命中就掐断连接（日志打"连接阶段拦下内网地址（疑似 DNS 重绑定）"）。
+   ⚠️ 踩坑：Node 调这个 `lookup` 时 `options` 可能是 **`{hints:0, all:true}`** ——
+   那种情况**回调必须给数组** `cb(null, [{address, family}])`；给单个地址会直接抛
+   `ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined`（在 `node:net` 的 emitLookup）。
+   按 `all` 标志分两种回法即可。重定向语义保持 `manual`（3xx 原样返回，不跟随）。
+2. **ASR 代理端点加身份守卫**：它是个**开放的出站代理**，不加校验任何人都能拿它当免费
+   代理打公网（烧本机带宽 / 被当中转跳板）。现在要求 `userId` + 登录凭证；被拒时顺手
+   删掉 multer 已落盘的临时文件。
+   ✅ **不影响任何现有客户端**：Flutter 的 `AsrService.transcribeAudio()` 是
+   **直连用户配置的 ASR 端点**（`asr_service.dart` 里 `dio.post(endpoint)`），
+   压根不走中继这条路；`src/`（官网）也不调。所以这道守卫只挡"自己拼请求的脚本调用者"。
+
 - 守卫的错配组合全部 403：无凭证 / 空凭证 / 乱编 UUID / **大小写变换** /
   尾部多一个字符 / 前缀注入 / 超长（10KB）/ 乱填 `x-device-type`（含冒充另一设备类型）/
   头报 A 路径要 B / URL 编码 / 路径加斜杠 / 路径穿越 / 不存在的用户。

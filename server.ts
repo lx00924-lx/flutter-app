@@ -4,7 +4,8 @@ import bcrypt from "bcryptjs";
 import nodemailer, { type Transporter } from "nodemailer";
 import { randomBytes, randomUUID, randomInt, createCipheriv, createDecipheriv } from "crypto";
 import FormData from "form-data";
-import { createServer } from "http";
+import { createServer, request as httpRequest } from "http";
+import { request as httpsRequest } from "https";
 import dns from "dns";
 import { Server } from "socket.io";
 import { WebSocketServer, WebSocket as WSWebSocket } from "ws";
@@ -3907,12 +3908,135 @@ async function startServer() {
     return "";
   };
 
+  /**
+   * ── ASR 代理专用请求：把「校验过的地址」和「实际连的地址」绑成同一个 ──────
+   *
+   * 为什么不能再直接用 `fetch`：`ssrfViolation()` 先解析一次域名、`fetch` 连接时
+   * **会再解析一次** —— 中间这段窗口里攻击者可以让 DNS 改指向内网（DNS 重绑定 /
+   * TOCTOU），预检就白做了。
+   *
+   * `http(s).request` 的 `lookup` 选项正好解决这个：**解析结果直接交给连接使用**，
+   * 没有第二次解析。我们在这里对解析出的每个地址再判一次内网，命中就报错并把
+   * 连接掐掉 —— 于是"解析 → 校验 → 连接"变成一次原子操作。
+   *
+   * 顺带把重定向语义也定死：**不跟随**（3xx 原样返回给调用方），
+   * 与之前 `fetch(..., { redirect:'manual' })` 的行为保持一致。
+   */
+  /**
+   * requestAsrPinned 的返回形状 —— 只保留调用方真正用到的四个成员
+   * （`ok` / `status` / `statusText` / `text()`）。不要求完整实现 `Response`，
+   * 否则为了类型对齐得凭空造出 clone/body/arrayBuffer 等一堆用不到的东西。
+   */
+  type AsrProxyResponse = {
+    ok: boolean;
+    status: number;
+    statusText: string;
+    headers: { get(n: string): string | null };
+    text(): Promise<string>;
+  };
+
+  const requestAsrPinned = (
+    target: string,
+    headers: Record<string, string>,
+    body: Buffer,
+  ): Promise<AsrProxyResponse> => {
+    return new Promise((resolve, reject) => {
+      let u: URL;
+      try {
+        u = new URL(target);
+      } catch (e: any) {
+        return reject(new Error(`URL 解析失败：${e?.message ?? e}`));
+      }
+      const isHttps = u.protocol === "https:";
+      /**
+       * 连接阶段的 DNS 校验（防 DNS 重绑定）。
+       *
+       * ⚠️ 关键细节：Node 调用这个钩子时，`options` 里可能带 **`all: true`**
+       * （实测它传的是 `{hints:0, all:true}`）—— 那种情况下**回调必须给数组**
+       * `cb(null, [{address, family}])`，给单个地址会让 net 层直接抛
+       * `ERR_INVALID_IP_ADDRESS: Invalid IP address: undefined`（排查了好一会儿）。
+       * 所以这里按 `all` 标志分两种回法。
+       */
+      const lookup: any = (
+        hostname: string,
+        options: any,
+        cb: (err: Error | null, address?: any, family?: number) => void,
+      ) => {
+        const wantAll = !!(options && options.all);
+        const family = typeof options === "number" ? options : options?.family || 0;
+        dns.lookup(hostname, { all: true }, (err, addresses) => {
+          if (err) return cb(err);
+          const list = (Array.isArray(addresses) ? addresses : []).map((a: any) => ({
+            address: String(a.address),
+            family: Number(a.family) === 6 ? 6 : 4,
+          }));
+          if (!list.length) return cb(new Error(`域名 ${hostname} 无法解析`));
+          for (const a of list) {
+            if (isBlockedIp(a.address)) {
+              console.warn(
+                `[Security] 连接阶段拦下内网地址（疑似 DNS 重绑定）：${hostname} → ${a.address}`,
+              );
+              return cb(new Error(`解析到内网地址 ${a.address}，已拒绝连接`));
+            }
+          }
+          if (wantAll) return cb(null, list);
+          cb(null, list[0].address, list[0].family);
+        });
+      };
+
+      const reqFn = u.protocol === "https:" ? httpsRequest : httpRequest;
+      const req = reqFn(
+        {
+          protocol: u.protocol,
+          hostname: u.hostname,
+          port: u.port || (isHttps ? 443 : 80),
+          path: `${u.pathname}${u.search}`,
+          method: "POST",
+          headers: { ...headers, "Content-Length": String(body.length) },
+          lookup,
+          timeout: 120_000,
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c) => chunks.push(c as Buffer));
+          res.on("end", () => {
+            const buf = Buffer.concat(chunks);
+            resolve({
+              ok: (res.statusCode ?? 0) >= 200 && (res.statusCode ?? 0) < 300,
+              status: res.statusCode ?? 0,
+              statusText: res.statusMessage ?? "",
+              headers: { get: (n: string) => (res.headers as any)[n.toLowerCase()] ?? null },
+              text: async () => buf.toString("utf8"),
+            });
+          });
+        },
+      );
+      req.on("error", reject);
+      req.on("timeout", () => req.destroy(new Error("转写服务响应超时")));
+      req.end(body);
+    });
+  };
+
   // Universal Proxy route for Voice Transcription (FunASR, SenseVoice & OpenAI/Whisper compatible APIs)
   app.post(["/api/funasr-transcribe", "/api/asr/transcribe", "/api/asr/speech-to-text"], upload.any(), async (req, res) => {
     let file: any = null;
     try {
       file = (req.files as any)?.[0] || req.file;
       const rawEndpoint = (req.query.endpoint as string) || (req.query.target as string) || (req.body?.endpoint as string) || (req.body?.target as string) || "";
+
+      // 【安全】身份校验：这个端点是**开放的出站代理**，不加校验的话任何人都能拿
+      // 它当免费代理去请求公网（消耗本机带宽/被当中转跳板）。校验要在读完文件之后
+      // 做，这样被拒时能顺手把临时文件删掉（multer 已经落盘了）。
+      if (!(await verifyUserIdentity(req, res, (req.query.userId as string) || "", "语音转写代理"))) {
+        if (file?.path) {
+          try {
+            await fs.unlink(file.path);
+          } catch {
+            /* 清理失败不影响拒绝 */
+          }
+        }
+        return;
+      }
       if (!rawEndpoint) {
         return res.status(400).json({ error: "Missing endpoint/target parameter" });
       }
@@ -4012,7 +4136,7 @@ async function startServer() {
         headers["Authorization"] = `Bearer ${apiKey}`;
       }
       
-      var response: Response;
+      var response: AsrProxyResponse;
 
       if (isOpenAiCompatible) {
         if (!model) {
@@ -4038,17 +4162,11 @@ async function startServer() {
         const formHeaders = form.getHeaders();
         const formBuffer = form.getBuffer();
 
-        response = await fetch(sanitized, {
-          method: 'POST',
-          headers: { 
-            ...headers, 
-            ...formHeaders,
-            'Content-Length': formBuffer.length.toString()
-          },
-          body: formBuffer,
-          // 不跟随重定向：否则公网地址可以 302 到内网绕过 ssrfViolation 的全部检查
-          redirect: 'manual',
-        });
+        response = await requestAsrPinned(
+          sanitized,
+          { ...headers, ...formHeaders },
+          formBuffer,
+        );
       } else {
         // Fallback for non-OpenAI compatible endpoints (FunASR C++ / Python server)
         const form = new FormData();
@@ -4061,16 +4179,11 @@ async function startServer() {
         const formHeaders = form.getHeaders();
         const formBuffer = form.getBuffer();
 
-        response = await fetch(sanitized, {
-          method: "POST",
-          headers: { 
-            ...headers, 
-            ...formHeaders,
-            'Content-Length': formBuffer.length.toString()
-          },
-          body: formBuffer,
-          redirect: 'manual', // 同上一处：禁止重定向绕过 SSRF 检查
-        });
+        response = await requestAsrPinned(
+          sanitized,
+          { ...headers, ...formHeaders },
+          formBuffer,
+        );
       }
 
       // Clean up local temp file
