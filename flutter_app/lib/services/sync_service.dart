@@ -60,13 +60,18 @@ class SyncService {
 
   final Dio _dio = Dio(
     BaseOptions(
-      connectTimeout: const Duration(seconds: 10),
+      // 建连接的时间。10 秒太短：手机在弱网/切网时会报
+      // 「无法连接到调度服务器: connection timeout … 0:00:10」，
+      // 而此时服务端其实是好的（消息照样能送达）。放宽到 30 秒。
+      connectTimeout: const Duration(seconds: 30),
       // 15 秒太短：Agent 任务要等本地宿主跑完（服务端上限 300 秒），
       // 请求发出后十几秒没有任何事件就会被 Dio 判成 receive timeout，
       // 手机上表现为"发消息必失败：The request took longer than 0:00:15"。
-      // 这里放宽到 2 分钟，SSE 长连接另外单独设更长的超时。
+      // 这里放宽到 2 分钟，SSE 长连接另外单独设更长的超时（见 streamServerAgentChat）。
       receiveTimeout: const Duration(minutes: 2),
-      sendTimeout: const Duration(seconds: 15),
+      // 发请求的时间。Agent 消息可能带图片（base64 后几百 KB），
+      // 15 秒在慢速上行时会不够。
+      sendTimeout: const Duration(seconds: 60),
     ),
   );
 
@@ -1568,10 +1573,12 @@ class SyncService {
         },
         options: Options(
           responseType: ResponseType.stream,
-          // SSE 是长连接：Agent 任务可能要跑几分钟，期间只要服务端没发事件，
-          // 就会按 receiveTimeout 掐断（这正是手机上报的 15 秒超时）。这里
-          // 单独放宽到 10 分钟，与服务端 300 秒任务上限匹配并留出余量。
-          receiveTimeout: const Duration(minutes: 10),
+          // SSE 是长连接：一轮 Agent 任务里，本地宿主可能要跑几分钟、中途还可能
+          // 等用户拍板（审批卡片 / 选择框）；「动手前先问大脑」又会再加一次本地
+          // 推理。期间只要服务端没发事件，就会被按 receiveTimeout 掐断
+          // （历史上手机报过 15 秒、10 秒超时）。这里放宽到 20 分钟。
+          // ⚠️ 服务端那一侧仍有 AGENT_TASK_TIMEOUT_MS（默认 30 分钟）兜底。
+          receiveTimeout: const Duration(minutes: 20),
           headers: {
             'Accept': 'text/event-stream',
           },
