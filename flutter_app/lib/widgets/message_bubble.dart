@@ -864,6 +864,13 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody>
   String _shown = '';    // 已经匀出来的（**整段拼在一个 Text 里**，所以天然连续）
   String _pending = '';  // 还没匀出来的
   int _consumed = 0;     // 从 `widget.data` 读到哪个位置了
+
+  /// 收尾中：`isStreaming` 已经变 false，但队列里还有字没吐完。
+  ///
+  /// ⚠️ 不能直接切 Markdown —— 那会让还没吐出来的字**瞬间全蹦出来**，
+  ///    看起来就是"动画被一刀打断"，前功尽弃。
+  ///    这里继续用 ticker 把剩下的吐完（最多多花一两百毫秒），再交回 Markdown。
+  bool _draining = false;
   Ticker? _ticker;
   Duration _tickBase = Duration.zero;
   double _emitted = 0;   // 累计"应该吐出多少字"（浮点，避免每帧把零头丢掉）
@@ -893,15 +900,13 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody>
   void didUpdateWidget(covariant _CollapsibleMarkdownBody old) {
     super.didUpdateWidget(old);
     if (!widget.streaming) {
-      // 收尾：队列里剩下的不再慢慢爬，直接清空状态交给 Markdown 整段渲染
-      _ticker?.stop();
-      _ticker?.dispose();
-      _ticker = null;
-      _shown = '';
-      _pending = '';
-      _consumed = 0;
-      _emitted = 0;
-      _tickBase = Duration.zero;
+      if (_pending.isNotEmpty) {
+        // 还有字没吐完 → 继续吐（别一刀切），吐完再交回 Markdown
+        _draining = true;
+        _startTicker();
+      } else {
+        _finishDrain(notify: false);
+      }
       return;
     }
     if (widget.data.length > _consumed) {
@@ -942,6 +947,25 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody>
       _shown += _pending.substring(0, n);
       _pending = _pending.substring(n);
     });
+    if (_pending.isEmpty && !widget.streaming) _finishDrain();
+  }
+
+  /// 队列吐空、且已不在流式中 → 清状态，交给 Markdown 整段渲染。
+  ///
+  /// ⚠️ `notify: false` 用在 `didUpdateWidget` 里 —— 那是在 build 流程中调用的，
+  ///    那里 setState 会抛 "setState() or markNeedsBuild() called during build"。
+  ///    而 ticker 回调里必须 notify，否则界面停在纯文本、切不回 Markdown。
+  void _finishDrain({bool notify = true}) {
+    _draining = false;
+    _ticker?.stop();
+    _ticker?.dispose();
+    _ticker = null;
+    _shown = '';
+    _pending = '';
+    _consumed = 0;
+    _emitted = 0;
+    _tickBase = Duration.zero;
+    if (notify && mounted) setState(() {});
   }
 
   bool get _foldable =>
@@ -951,11 +975,27 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody>
 
   @override
   Widget build(BuildContext context) {
-    // 流式：**整段一个 Text**（连续，不分块），内容由 ticker 匀速喂进来。
+    // 流式（或收尾吐字中）：**整段一个 Text**，内容由 ticker 匀速喂进来。
     // ⚠️ 不吃 Markdown：半截语法会闪，而且每帧整段重解析是 O(n²)。
-    if (widget.streaming) {
+    if (widget.streaming || _draining) {
       final text = (_shown.isEmpty && _pending.isEmpty) ? widget.data : _shown;
-      return Text(text, style: widget.styleSheet.p);
+      return ShaderMask(
+        // **底部渐隐**：越靠下越淡，新出现的字从"淡"过渡到"实"，
+        // 看起来就像从底部涌出来、然后慢慢聚焦 —— 这就是"文字渐显"那层质感。
+        //
+        // ⚠️ 为什么用 ShaderMask 而不是给每个字加动画：
+        //    整段是一个 Text，Flutter 没法对其中"某几个字符"单独做透明度动画；
+        //    拆成多个 WidgetSpan 才能逐字动画，但那会参与排版、影响换行，
+        //    中文长篇下既贵又容易断行错位。渐变蒙版是像素级的，零排版代价。
+        shaderCallback: (bounds) => const LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xFFFFFFFF), Color(0xFFFFFFFF), Color(0x66FFFFFF)],
+          stops: [0.0, 0.78, 1.0],
+        ).createShader(bounds),
+        blendMode: BlendMode.modulate,
+        child: Text(text, style: widget.styleSheet.p),
+      );
     }
     final body = MarkdownBody(
       data: widget.data,
