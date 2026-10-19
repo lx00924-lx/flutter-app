@@ -546,7 +546,16 @@ class MessageBubble extends StatelessWidget {
                     );
                 _showContextMenuAt(context, pos);
               },
-              child: Container(
+              // ⚠️ **气泡高度必须平滑增长**。
+              //    流式时每 50ms 来一批字：没满一行高度不变、满了就跳一行，
+              //    有气泡边框时那个"底边"就会一跳一跳 —— 读起来像打字机在刷新边界。
+              //    Gemini 是整页滚动、没有气泡，所以没有这个问题；有气泡就必须补这一步。
+              //    `alignment: topLeft` 是关键：默认 center 会让内容上下同时撑开。
+              child: AnimatedSize(
+                duration: const Duration(milliseconds: 220),
+                curve: Curves.easeOut,
+                alignment: Alignment.topLeft,
+                child: Container(
                 constraints: BoxConstraints(
                   // 头像已经移到气泡上方单独一行，气泡可以用满宽度（用户要求"更宽"）：
                   // 以前是屏幕宽度的 78%，且还要让出头像那 46px。
@@ -760,6 +769,7 @@ class MessageBubble extends StatelessWidget {
                   ],
                 ),
               ),
+              ),
                     ),
                     // 时间戳移出气泡：透明背景、跟在气泡下方（用户要求）
                     _buildTimeLabel(isDark, isUser),
@@ -820,7 +830,8 @@ class _RevealBlock extends StatelessWidget {
   Widget build(BuildContext context) {
     return TweenAnimationBuilder<double>(
       tween: Tween<double>(begin: 0, end: 1),
-      duration: const Duration(milliseconds: 150),
+      // 300ms：150 太快了，文字像"啪"一下贴上；这个数让每块"化"出来
+      duration: const Duration(milliseconds: 300),
       curve: Curves.easeOut,
       builder: (context, t, child) => Opacity(
         opacity: t,
@@ -890,7 +901,14 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody> {
   /// 中文按句切（句末标点 + 英文句点 + 换行）。
   /// ⚠️ 不按字切：Streamdown 自己都说逐字 "generates more DOM nodes, use it sparingly"，
   ///    中文一段话上千字，逐字就是上千个带动画的 widget，这台机器扛不住。
-  static final RegExp _sentenceEnd = RegExp(r'[。！？；!?;\n]');
+  /// 切点：句末标点 **+ 逗号类**。
+  ///
+  /// ⚠️ 只按句号切时一块太长，看起来"一批一批"冒出；加上逗号后粒度更细，
+  ///    接近 Streamdown 那种"逐词"的连续感，而块数仍然是十几到几十个（不是上千）。
+  /// ⚠️ **不包含 `\\n`**：段落之间是 `\\n\\n`，把它当切点会切出一个纯空白块，
+  ///    而空白块占一整行高 —— 段落间距直接翻倍，生成中看起来就是"一段一段"的。
+  ///    换行留在块内面（`Text` 自带）就行。
+  static final RegExp _sentenceEnd = RegExp(r'[。！？；!?;，,、：:]');
 
   @override
   void initState() {
@@ -928,11 +946,15 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody> {
     for (final ch in ready.split('')) {
       buf.write(ch);
       if (_sentenceEnd.hasMatch(ch)) {
-        _revealed.add(buf.toString());
+        final s = buf.toString();
+        if (s.trim().isNotEmpty) _revealed.add(s);   // 纯空白不占块（会撑出一整行空）
         buf.clear();
       }
     }
-    if (buf.isNotEmpty) _revealed.add(buf.toString());
+    if (buf.isNotEmpty) {
+      final s = buf.toString();
+      if (s.trim().isNotEmpty) _revealed.add(s);
+    }
   }
 
   bool get _foldable =>
