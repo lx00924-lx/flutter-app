@@ -679,6 +679,8 @@ class MessageBubble extends StatelessWidget {
                         isDark: isDark,
                         // 流式期间不折叠：内容还在长，折起来反而看不清进度
                         collapsible: !message.isStreaming,
+                        // 流式期间也不走 Markdown（半截语法会闪 + O(n²) 重解析）
+                        streaming: message.isStreaming,
                         // 气泡底色：折起来时底部渐隐要盖在它上面
                         fadeColor: isDark ? const Color(0xFF1E293B) : Colors.white,
                         builders: {
@@ -804,6 +806,7 @@ class _CollapsibleMarkdownBody extends StatefulWidget {
     required this.fadeColor,
     this.builders = const {},
     this.collapsible = true,
+    this.streaming = false,
   });
 
   final String data;
@@ -814,6 +817,17 @@ class _CollapsibleMarkdownBody extends StatefulWidget {
   final Color fadeColor;
   final Map<String, MarkdownElementBuilder> builders;
   final bool collapsible;
+
+  /// 正在流式接收 —— **这一路不解析 Markdown，直接显示纯文本**。
+  ///
+  /// ⚠️ 两个原因，都是实测的：
+  /// 1. **半截语法会闪**：吐到 `**加粗` 还没等到收尾的 `**` 时，渲染器会把星号
+  ///    原样露出来，下一帧又变粗 —— 看着就是文字在"抖"。
+  /// 2. **它是 O(n²)**：每来一个 chunk 都整段重新解析，吐到 500 字时每个 chunk
+  ///    都要把 500 字重解析一遍。这台机器是 2 核 4 线程，这是"一卡一卡"的大头，
+  ///    比缺渐显动画严重得多。
+  /// 收尾（`isStreaming=false`）后自然切回 Markdown，那一次解析是值得的。
+  final bool streaming;
 
   /// 超过这么多字符才折（短回答折起来反而多一次点击）
   static const int threshold = 1200;
@@ -827,10 +841,20 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody> {
   bool _expanded = false;
 
   bool get _foldable =>
-      widget.collapsible && widget.data.length > _CollapsibleMarkdownBody.threshold;
+      widget.collapsible &&
+      !widget.streaming &&
+      widget.data.length > _CollapsibleMarkdownBody.threshold;
 
   @override
   Widget build(BuildContext context) {
+    // 流式：纯文本直出（便宜、且不会因为语法半截而闪）
+    if (widget.streaming) {
+      return SelectableText(
+        widget.data,
+        // `MarkdownStyleSheet` 的正文样式字段叫 `p`（paragraph），不是 `body`
+        style: widget.styleSheet.p,
+      );
+    }
     final body = MarkdownBody(
       data: widget.data,
       selectable: false,

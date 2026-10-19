@@ -222,6 +222,40 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
+  /// 流式期间**不要每来一个 chunk 就重建界面**。
+  ///
+  /// ⚠️ 这是"一卡一卡蹦字"的主因，跟缺渐显动画无关：后端吐多快就刷多快，
+  /// 每刷一次都要整条消息列表 rebuild、气泡重新 layout、正文整段重新解析。
+  /// 在这台机器上（2 核 4 线程）肉眼就是一顿一顿的。
+  ///
+  /// 攒 50ms 刷一次：肉眼看着是**平滑涌现**，而重建次数降一个量级。
+  /// 50ms 是平衡点 —— 再短省不下多少，再长（>80ms）能看出"分批跳"。
+  ///
+  /// ⚠️ 收尾必须走 [_flushUiNow]：`done` / 出错 / 落库那一刻不能等定时器，
+  ///    否则最后一段字会"卡在缓冲区里"，要等下一次任何通知才冒出来。
+  Timer? _uiFlushTimer;
+  bool _uiDirty = false;
+
+  /// 流式增量用这个：合并成 50ms 一批再通知界面。
+  void _notifyThrottled() {
+    _uiDirty = true;
+    _uiFlushTimer ??= Timer(const Duration(milliseconds: 50), () {
+      _uiFlushTimer = null;
+      if (!_uiDirty) return;
+      _uiDirty = false;
+      notifyListeners();
+    });
+  }
+
+  /// 收尾时强制刷一次（取消待执行的定时器，别再多刷一次）。
+  void _flushUiNow() {
+    _uiFlushTimer?.cancel();
+    _uiFlushTimer = null;
+    if (!_uiDirty) return;
+    _uiDirty = false;
+    notifyListeners();
+  }
+
   /// 把润色阶段的内容写进**回答气泡**（与过程消息分开的第二条消息，独立 id）。
   ///
   /// 为什么分开：用户要求"DSH 的过程"和"主聊天模型润色后的回答"是两个消息框 ——
@@ -255,7 +289,9 @@ class ChatProvider extends ChangeNotifier {
     if (reasoningDelta.isNotEmpty) {
       answer.reasoningContent = (answer.reasoningContent ?? '') + reasoningDelta;
     }
-    notifyListeners();
+    // 内容立刻写进模型（字符串拼接本身不贵），**只是不立刻通知界面** ——
+    // 贵的是 rebuild + 重新 layout + 重解析正文那一整套。
+    _notifyThrottled();
   }
 
   /// 回答气泡收尾：内容以服务端给的最终版本为准，落库并推云端。
@@ -1599,6 +1635,7 @@ class ChatProvider extends ChangeNotifier {
             // 过期轮次的事件直接丢弃（插话后旧流可能还会吐 done/error）
             if (myTurn != _turnSeq) return;
             if (chunk['error'] != null) {
+              _flushUiNow();   // 收尾：把缓冲区里最后一段刷出来
               assistantMsg.isStreaming = false;
               assistantMsg.content += '\n\n*(智能体执行异常: ${chunk['error']})*';
               _storage.saveMessage(assistantMsg);
@@ -1678,6 +1715,7 @@ class ChatProvider extends ChangeNotifier {
             }
 
             if (chunk['done'] == true) {
+              _flushUiNow();   // 收尾：把缓冲区里最后一段刷出来
               assistantMsg.isStreaming = false;
               assistantMsg.elapsedSeconds = DateTime.now().difference(startTime).inSeconds;
               if (chunk['fullContent'] != null && chunk['fullContent'].toString().isNotEmpty) {
@@ -1760,7 +1798,8 @@ class ChatProvider extends ChangeNotifier {
               // 的思考，先暂存不显示，避免混进宿主的思维链
               _polishThinking.write(reasoningDelta);
             }
-            notifyListeners();
+            // 节流：过程气泡的正文也是每 chunk 都在长，同一个道理
+            _notifyThrottled();
           },
           onError: (err) {
             if (err is DioException && CancelToken.isCancel(err)) {
@@ -1804,6 +1843,7 @@ class ChatProvider extends ChangeNotifier {
         _streamSub = stream.listen(
           (chunk) {
             if (chunk['done'] == true) {
+              _flushUiNow();   // 收尾：把缓冲区里最后一段刷出来
               assistantMsg.isStreaming = false;
               assistantMsg.elapsedSeconds = DateTime.now().difference(startTime).inSeconds;
               _storage.saveMessage(assistantMsg);
@@ -1977,6 +2017,7 @@ class ChatProvider extends ChangeNotifier {
           // 过期轮次的事件直接丢弃（插话后旧流可能还会吐 done/error）
           if (myTurn != _turnSeq) return;
           if (chunk['done'] == true) {
+            _flushUiNow();   // 收尾：把缓冲区里最后一段刷出来
             assistantMsg.isStreaming = false;
             assistantMsg.elapsedSeconds = DateTime.now().difference(startTime).inSeconds;
             _storage.saveMessage(assistantMsg);
@@ -2160,6 +2201,7 @@ class ChatProvider extends ChangeNotifier {
             // 过期轮次的事件直接丢弃（插话后旧流可能还会吐 done/error）
             if (myTurn != _turnSeq) return;
             if (chunk['error'] != null) {
+              _flushUiNow();   // 收尾：把缓冲区里最后一段刷出来
               assistantMsg.isStreaming = false;
               assistantMsg.content += '\n\n*(智能体执行异常: ${chunk['error']})*';
               _storage.saveMessage(assistantMsg);
@@ -2239,6 +2281,7 @@ class ChatProvider extends ChangeNotifier {
             }
 
             if (chunk['done'] == true) {
+              _flushUiNow();   // 收尾：把缓冲区里最后一段刷出来
               assistantMsg.isStreaming = false;
               assistantMsg.elapsedSeconds = DateTime.now().difference(startTime).inSeconds;
               if (chunk['fullContent'] != null && chunk['fullContent'].toString().isNotEmpty) {
@@ -2360,6 +2403,7 @@ class ChatProvider extends ChangeNotifier {
         _streamSub = stream.listen(
           (chunk) {
             if (chunk['done'] == true) {
+              _flushUiNow();   // 收尾：把缓冲区里最后一段刷出来
               assistantMsg.isStreaming = false;
               assistantMsg.elapsedSeconds = DateTime.now().difference(startTime).inSeconds;
               _storage.saveMessage(assistantMsg);
