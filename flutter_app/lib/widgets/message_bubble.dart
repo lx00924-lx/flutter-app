@@ -798,6 +798,42 @@ class MessageBubble extends StatelessWidget {
 ///
 /// 各家客户端的常见做法：一屏读不完的长回答不让用户一路滑，想看全文点一下即可。
 /// 折叠用"限高 + 裁剪"而不是截断文本，避免把 Markdown 语法从中间切断。
+/// 流式期间「刚到的这一块文字」：**只在这一块第一次 build 时**淡入 + 上浮 2px。
+///
+/// ⚠️ 为什么用 `TweenAnimationBuilder` 而不是 `AnimatedOpacity`：
+///    后者只在 `opacity` 的**值发生变化**时才动画 —— 第一次 build 就是 1 的话不播。
+///    `TweenAnimationBuilder` 从 `begin: 0` 起步，每个新 widget 的首帧必然播一次；
+///    已经显示过的块因为 key 稳定、State 被复用，**不会重播**。
+///
+/// ⚠️ 为什么不用真正的模糊（`ImageFiltered` + `ImageFilter.blur`）：
+///    那要每帧重绘画布，这台机器（2 核 4 线程）扛不住。
+///    「淡入 + 上浮 2px」是它的廉价替身，观感接近 ——
+///    参考 Streamdown 的 `blurIn`：它解决的是"一次到一批 token 显得笨重"，
+///    靠的是**短时长 + 轻微位移**，不是非要真模糊。
+class _RevealBlock extends StatelessWidget {
+  const _RevealBlock({super.key, required this.text, required this.style});
+
+  final String text;
+  final TextStyle? style;
+
+  @override
+  Widget build(BuildContext context) {
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 150),
+      curve: Curves.easeOut,
+      builder: (context, t, child) => Opacity(
+        opacity: t,
+        child: Transform.translate(
+          offset: Offset(0, (1 - t) * 2),
+          child: child,
+        ),
+      ),
+      child: Text(text, style: style),
+    );
+  }
+}
+
 class _CollapsibleMarkdownBody extends StatefulWidget {
   const _CollapsibleMarkdownBody({
     required this.data,
@@ -840,6 +876,65 @@ class _CollapsibleMarkdownBody extends StatefulWidget {
 class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody> {
   bool _expanded = false;
 
+  /// 流式期间已经"揭示"的块（按到达顺序，一块一次淡入，之后再也不动）。
+  ///
+  /// ⚠️ 为什么要自己记：`widget.data` 是**整段字符串**，每次 rebuild 都全量给过来，
+  ///    组件分不清"哪部分是新到的"。所以自己维护一个消费游标，
+  ///    只把**新到的那几块**追加进来 —— 旧块的内容和 widget 身份都不变，
+  ///    淡入动画才不会重播。
+  ///    （React 那边靠 reconciliation 保证"只有新挂载的 span 触发动画"，
+  ///     Flutter 这边等价的东西就是「稳定 key + 只追加不改旧块」。）
+  final List<String> _revealed = [];
+  int _consumed = 0;
+
+  /// 中文按句切（句末标点 + 英文句点 + 换行）。
+  /// ⚠️ 不按字切：Streamdown 自己都说逐字 "generates more DOM nodes, use it sparingly"，
+  ///    中文一段话上千字，逐字就是上千个带动画的 widget，这台机器扛不住。
+  static final RegExp _sentenceEnd = RegExp(r'[。！？；!?;\n]');
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.streaming) _absorbNewBlocks();
+  }
+
+  @override
+  void didUpdateWidget(covariant _CollapsibleMarkdownBody old) {
+    super.didUpdateWidget(old);
+    if (!widget.streaming) {
+      // 收尾：清掉分块状态，整段交给 Markdown 渲染
+      if (_revealed.isNotEmpty || _consumed != 0) {
+        _revealed.clear();
+        _consumed = 0;
+      }
+      return;
+    }
+    _absorbNewBlocks();
+  }
+
+  /// 把 `widget.data` 里**新到的那截**按句切出来追加。
+  ///
+  /// ⚠️ 末尾没说完的半句**先不切**（等下次多来几个字再一起切）——
+  ///    否则每 50ms 到几个字就切一块，会碎成一地，比打字机还乱。
+  ///    收尾时 `_revealed` 清空、整段交给 Markdown，剩下的半句自然就出来了。
+  void _absorbNewBlocks() {
+    if (widget.data.length <= _consumed) return;
+    final fresh = widget.data.substring(_consumed);
+    final last = fresh.lastIndexOf(_sentenceEnd);
+    if (last < 0) return; // 一个完整句子都还没到，等下次
+    final ready = fresh.substring(0, last + 1);
+    _consumed += last + 1;
+    final buf = StringBuffer();
+    for (final ch in ready.split('')) {
+      buf.write(ch);
+      if (_sentenceEnd.hasMatch(ch)) {
+        _revealed.add(buf.toString());
+        buf.clear();
+      }
+    }
+    if (buf.isNotEmpty) _revealed.add(buf.toString());
+  }
+
   bool get _foldable =>
       widget.collapsible &&
       !widget.streaming &&
@@ -847,12 +942,23 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody> {
 
   @override
   Widget build(BuildContext context) {
-    // 流式：纯文本直出（便宜、且不会因为语法半截而闪）
+    // 流式：纯文本**按句分块**，每块 150ms 淡入 + 上浮 2px。
+    // ⚠️ 不吃 Markdown：半截语法会闪，而且每帧整段重解析是 O(n²)。
     if (widget.streaming) {
-      return SelectableText(
-        widget.data,
-        // `MarkdownStyleSheet` 的正文样式字段叫 `p`（paragraph），不是 `body`
-        style: widget.styleSheet.p,
+      if (_revealed.isEmpty) {
+        // 一句都没切出来（刚开始 / 只有"正在思考中..."）→ 整段直出，不淡入
+        return Text(widget.data, style: widget.styleSheet.p);
+      }
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (var i = 0; i < _revealed.length; i++)
+            _RevealBlock(
+              key: ValueKey<int>(i),
+              text: _revealed[i],
+              style: widget.styleSheet.p,
+            ),
+        ],
       );
     }
     final body = MarkdownBody(
