@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+// Ticker：流式期间按固定速度匀出文字（见 _CollapsibleMarkdownBodyState）
+import 'package:flutter/scheduler.dart';
 import 'package:markdown/markdown.dart' as md;
 import 'package:provider/provider.dart';
 import '../models/chat_message.dart';
@@ -808,43 +810,6 @@ class MessageBubble extends StatelessWidget {
 ///
 /// 各家客户端的常见做法：一屏读不完的长回答不让用户一路滑，想看全文点一下即可。
 /// 折叠用"限高 + 裁剪"而不是截断文本，避免把 Markdown 语法从中间切断。
-/// 流式期间「刚到的这一块文字」：**只在这一块第一次 build 时**淡入 + 上浮 2px。
-///
-/// ⚠️ 为什么用 `TweenAnimationBuilder` 而不是 `AnimatedOpacity`：
-///    后者只在 `opacity` 的**值发生变化**时才动画 —— 第一次 build 就是 1 的话不播。
-///    `TweenAnimationBuilder` 从 `begin: 0` 起步，每个新 widget 的首帧必然播一次；
-///    已经显示过的块因为 key 稳定、State 被复用，**不会重播**。
-///
-/// ⚠️ 为什么不用真正的模糊（`ImageFiltered` + `ImageFilter.blur`）：
-///    那要每帧重绘画布，这台机器（2 核 4 线程）扛不住。
-///    「淡入 + 上浮 2px」是它的廉价替身，观感接近 ——
-///    参考 Streamdown 的 `blurIn`：它解决的是"一次到一批 token 显得笨重"，
-///    靠的是**短时长 + 轻微位移**，不是非要真模糊。
-class _RevealBlock extends StatelessWidget {
-  const _RevealBlock({super.key, required this.text, required this.style});
-
-  final String text;
-  final TextStyle? style;
-
-  @override
-  Widget build(BuildContext context) {
-    return TweenAnimationBuilder<double>(
-      tween: Tween<double>(begin: 0, end: 1),
-      // 300ms：150 太快了，文字像"啪"一下贴上；这个数让每块"化"出来
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOut,
-      builder: (context, t, child) => Opacity(
-        opacity: t,
-        child: Transform.translate(
-          offset: Offset(0, (1 - t) * 2),
-          child: child,
-        ),
-      ),
-      child: Text(text, style: style),
-    );
-  }
-}
-
 class _CollapsibleMarkdownBody extends StatefulWidget {
   const _CollapsibleMarkdownBody({
     required this.data,
@@ -884,77 +849,99 @@ class _CollapsibleMarkdownBody extends StatefulWidget {
   State<_CollapsibleMarkdownBody> createState() => _CollapsibleMarkdownBodyState();
 }
 
-class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody> {
+class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody>
+    with SingleTickerProviderStateMixin {
   bool _expanded = false;
 
-  /// 流式期间已经"揭示"的块（按到达顺序，一块一次淡入，之后再也不动）。
-  ///
-  /// ⚠️ 为什么要自己记：`widget.data` 是**整段字符串**，每次 rebuild 都全量给过来，
-  ///    组件分不清"哪部分是新到的"。所以自己维护一个消费游标，
-  ///    只把**新到的那几块**追加进来 —— 旧块的内容和 widget 身份都不变，
-  ///    淡入动画才不会重播。
-  ///    （React 那边靠 reconciliation 保证"只有新挂载的 span 触发动画"，
-  ///     Flutter 这边等价的东西就是「稳定 key + 只追加不改旧块」。）
-  final List<String> _revealed = [];
-  int _consumed = 0;
+  // ───────── 流式期间的「平滑队列」 ─────────
+  //
+  // 后端是 50ms 一批一批来的，前端**不立刻全放**，而是按固定速度匀出来。
+  // 这样不管后端怎么抖，眼睛看到的永远是**匀速流动的一条线**。
+  //
+  // ⚠️ 这是"本来就应该是一起的"的正解：**分块淡入**（上一版）无论块多小，
+  //    视觉上都还是"一批一批"；只有**整段一个 Text + 逐字匀出**才是连续的。
+  //    第 3 点参考的是 Gemini 的说法：「前端加一个平滑队列，像挤牙膏一样匀出来」。
+  String _shown = '';    // 已经匀出来的（**整段拼在一个 Text 里**，所以天然连续）
+  String _pending = '';  // 还没匀出来的
+  int _consumed = 0;     // 从 `widget.data` 读到哪个位置了
+  Ticker? _ticker;
+  Duration _tickBase = Duration.zero;
+  double _emitted = 0;   // 累计"应该吐出多少字"（浮点，避免每帧把零头丢掉）
 
-  /// 中文按句切（句末标点 + 英文句点 + 换行）。
-  /// ⚠️ 不按字切：Streamdown 自己都说逐字 "generates more DOM nodes, use it sparingly"，
-  ///    中文一段话上千字，逐字就是上千个带动画的 widget，这台机器扛不住。
-  /// 切点：句末标点 **+ 逗号类**。
+  /// 出字速度（字符/秒）。
   ///
-  /// ⚠️ 只按句号切时一块太长，看起来"一批一批"冒出；加上逗号后粒度更细，
-  ///    接近 Streamdown 那种"逐词"的连续感，而块数仍然是十几到几十个（不是上千）。
-  /// ⚠️ **不包含 `\\n`**：段落之间是 `\\n\\n`，把它当切点会切出一个纯空白块，
-  ///    而空白块占一整行高 —— 段落间距直接翻倍，生成中看起来就是"一段一段"的。
-  ///    换行留在块内面（`Text` 自带）就行。
-  static final RegExp _sentenceEnd = RegExp(r'[。！？；!?;，,、：:]');
+  /// 90 字/秒 ≈ 每 16ms 一个字，和模型吐字速度同量级：
+  /// 太慢会追不上后端（收尾时突然跳一大段），太快就等于没匀（又变成"硬塞"）。
+  static const double _charsPerSecond = 90;
 
   @override
   void initState() {
     super.initState();
-    if (widget.streaming) _absorbNewBlocks();
+    if (widget.streaming) {
+      _enqueue(widget.data);
+      _startTicker();
+    }
+  }
+
+  @override
+  void dispose() {
+    _ticker?.dispose();
+    super.dispose();
   }
 
   @override
   void didUpdateWidget(covariant _CollapsibleMarkdownBody old) {
     super.didUpdateWidget(old);
     if (!widget.streaming) {
-      // 收尾：清掉分块状态，整段交给 Markdown 渲染
-      if (_revealed.isNotEmpty || _consumed != 0) {
-        _revealed.clear();
-        _consumed = 0;
-      }
+      // 收尾：队列里剩下的不再慢慢爬，直接清空状态交给 Markdown 整段渲染
+      _ticker?.stop();
+      _ticker?.dispose();
+      _ticker = null;
+      _shown = '';
+      _pending = '';
+      _consumed = 0;
+      _emitted = 0;
+      _tickBase = Duration.zero;
       return;
     }
-    _absorbNewBlocks();
+    if (widget.data.length > _consumed) {
+      _enqueue(widget.data.substring(_consumed));
+      _consumed = widget.data.length;
+      _startTicker();
+    }
   }
 
-  /// 把 `widget.data` 里**新到的那截**按句切出来追加。
-  ///
-  /// ⚠️ 末尾没说完的半句**先不切**（等下次多来几个字再一起切）——
-  ///    否则每 50ms 到几个字就切一块，会碎成一地，比打字机还乱。
-  ///    收尾时 `_revealed` 清空、整段交给 Markdown，剩下的半句自然就出来了。
-  void _absorbNewBlocks() {
-    if (widget.data.length <= _consumed) return;
-    final fresh = widget.data.substring(_consumed);
-    final last = fresh.lastIndexOf(_sentenceEnd);
-    if (last < 0) return; // 一个完整句子都还没到，等下次
-    final ready = fresh.substring(0, last + 1);
-    _consumed += last + 1;
-    final buf = StringBuffer();
-    for (final ch in ready.split('')) {
-      buf.write(ch);
-      if (_sentenceEnd.hasMatch(ch)) {
-        final s = buf.toString();
-        if (s.trim().isNotEmpty) _revealed.add(s);   // 纯空白不占块（会撑出一整行空）
-        buf.clear();
-      }
+  /// 新到的内容进队列（**不直接显示**）。
+  void _enqueue(String fresh) {
+    if (fresh.isEmpty) return;
+    _pending += fresh;
+  }
+
+  void _startTicker() {
+    if (_ticker != null) return;
+    _tickBase = Duration.zero;
+    _emitted = 0;
+    _ticker = createTicker(_onTick)..start();
+  }
+
+  void _onTick(Duration elapsed) {
+    if (_pending.isEmpty) {
+      // 队列空了：不重建（省一帧），下次有新内容时重新计时
+      _tickBase = Duration.zero;
+      _emitted = 0;
+      return;
     }
-    if (buf.isNotEmpty) {
-      final s = buf.toString();
-      if (s.trim().isNotEmpty) _revealed.add(s);
-    }
+    if (_tickBase == Duration.zero) _tickBase = elapsed;
+    final seconds = (elapsed - _tickBase).inMicroseconds / 1000000.0;
+    final want = seconds * _charsPerSecond - _emitted;
+    if (want < 1) return; // 还没攒够一个字
+    var n = want.floor();
+    _emitted += n;
+    if (n > _pending.length) n = _pending.length;
+    setState(() {
+      _shown += _pending.substring(0, n);
+      _pending = _pending.substring(n);
+    });
   }
 
   bool get _foldable =>
@@ -964,24 +951,11 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody> {
 
   @override
   Widget build(BuildContext context) {
-    // 流式：纯文本**按句分块**，每块 150ms 淡入 + 上浮 2px。
+    // 流式：**整段一个 Text**（连续，不分块），内容由 ticker 匀速喂进来。
     // ⚠️ 不吃 Markdown：半截语法会闪，而且每帧整段重解析是 O(n²)。
     if (widget.streaming) {
-      if (_revealed.isEmpty) {
-        // 一句都没切出来（刚开始 / 只有"正在思考中..."）→ 整段直出，不淡入
-        return Text(widget.data, style: widget.styleSheet.p);
-      }
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          for (var i = 0; i < _revealed.length; i++)
-            _RevealBlock(
-              key: ValueKey<int>(i),
-              text: _revealed[i],
-              style: widget.styleSheet.p,
-            ),
-        ],
-      );
+      final text = (_shown.isEmpty && _pending.isEmpty) ? widget.data : _shown;
+      return Text(text, style: widget.styleSheet.p);
     }
     final body = MarkdownBody(
       data: widget.data,
