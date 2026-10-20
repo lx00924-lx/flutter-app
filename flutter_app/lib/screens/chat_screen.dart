@@ -216,7 +216,14 @@ class _ChatScreenState extends State<ChatScreen> {
     final settings = settingsProvider.settings;
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
-    // 自动滚动监测：新消息到来、会话切换或流式输出时自动滑动到底部
+    // 自动滚动监测：新消息到来、会话切换时滑到底部。
+    //
+    // ⚠️ **生成中不再吸底**（用户 2026-10-20 决定去掉）。
+    //    理由：现在文字是"匀速流出 + 底部渐隐"，视觉上自己就在动；
+    //    列表每 50ms 再跟着跳一下，等于两套动作叠在一起，反而打断阅读。
+    //    用户可以自己往下滑看新内容，想看最新就点右下角那个「回到底部」按钮。
+    //    （之前这里有个 `else if (chat.isGenerating) _scrollToBottom(animate: false);`
+    //      —— 那是打字机时代留下来的，那时气泡高度是一跳一跳长上去的。）
     if (chat.messages.length != _lastMessageCount || chat.currentSession?.id != _lastSessionId) {
       final isSessionSwitched = chat.currentSession?.id != _lastSessionId;
       _lastMessageCount = chat.messages.length;
@@ -231,8 +238,6 @@ class _ChatScreenState extends State<ChatScreen> {
       _userScrolledUp = false;
       _isUserInteracting = false;
       _scrollToBottom(animate: !isSessionSwitched, force: shouldForce);
-    } else if (chat.isGenerating) {
-      _scrollToBottom(animate: false);
     }
 
     final displayName = settings.aiName.isNotEmpty

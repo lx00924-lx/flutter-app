@@ -1732,8 +1732,17 @@ class ChatProvider extends ChangeNotifier {
                 final fallbackReasoning = (chunk['fullReasoning']?.toString() ?? '').trim();
                 if (fallbackReasoning.isNotEmpty) {
                   assistantMsg.reasoningContent = fallbackReasoning;
-                } else if (_polishThinking.isNotEmpty) {
-                  assistantMsg.reasoningContent = _polishThinking.toString();
+              } else if (_polishThinking.isNotEmpty) {
+              // ⚠️ 有的模型/接口把**正文**放在 `reasoning` 字段里，`content` 一直是空。
+              //    判据：正文为空 + 这里攒了内容 → 那其实是正文，不能当思考藏进卡片。
+              //    （实测：「点击重新生成正文跑思维链里了」——正文区一直显示
+              //      「正在思考中...」，而「已深度思考」卡片展开后里面是正文。）
+              if (assistantMsg.content.trim().isEmpty) {
+                assistantMsg.content = _polishThinking.toString();
+                assistantMsg.reasoningContent = '';
+              } else {
+                assistantMsg.reasoningContent = _polishThinking.toString();
+              }
                 }
               }
               if (chunk['agentExecution'] is Map) {
@@ -2114,8 +2123,16 @@ class ChatProvider extends ChangeNotifier {
       return false;
     }
 
-    // 1. 从列表、本地存储与云端彻底清除该条 AI 消息
-    deleteMessage(assistantMsgId);
+    // 1. 清除该条 AI 消息。
+    //
+    // ⚠️ 顺序很重要（用户实测反馈：「新消息气泡出来一会了旧气泡才消失」）：
+    //    `deleteMessage()` 内部要先 `await` 一次云端删除，再动 `_messages` + notify。
+    //    如果直接调它、不等结果，新气泡已经冒出来了，旧气泡却还挂在列表里，
+    //    要等云端往返回来才被摘掉。
+    //    所以：**先同步从列表里摘掉并通知**（UI 立刻一致），云端/存储那部分丢到后台。
+    _messages.removeWhere((m) => m.id == assistantMsgId);
+    notifyListeners();
+    unawaited(deleteMessage(assistantMsgId));
 
     if (_messages.isEmpty || _currentSession == null) return false;
 
@@ -2298,8 +2315,17 @@ class ChatProvider extends ChangeNotifier {
                 final fallbackReasoning = (chunk['fullReasoning']?.toString() ?? '').trim();
                 if (fallbackReasoning.isNotEmpty) {
                   assistantMsg.reasoningContent = fallbackReasoning;
-                } else if (_polishThinking.isNotEmpty) {
-                  assistantMsg.reasoningContent = _polishThinking.toString();
+              } else if (_polishThinking.isNotEmpty) {
+              // ⚠️ 有的模型/接口把**正文**放在 `reasoning` 字段里，`content` 一直是空。
+              //    判据：正文为空 + 这里攒了内容 → 那其实是正文，不能当思考藏进卡片。
+              //    （实测：「点击重新生成正文跑思维链里了」——正文区一直显示
+              //      「正在思考中...」，而「已深度思考」卡片展开后里面是正文。）
+              if (assistantMsg.content.trim().isEmpty) {
+                assistantMsg.content = _polishThinking.toString();
+                assistantMsg.reasoningContent = '';
+              } else {
+                assistantMsg.reasoningContent = _polishThinking.toString();
+              }
                 }
               }
               if (chunk['agentExecution'] is Map) {

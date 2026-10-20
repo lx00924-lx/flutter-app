@@ -851,7 +851,12 @@ class _CollapsibleMarkdownBody extends StatefulWidget {
 
 class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody>
     with SingleTickerProviderStateMixin {
-  bool _expanded = false;
+  /// 默认**展开**。
+  ///
+  /// ⚠️ 曾经是 false —— 超过 1200 字的长回复一生成完就自动折成 340 高，
+  ///    用户说「生成完会自动收起消息，影响阅读」。折叠能力保留（按钮还在），
+  ///    但默认不替用户做这个决定。
+  bool _expanded = true;
 
   // ───────── 流式期间的「平滑队列」 ─────────
   //
