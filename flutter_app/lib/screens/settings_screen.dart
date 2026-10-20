@@ -231,7 +231,7 @@ class SettingsScreen extends StatelessWidget {
                             Clipboard.setData(ClipboardData(
                               text: AppLogger.instance.exportAsString(),
                             ));
-                            ScaffoldMessenger.of(context).showSnackBar(
+                            ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                               const SnackBar(content: Text('运行日志已复制到剪贴板')),
                             );
                           },
@@ -509,7 +509,7 @@ class _GithubReleaseCardState extends State<_GithubReleaseCard> {
       if (!mounted) return;
 
       if (!result.isSuccess) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(
             content: Text(result.errorMessage ?? '检查更新失败，请稍后重试'),
             backgroundColor: Colors.redAccent,
@@ -530,7 +530,7 @@ class _GithubReleaseCardState extends State<_GithubReleaseCard> {
 
         // 如果已经下载了安装包，直接呼出系统安装界面
         if (cachedFile != null && !kIsWeb && Platform.isAndroid) {
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
             SnackBar(
               content: Text('已在本地检测到 v${result.latestVersion} 完整安装包，正在弹出系统安装...'),
               backgroundColor: const Color(0xFF10B981),
@@ -542,7 +542,7 @@ class _GithubReleaseCardState extends State<_GithubReleaseCard> {
 
         _showUpdateDialog(result, cachedFile);
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(
             content: Text('🎉 当前已是最新版本 (v${result.currentVersion}) · [${result.platformName}]'),
             backgroundColor: const Color(0xFF10B981),
@@ -552,7 +552,7 @@ class _GithubReleaseCardState extends State<_GithubReleaseCard> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(
             content: Text('检测发生异常: $e'),
             backgroundColor: Colors.redAccent,
@@ -717,7 +717,7 @@ class _UpdateDownloadDialogState extends State<_UpdateDownloadDialog> {
     if (_cachedFile != null) {
       UpdateService.installCachedPackage(_cachedFile!.path);
       Navigator.of(context).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         SnackBar(
           content: Text(Platform.isAndroid ? '正在调起系统安装界面...' : '正在启动安装程序并退出旧版...'),
           backgroundColor: const Color(0xFF10B981),
@@ -1065,7 +1065,7 @@ class _LaunchAtStartupCardState extends State<_LaunchAtStartupCard> {
             _loaded = true;
           });
           if (!context.mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
             SnackBar(
               content: Text(
                 actual == val

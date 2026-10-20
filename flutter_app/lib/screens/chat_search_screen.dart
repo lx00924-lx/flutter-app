@@ -186,7 +186,7 @@ class _ChatSearchScreenState extends State<ChatSearchScreen> {
       chat.selectSession(session);
       // 返回并提示已进入所属会话
       Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         SnackBar(
           content: Text('已定位至会话: ${session.title}'),
           duration: const Duration(seconds: 2),

@@ -52,19 +52,19 @@ class _LoginScreenState extends State<LoginScreen> {
 
     // 兜底：按钮虽已置灰，键盘回车仍可能走到这里
     if (!_agreedToTerms) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(content: Text('请先阅读并同意《用户协议》和《隐私政策》')),
       );
       return;
     }
     if (account.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(content: Text('请输入登录账号')),
       );
       return;
     }
     if (password.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(content: Text('请输入登录密码')),
       );
       return;
@@ -79,14 +79,14 @@ class _LoginScreenState extends State<LoginScreen> {
 
     if (result['success'] == true) {
       context.read<ChatProvider>().reloadFromStorage();
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         SnackBar(content: Text('欢迎回来，${sp.settings.userName}！')),
       );
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const ChatScreen()),
       );
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         SnackBar(
           content: Text(result['message']?.toString() ?? '账号或密码不正确，请重新输入'),
           backgroundColor: Colors.redAccent,
@@ -105,7 +105,7 @@ class _LoginScreenState extends State<LoginScreen> {
     final opened = await UrlLauncherHelper.openUrl(site);
     if (!mounted) return;
     if (!opened) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         SnackBar(content: Text('没能自动打开浏览器，请手动访问官网注册：$site')),
       );
     }

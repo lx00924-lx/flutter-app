@@ -466,7 +466,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
 
   void _slashToast(String text) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
       SnackBar(
         content: Text(text),
         duration: const Duration(seconds: 2),
@@ -641,7 +641,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     // 消息原样留在输入框里，由用户自己点发送（是否要跟这条已完成的回复一起看，
     // 应该由用户决定，不该替他决定）
     if (mode == null && turnFinished) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(
           content: Text('上一轮已经结束，消息仍在输入框，点发送即可发出'),
           behavior: SnackBarBehavior.floating,
@@ -655,7 +655,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     if (mode == 'interject') {
       final action = widget.onInterject ?? widget.onSend;
       _submitSend(text, attachments, action, dshImages);
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(
           content: Text('⚡ 已插话：当前这轮已打断'),
           behavior: SnackBarBehavior.floating,
@@ -666,7 +666,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
       final action = widget.onEnqueue;
       if (action == null) return;
       _submitSend(text, attachments, action, dshImages);
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         SnackBar(
           content: Text('⏳ 已加入排队（当前排队 ${chat.queuedCount} 条）'),
           behavior: SnackBarBehavior.floating,
@@ -1001,7 +1001,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
         }
       });
       if (skipped > 0 && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(
             content: Text('有 $skipped 张格式不受支持（仅 PNG / JPEG / WebP 能发给电脑端），这些只在本机显示'),
           ),
@@ -1010,7 +1010,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     } catch (e) {
       debugPrint('选择图片异常: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(content: Text('选择图片失败: $e')),
         );
       }
@@ -1032,7 +1032,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     } catch (e) {
       debugPrint('拍照异常: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(content: Text('拍照失败: $e')),
         );
       }
@@ -1054,7 +1054,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     } catch (e) {
       debugPrint('选择文件异常: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(content: Text('选择文件失败: $e')),
         );
       }
@@ -1068,7 +1068,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     final hasPerm = await AudioRecorderService.instance.hasPermission();
     if (!hasPerm) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           const SnackBar(
             content: Text('需要麦克风权限以录制语音消息'),
             backgroundColor: Colors.redAccent,
@@ -1081,7 +1081,7 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
     final success = await AudioRecorderService.instance.startRecording();
     if (!success) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           const SnackBar(
             content: Text('麦克风启动失败，请检查设备设置'),
             backgroundColor: Colors.redAccent,

@@ -90,7 +90,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     s.aiName = _aiNameCtrl.text.trim();
     sp.updateSettings(s);
     FocusScope.of(context).unfocus();
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
       const SnackBar(content: Text('账户设置已保存')),
     );
   }
@@ -100,21 +100,21 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     final s = sp.settings;
 
     if (s.accountPassword.isNotEmpty && _oldPwdCtrl.text.trim() != s.accountPassword) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(content: Text('原密码不正确')),
       );
       return;
     }
 
     if (_newPwdCtrl.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(content: Text('新密码不能为空')),
       );
       return;
     }
 
     if (_newPwdCtrl.text.trim() != _confirmPwdCtrl.text.trim()) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(content: Text('两次输入的新密码不一致')),
       );
       return;
@@ -125,7 +125,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     _oldPwdCtrl.clear();
     _newPwdCtrl.clear();
     _confirmPwdCtrl.clear();
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
       const SnackBar(content: Text('密码修改成功')),
     );
   }
@@ -195,7 +195,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
             onPressed: () async {
               final raw = importCtrl.text.trim();
               if (raw.isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                   const SnackBar(content: Text('导入内容不能为空')),
                 );
                 return;
@@ -209,12 +209,12 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
                 if (mounted) {
                   context.read<ChatProvider>().reloadFromStorage();
                   Navigator.pop(ctx);
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                     SnackBar(content: Text('成功导入 $count 条消息记录！')),
                   );
                 }
               } catch (e) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                   SnackBar(content: Text('导入失败，请检查 JSON 格式是否正确: $e')),
                 );
               }
@@ -345,7 +345,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
                             if (base64Image != null && mounted) {
                               s.userAvatar = base64Image;
                               sp.updateSettings(s);
-                              ScaffoldMessenger.of(context).showSnackBar(
+                              ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                 const SnackBar(content: Text('用户头像已更新')),
                               );
                             }
@@ -397,7 +397,7 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
                           if (base64Image != null && mounted) {
                             s.aiAvatar = base64Image;
                             sp.updateSettings(s);
-                            ScaffoldMessenger.of(context).showSnackBar(
+                            ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                               const SnackBar(content: Text('AI 头像已更新')),
                             );
                           }

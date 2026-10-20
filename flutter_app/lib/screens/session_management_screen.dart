@@ -66,7 +66,7 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
             onPressed: () {
               Navigator.pop(ctx);
               context.read<ChatProvider>().deleteSession(session.id);
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                 SnackBar(content: Text('已删除会话「${session.title}」')),
               );
             },
@@ -113,7 +113,7 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
                 _selectedIds.clear();
                 _isBatchMode = false;
               });
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                 SnackBar(content: Text('成功批量删除 $count 个会话')),
               );
             },
@@ -191,7 +191,7 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
             onPressed: () {
               Clipboard.setData(ClipboardData(text: jsonStr));
               Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                 const SnackBar(content: Text('已将备份 JSON 复制到剪贴板！')),
               );
             },
@@ -253,12 +253,12 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
                 if (mounted) {
                   context.read<ChatProvider>().reloadFromStorage();
                   Navigator.pop(ctx);
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                     SnackBar(content: Text('成功导入 $count 条记录！')),
                   );
                 }
               } catch (e) {
-                ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                   SnackBar(content: Text('解析导入失败: $e')),
                 );
               }
@@ -463,7 +463,7 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
                             } else {
                               if (!isActive) {
                                 chat.selectSession(s);
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                   SnackBar(content: Text('已切换至会话「${s.title}」')),
                                 );
                               }
@@ -589,7 +589,7 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
                                       ),
                                       onPressed: () {
                                         chat.selectSession(s);
-                                        ScaffoldMessenger.of(context).showSnackBar(
+                                        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                           SnackBar(content: Text('已切换至「${s.title}」')),
                                         );
                                       },

@@ -176,7 +176,7 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
                           if (base64Image != null && mounted) {
                             s.customBackground = base64Image;
                             sp.updateSettings(s);
-                            ScaffoldMessenger.of(context).showSnackBar(
+                            ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                               const SnackBar(content: Text('背景图片已实时更换并保存')),
                             );
                           }
@@ -331,7 +331,7 @@ class _PersonalizationSettingsScreenState extends State<PersonalizationSettingsS
                           if (base64Image != null && mounted) {
                             s.splashImage = base64Image;
                             sp.updateSettings(s);
-                            ScaffoldMessenger.of(context).showSnackBar(
+                            ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                               const SnackBar(content: Text('启动页图片已实时更新并保存')),
                             );
                           }

@@ -106,7 +106,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
     }
     _saveAllSilent();
     setState(() {});
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
       SnackBar(content: Text('已应用 $name 语音识别预设配置')),
     );
   }
@@ -137,7 +137,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
     }
     sp.updateSettings(sp.settings);
     setState(() {});
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
       SnackBar(content: Text('已应用 $name 语音合成预设配置')),
     );
   }
@@ -156,7 +156,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
     s.ttsApiKey = _ttsKeyCtrl.text.trim();
 
     sp.updateSettings(s);
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
       const SnackBar(content: Text('语音转写与合成设置已保存')),
     );
   }
@@ -197,7 +197,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
   Future<void> _testHttp() async {
     String endpoint = _httpCtrl.text.trim();
     if (endpoint.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(content: Text('请先输入转写 HTTP 接口地址')),
       );
       return;
@@ -254,7 +254,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
         } else if (data is String) {
           previewText = data.length > 50 ? data.substring(0, 50) : data;
         }
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(
             content: Text('连接成功：语音识别接口连通正常 (耗时 ${ms}ms)${previewText.isNotEmpty ? " [返回: $previewText]" : ""}'),
             backgroundColor: Colors.green,
@@ -262,7 +262,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
           ),
         );
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(
             content: Text('服务返回异常状态码: ${res.statusCode}'),
             backgroundColor: Colors.orange,
@@ -290,7 +290,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
         errHint = '网络异常: ${e.message ?? e.toString()}';
       }
 
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         SnackBar(
           content: Text(errHint),
           backgroundColor: Colors.redAccent,
@@ -299,7 +299,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         SnackBar(
           content: Text('测试异常: $e'),
           backgroundColor: Colors.redAccent,
@@ -313,7 +313,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
   Future<void> _testWs() async {
     final wsUrl = _wsCtrl.text.trim();
     if (wsUrl.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(content: Text('请先输入实时流 WS 端点地址')),
       );
       return;
@@ -330,7 +330,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
       await channel.sink.close();
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         SnackBar(
           content: Text('连接成功：实时流 WebSocket 已建立双向握手 (耗时 ${ms}ms)'),
           backgroundColor: Colors.green,
@@ -345,7 +345,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
       } else if (errMsg.contains('Connection refused') || errMsg.contains('Failed host lookup')) {
         errMsg = '无法连接到 WebSocket 服务器 (拒绝连接或域名无法解析)';
       }
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         SnackBar(
           content: Text('实时流连接失败：$errMsg'),
           backgroundColor: Colors.redAccent,
@@ -363,7 +363,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
     final s = sp.settings;
     setState(() => _isTestingTts = true);
 
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
       const SnackBar(
         content: Text('正在合成测试语音并朗读试听...'),
         duration: Duration(seconds: 2),
@@ -378,7 +378,7 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
     if (mounted) {
       setState(() => _isTestingTts = false);
       if (!success) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           const SnackBar(
             content: Text('语音播报失败，请检查设置或使用手机自带引擎'),
             backgroundColor: Colors.orange,

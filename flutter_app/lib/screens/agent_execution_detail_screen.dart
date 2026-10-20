@@ -94,7 +94,7 @@ class AgentExecutionDetailScreen extends StatelessWidget {
               icon: const Icon(Icons.copy_all_outlined, size: 20),
               onPressed: () {
                 Clipboard.setData(ClipboardData(text: _buildPlainText(items)));
-                ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                   const SnackBar(content: Text('已复制整轮执行过程'), duration: Duration(seconds: 1)),
                 );
               },

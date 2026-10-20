@@ -22,6 +22,13 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final ScrollController _scrollController = ScrollController();
+
+  /// 指向「最后一条用户消息」的锚点。
+  ///
+  /// 发消息后滚到这里（**顶部对齐**），而不是滚到列表最底 ——
+  /// 否则用户自己那条会被 AI 的长回复顶出屏幕，读回复前得先往上滑一下。
+  /// 这是 Gemini 的做法：用户消息钉在顶上，回答从下面长出来。
+  final GlobalKey _lastUserMsgKey = GlobalKey();
   int _lastMessageCount = 0;
   String? _lastSessionId;
   bool _userScrolledUp = false;
@@ -59,6 +66,22 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     super.dispose();
+  }
+
+  /// 滚到「最后一条用户消息」的顶部（对齐 Gemini 的阅读位置）。
+  ///
+  /// ⚠️ 必须等一帧：消息刚加进列表时它还没被 build，`currentContext` 是 null。
+  void _scrollToLastUserMessage() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctxKey = _lastUserMsgKey.currentContext;
+      if (ctxKey == null || !mounted) return;
+      Scrollable.ensureVisible(
+        ctxKey,
+        alignment: 0.0, // 0 = 顶到可视区顶部
+        duration: const Duration(milliseconds: 280),
+        curve: Curves.easeOut,
+      );
+    });
   }
 
   void _scrollToBottom({bool animate = true, bool force = false}) {
@@ -234,10 +257,18 @@ class _ChatScreenState extends State<ChatScreen> {
       // 消息也会让条数变化 —— 以前一律 force:true，等于把正在往上翻历史的用户
       // 硬拽回底部（用户实测反馈："消息框位置不对"）。现在只有**本机正在生成**
       // （= 用户刚发了消息）或切换会话时才强制吸底，其余情况尊重用户当前位置。
-      final shouldForce = isSessionSwitched || chat.isGenerating;
       _userScrolledUp = false;
       _isUserInteracting = false;
-      _scrollToBottom(animate: !isSessionSwitched, force: shouldForce);
+      if (isSessionSwitched) {
+        // 换会话 → 直接看最新的
+        _scrollToBottom(animate: false, force: true);
+      } else if (chat.isGenerating) {
+        // 本机刚发了消息 → 把用户那条钉到顶部，回答往下长
+        _scrollToLastUserMessage();
+      } else {
+        // 云端迟到的 / 另一端同步来的消息 → 尊重原有行为
+        _scrollToBottom(animate: true);
+      }
     }
 
     final displayName = settings.aiName.isNotEmpty
@@ -537,16 +568,28 @@ class _ChatScreenState extends State<ChatScreen> {
                                     groupedWithPrev: prev != null && prev.role == msg.role,
                                   );
                                   // 跨天时插一条居中日期分隔（微信/QQ 都有），长会话里定位快很多
+                                  final Widget row;
                                   if (prev != null && _isSameDay(prev.createdAt, msg.createdAt)) {
-                                    return bubble;
+                                    row = bubble;
+                                  } else {
+                                    row = Column(
+                                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                                      children: [
+                                        _DateDivider(dateTime: msg.createdAt, isDark: isDark),
+                                        bubble,
+                                      ],
+                                    );
                                   }
-                                  return Column(
-                                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                                    children: [
-                                      _DateDivider(dateTime: msg.createdAt, isDark: isDark),
-                                      bubble,
-                                    ],
-                                  );
+                                  // 最后一条用户消息挂锚点：发消息后滚到它顶部
+                                  final isLastUser = msg.role == MessageRole.user &&
+                                      index ==
+                                          chat.messages.lastIndexWhere(
+                                              (m) => m.role == MessageRole.user);
+                                  if (isLastUser) {
+                                    return KeyedSubtree(
+                                        key: _lastUserMsgKey, child: row);
+                                  }
+                                  return row;
                                 },
                               ),
                               // 向上翻历史时给一个"回到最新"的入口：以前只能自己一路划回去

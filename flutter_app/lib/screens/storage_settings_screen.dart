@@ -65,7 +65,7 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
       setState(() => _isMigrating = false);
       sp.updateCustomDataPath('');
       await _refreshCacheSize();
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         SnackBar(
           content: Text('已恢复为默认存储路径 (${migration.movedFilesCount} 个文件已迁回)'),
           backgroundColor: Colors.green,
@@ -89,7 +89,7 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
 
         if (newPath == oldPath.trim()) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
+            ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
               const SnackBar(content: Text('已是当前目录，无需更改')),
             );
           }
@@ -112,7 +112,7 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
             sp.updateCustomDataPath(newPath);
             await _refreshCacheSize();
 
-            ScaffoldMessenger.of(context).showSnackBar(
+            ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
               SnackBar(
                 content: Text(
                   '缓存目录已更新！已自动迁移 ${migration.movedFilesCount} 个文件 (${migration.movedMb.toStringAsFixed(2)} MB)',
@@ -122,7 +122,7 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
               ),
             );
           } else {
-            ScaffoldMessenger.of(context).showSnackBar(
+            ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
               SnackBar(
                 content: Text('缓存目录迁移出现异常: ${migration.error ?? "未知错误"}'),
                 backgroundColor: Colors.orange,
@@ -135,7 +135,7 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
       debugPrint('打开资源管理器选择目录异常: $e');
       if (mounted) {
         setState(() => _isMigrating = false);
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(
             content: Text('选择路径失败: $e'),
             backgroundColor: Colors.redAccent,
@@ -152,7 +152,7 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
     await _refreshCacheSize();
     if (mounted) {
       setState(() => _isClearing = false);
-      ScaffoldMessenger.of(context).showSnackBar(
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(
           content: Text('已成功清理本地原图、语音与临时文件缓存（聊天记录缩略图保留）'),
           backgroundColor: Colors.green,

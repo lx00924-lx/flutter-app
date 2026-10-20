@@ -129,7 +129,7 @@ class _TextSelectionModalState extends State<TextSelectionModal> {
                               );
                               chat.setQuotedMessage(quoteMsg);
                               Navigator.pop(context);
-                              ScaffoldMessenger.of(context).showSnackBar(
+                              ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                 const SnackBar(
                                   content: Text('已引用所选文字'),
                                   duration: Duration(seconds: 1),
@@ -143,7 +143,7 @@ class _TextSelectionModalState extends State<TextSelectionModal> {
                               final text = _getSelectedText(editableTextState);
                               context.read<SettingsProvider>().setAutoSpeakResponse(true);
                               TtsService.instance.speak(text, settings);
-                              ScaffoldMessenger.of(context).showSnackBar(
+                              ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                 const SnackBar(
                                   content: Text('已开始朗读所选文字'),
                                   duration: Duration(seconds: 1),

@@ -119,7 +119,7 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
       if (!mounted) return;
 
       if (res.statusCode == 200) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           const SnackBar(
             content: Text('🎉 电脑 Agent 配对成功！已建立长连接'),
             backgroundColor: Color(0xFF10B981),
@@ -139,7 +139,7 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
   }
 
   void _showErrorAndResume(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
       SnackBar(
         content: Text(message),
         backgroundColor: const Color(0xFFEF4444),

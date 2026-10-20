@@ -278,7 +278,7 @@ class _AgentQuickBarState extends State<AgentQuickBar> {
   }
 
   void _toast(String text, {required bool isError}) {    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
       SnackBar(
         content: Text(text),
         backgroundColor: isError ? Colors.redAccent : Colors.green,

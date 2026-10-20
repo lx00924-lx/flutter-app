@@ -109,7 +109,7 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
                               ? null
                               : () async {
                                   if (endpointCtrl.text.trim().isEmpty) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                       const SnackBar(content: Text('请先输入 API 终端地址')),
                                     );
                                     return;
@@ -126,7 +126,7 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
                                     });
                                   } catch (e) {
                                     setDialogState(() => isFetchingModels = false);
-                                    ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                       SnackBar(content: Text('获取模型失败: $e')),
                                     );
                                   }
@@ -244,7 +244,7 @@ class _ApiSettingsScreenState extends State<ApiSettingsScreen> {
                     Navigator.pop(dialogCtx);
 
                     if (wasClamped && mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
+                      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                         SnackBar(
                           content: Text('💡 检测到 $modelName 上限为 $serverMaxLimit，上下文长度已自动更正为 $serverMaxLimit'),
                           backgroundColor: const Color(0xFF0284C7),

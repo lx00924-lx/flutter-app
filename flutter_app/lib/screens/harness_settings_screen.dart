@@ -123,7 +123,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         _bridgeSwitchTarget = null;
       });
       if (!converged) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           const SnackBar(
             content: Text('状态切换超时未确认：请检查电脑端 LxAI 是否在运行、是否已登录同一账号'),
             backgroundColor: Colors.orange,
@@ -223,7 +223,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
 
   void _snack(String text, {required bool isError}) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
       SnackBar(
         content: Text(text),
         backgroundColor: isError ? Colors.redAccent : Colors.green,
@@ -270,7 +270,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   void _save() {
     FocusScope.of(context).unfocus();
     _saveSilently();
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
       const SnackBar(content: Text('Harness 桥接设置已保存')),
     );
   }
@@ -337,7 +337,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       if (!mounted) return;
 
       if (newToken == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           const SnackBar(
             content: Text('换发失败：请确认已登录且网络正常'),
             backgroundColor: Colors.redAccent,
@@ -370,7 +370,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
               : _harnessUrlCtrl.text.trim(),
         );
         if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           const SnackBar(
             content: Text('🔑 配对 Token 已更新，电脑端桥接已自动重启并重连'),
             backgroundColor: Colors.green,
@@ -385,7 +385,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         );
         if (!mounted) return;
         if (result != BridgeCommandResult.ok) _releaseBridgeSwitch();
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(
             content: Text(
               switch (result) {
@@ -400,13 +400,13 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
           ),
         );
       } else {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           const SnackBar(content: Text('🔑 配对 Token 已更新（桥接未运行，下次启动将使用新 Token）')),
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(content: Text('换发异常: $e'), backgroundColor: Colors.redAccent),
         );
       }
@@ -451,7 +451,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         } else {
           _releaseBridgeSwitch();
         }
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(
             content: Text(
               switch (result) {
@@ -480,7 +480,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       if (!mounted) return;
       if (reg == BridgeCommandResult.busy) {
         _releaseBridgeSwitch();
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           const SnackBar(
             content: Text('另一台设备正在切换桥接状态，请等它完成后再操作'),
             backgroundColor: Colors.orange,
@@ -509,7 +509,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       final msg = manager.takeMessage();
       if (msg != null) {
         final launched = manager.isRunning && !manager.lastMessageIsError;
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(
             content: Text(launched ? '🚀 $msg' : msg),
             backgroundColor: manager.lastMessageIsError
@@ -531,7 +531,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           SnackBar(content: Text('启停异常: $e'), backgroundColor: Colors.redAccent),
         );
       }
@@ -624,12 +624,12 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                               setDlgState(() => isSubmitting = false);
                               if (res['success'] == true) {
                                 Navigator.pop(ctx);
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                   SnackBar(content: Text(res['message'] ?? '绑定授权成功！电脑端已自动上线'), backgroundColor: Colors.green),
                                 );
                                 context.read<SettingsProvider>().refreshAgentStatus();
                               } else {
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                   SnackBar(content: Text(res['message'] ?? '授权失败，请检查临时码'), backgroundColor: Colors.redAccent),
                                 );
                               }
@@ -655,7 +655,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
               onPressed: () {
                 Clipboard.setData(ClipboardData(text: 'TOKEN=$token;URL=http://$url'));
                 Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(
+                ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                   const SnackBar(content: Text('已复制配对参数至剪贴板')),
                 );
               },
@@ -991,7 +991,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                         Clipboard.setData(ClipboardData(
                           text: 'python lxai_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
                         ));
-                        ScaffoldMessenger.of(context).showSnackBar(
+                        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                           const SnackBar(content: Text('已复制电脑端启动命令')),
                         );
                       },
@@ -1040,7 +1040,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                     final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
                                     if (pyContent == null) {
                                       if (context.mounted) {
-                                        ScaffoldMessenger.of(context).showSnackBar(
+                                        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                           const SnackBar(
                                             content: Text('内置桥接脚本读取失败，请重新安装 App，或改用中继服务器下载'),
                                             backgroundColor: Colors.redAccent,
@@ -1055,7 +1055,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                     );
                                     if (context.mounted) {
                                       if (savedPath != null) {
-                                        ScaffoldMessenger.of(context).showSnackBar(
+                                        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                           SnackBar(
                                             content: Text('已保存至: $savedPath'),
                                             backgroundColor: Colors.green,
@@ -1099,7 +1099,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                       content: batContent,
                                     );
                                     if (context.mounted && savedPath != null) {
-                                      ScaffoldMessenger.of(context).showSnackBar(
+                                      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                         SnackBar(
                                           content: Text('已保存至: $savedPath'),
                                           backgroundColor: Colors.green,
@@ -1137,7 +1137,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                     Clipboard.setData(ClipboardData(
                                       text: 'python lxai_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
                                     ));
-                                    ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                       const SnackBar(content: Text('已复制免 Token 启动命令')),
                                     );
                                   },
@@ -1173,7 +1173,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                 final pyContent = await BridgeScriptHelper.getFullBridgeScriptContent();
                                 if (pyContent == null) {
                                   if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
+                                    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                       const SnackBar(
                                         content: Text('内置桥接脚本读取失败，请重新安装 App，或改用中继服务器下载'),
                                         backgroundColor: Colors.redAccent,
@@ -1187,7 +1187,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                   content: pyContent,
                                 );
                                 if (context.mounted && savedPath != null) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
+                                  ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                     SnackBar(
                                       content: Text('已保存至: $savedPath'),
                                       backgroundColor: Colors.green,
@@ -1211,7 +1211,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                   content: batContent,
                                 );
                                 if (context.mounted && savedPath != null) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
+                                  ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                     SnackBar(
                                       content: Text('已保存至: $savedPath'),
                                       backgroundColor: Colors.green,
@@ -1232,7 +1232,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
                                 Clipboard.setData(ClipboardData(
                                   text: 'python lxai_bridge.py --harness-url "http://${_harnessUrlCtrl.text.trim()}"',
                                 ));
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                                   const SnackBar(content: Text('已复制免 Token 启动命令')),
                                 );
                               },

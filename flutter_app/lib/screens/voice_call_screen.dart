@@ -161,7 +161,24 @@ class _VoiceCallScreenState extends State<VoiceCallScreen> with SingleTickerProv
     }
 
     if (transcribedText.isEmpty) {
-      transcribedText = '你好，能听到我说话吗？';
+      // ⚠️ 以前这里会兜底成「你好，能听到我说话吗？」再发出去 ——
+      //    转写失败时等于**替用户说了一句话**，而且看起来一切正常。
+      //    （用户实测：「说什么都是默认发送你好，能听到我说话吗？即使 api 语音转写错误」）
+      //    现在明确失败：回到可录音状态 + 提示重说，不往对话里塞假消息。
+      if (!mounted) return;
+      setState(() {
+        _status = VoiceCallStatus.idle;
+        _statusHint = '没听清（转写失败或结果为空），请再说一次';
+        _aiResponseText = '';
+      });
+      ScaffoldMessenger.of(context)
+        ..clearSnackBars()
+        ..showSnackBar(const SnackBar(
+          content: Text('没听清，请再说一次'),
+          duration: Duration(seconds: 2),
+          behavior: SnackBarBehavior.floating,
+        ));
+      return;
     }
 
     if (!mounted) return;

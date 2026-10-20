@@ -127,7 +127,7 @@ class _LogConsoleScreenState extends State<LogConsoleScreen> {
             tooltip: '复制全部日志',
             onPressed: () {
               Clipboard.setData(ClipboardData(text: _logger.exportAsString()));
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                 const SnackBar(content: Text('已复制完整日志到剪贴板')),
               );
             },
@@ -137,7 +137,7 @@ class _LogConsoleScreenState extends State<LogConsoleScreen> {
             tooltip: '清空日志',
             onPressed: () {
               _logger.clear();
-              ScaffoldMessenger.of(context).showSnackBar(
+              ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                 const SnackBar(content: Text('日志已清空')),
               );
             },

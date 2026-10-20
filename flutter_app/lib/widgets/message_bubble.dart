@@ -198,7 +198,7 @@ class MessageBubble extends StatelessWidget {
       switch (selected) {
         case 'quote':
           chat.setQuotedMessage(message);
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
             const SnackBar(
               content: Text('已引用该消息'),
               duration: Duration(seconds: 1),
@@ -208,7 +208,7 @@ class MessageBubble extends StatelessWidget {
         case 'read':
           context.read<SettingsProvider>().setAutoSpeakResponse(true);
           TtsService.instance.speak(message.content, settings);
-          ScaffoldMessenger.of(context).showSnackBar(
+          ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
             const SnackBar(
               content: Text('正在朗读消息...'),
               duration: Duration(seconds: 1),
@@ -519,7 +519,7 @@ class MessageBubble extends StatelessWidget {
                     onPressed: () async {
                       final success = await chat.resendMessage(message.id);
                       if (!success && context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
+                        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                           const SnackBar(
                             content: Text('网络仍未连接，请检查网络通畅度后重试'),
                             backgroundColor: Colors.redAccent,
@@ -1140,7 +1140,7 @@ class _CodeBlockView extends StatelessWidget {
                 borderRadius: BorderRadius.circular(6),
                 onTap: () {
                   Clipboard.setData(ClipboardData(text: code));
-                  ScaffoldMessenger.of(context).showSnackBar(
+                  ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
                     const SnackBar(content: Text('代码已复制'), duration: Duration(seconds: 1)),
                   );
                 },
