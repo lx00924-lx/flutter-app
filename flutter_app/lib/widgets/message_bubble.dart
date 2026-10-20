@@ -871,6 +871,13 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody>
   ///    看起来就是"动画被一刀打断"，前功尽弃。
   ///    这里继续用 ticker 把剩下的吐完（最多多花一两百毫秒），再交回 Markdown。
   bool _draining = false;
+
+  /// 上一帧拿到的完整内容。用来判断 `widget.data` 是**增长**还是**被整体换掉**。
+  ///
+  /// ⚠️ 实测踩到：开头显示占位符 `正在思考中...`，正文一到它不是"接在后面"，
+  ///    而是**整段替换**。只看长度增长的话会把游标算错 —— 结果是
+  ///    「正在思考中...正在思考中...」后面直接接上正文的中间一段（"供月"和"外"被跳过）。
+  String _lastData = '';
   Ticker? _ticker;
   Duration _tickBase = Duration.zero;
   double _emitted = 0;   // 累计"应该吐出多少字"（浮点，避免每帧把零头丢掉）
@@ -886,6 +893,10 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody>
     super.initState();
     if (widget.streaming) {
       _enqueue(widget.data);
+      // ⚠️ 必须记住"已经消费到哪" —— 漏了这一行，下一次 didUpdateWidget 会
+      //    把同一份内容**再入队一遍**（实测：占位符"正在思考中..."出现了两次）。
+      _consumed = widget.data.length;
+      _lastData = widget.data;
       _startTicker();
     }
   }
@@ -909,6 +920,17 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody>
       }
       return;
     }
+    // ① 内容被整体换掉（占位符 → 正文）：前面吐出来的全作废，从头来
+    if (!widget.data.startsWith(_lastData)) {
+      _shown = '';
+      _pending = '';
+      _consumed = 0;
+      _emitted = 0;
+      _tickBase = Duration.zero;
+    }
+    _lastData = widget.data;
+
+    // ② 正常增长：只把新到的那截入队
     if (widget.data.length > _consumed) {
       _enqueue(widget.data.substring(_consumed));
       _consumed = widget.data.length;
@@ -990,11 +1012,19 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody>
         shaderCallback: (bounds) => const LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Color(0xFFFFFFFF), Color(0xFFFFFFFF), Color(0x00FFFFFF)],
-          stops: [0.0, 0.35, 1.0],
+          colors: [Color(0xFFFFFFFF), Color(0xFFFFFFFF), Color(0x33FFFFFF)],
+          stops: [0.0, 0.30, 1.0],
         ).createShader(bounds),
         blendMode: BlendMode.modulate,
-        child: Text(text, style: widget.styleSheet.p),
+        child: MarkdownBody(
+          // 生成中也走 Markdown —— 用户要求「输出中的应该和输出完的一样」：
+          // 纯文本会把 `# 供月` 原样露出 `#`，和收尾后的标题对不上。
+          // 代价是半截语法会闪、整段重解析有开销（用户知情并同意先这样看效果）。
+          data: text,
+          selectable: false,
+          styleSheet: widget.styleSheet,
+          builders: widget.builders,
+        ),
       );
     }
     final body = MarkdownBody(
