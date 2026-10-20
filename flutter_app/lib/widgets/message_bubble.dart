@@ -990,8 +990,8 @@ class _CollapsibleMarkdownBodyState extends State<_CollapsibleMarkdownBody>
         shaderCallback: (bounds) => const LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Color(0xFFFFFFFF), Color(0xFFFFFFFF), Color(0x66FFFFFF)],
-          stops: [0.0, 0.78, 1.0],
+          colors: [Color(0xFFFFFFFF), Color(0xFFFFFFFF), Color(0x00FFFFFF)],
+          stops: [0.0, 0.35, 1.0],
         ).createShader(bounds),
         blendMode: BlendMode.modulate,
         child: Text(text, style: widget.styleSheet.p),
