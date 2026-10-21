@@ -658,10 +658,6 @@ class SyncService {
             // 处于待删除队列的本地会话必须清除
             await storage.deleteSession(localSession.id);
             sessionListChanged = true;
-          } else if (localSession.isSynced && !authoritativeSessionIds.contains(localSession.id)) {
-            // 该会话曾经成功上过云端，但服务器现已不存在 -> 说明已被其他设备删除 -> 本地级联同步清除
-            await storage.deleteSession(localSession.id);
-            sessionListChanged = true;
           } else if (!localSession.isSynced) {
             // 该会话是在离线/未开启服务器时本地新建的 -> 坚决不误删，将其本地消息反向补传至云端
             final localMsgs = storage.getMessagesForSession(localSession.id);
@@ -675,6 +671,12 @@ class SyncService {
             localSession.isSynced = true;
             await storage.saveSession(localSession);
           }
+          // ⚠️ 以前这里还有一条分支：`isSynced && 云端集合里没有它` → 级联删除本地会话。
+          // 已移除。「云端缺席」不是"已被删除"的证据 —— 云端集合可能只反映
+          // **另一台设备**的会话（那台几乎没在用），于是本机的大部分会话都会被清掉：
+          // 连带消息一起删，而且无法恢复（实测 2026-10-22 01:0x 手机装新包后中招）。
+          // 真正的删除由 delete-session 的推送广播与本地待删队列负责；
+          // 漏掉广播最多留一个空会话，代价远小于误删整段对话。
         }
 
         // 3. 将云端新消息与会话导入本地
@@ -1015,22 +1017,26 @@ class SyncService {
       if (pendingDeleteIds.contains(l.id)) continue;
       final r = remoteById[l.id];
       if (r == null) {
-        if (l.isSynced) {
-          // 云端确实删了它（另一台设备上删的）→ 本地跟着删
-          await storage.deleteSession(l.id);
-          changed = true;
-        } else {
-          // 本地新建、还没推上去 → 反向补传（会话元数据 + 消息都推），
-          // 绝不能因为"云端没有"就删掉
-          final msgs = storage.getMessagesForSession(l.id);
-          if (msgs.isNotEmpty) {
-            await pushMessages(userId: userId, messages: msgs, clientSessionId: clientSessionId);
-          }
-          l.isSynced = true;
-          await storage.saveSession(l);
-          await pushSessions(userId: userId, sessions: [l], clientSessionId: clientSessionId);
-          touchedOut?.add(l.id);
+        // ⚠️「云端会话表里没有」**绝不能**当作"已被删除"。
+        //
+        // 会话是用户资产，删错的代价远大于留一个空壳：
+        //   · 真正被删的会话，由 delete-session 的推送广播 / 本地待删队列处理；
+        //   · 漏掉那一次广播，最坏结果是本地多留一个空会话（点进去空的，删掉即可）；
+        //   · 而误判一次，就是**整段对话连同所有消息一起消失**，且无法恢复。
+        //
+        // 2026-10-22 01:0x 实测踩过：桌面 App 本地只有 2 个会话（它几乎没在用），
+        // 手机有 7 个以上。手机装上新包后第一次同步，就把自己那 5 个"云端没有"的
+        // 会话级联删掉了。根因就是这里拿"云端缺席"去推断"已被删除"。
+        //
+        // 现在一律反向补传：以本地为准，把它（连同消息）推上去。
+        final msgs = storage.getMessagesForSession(l.id);
+        if (msgs.isNotEmpty) {
+          await pushMessages(userId: userId, messages: msgs, clientSessionId: clientSessionId);
         }
+        l.isSynced = true;
+        await storage.saveSession(l);
+        await pushSessions(userId: userId, sessions: [l], clientSessionId: clientSessionId);
+        touchedOut?.add(l.id);
         continue;
       }
       // 两边都有：按 updatedAt 取新（"最后写入者赢"），
