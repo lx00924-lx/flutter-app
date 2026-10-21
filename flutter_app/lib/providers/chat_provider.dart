@@ -1343,7 +1343,29 @@ class ChatProvider extends ChangeNotifier {
     _currentSession = newSession;
     _messages = [];
     notifyListeners();
+    // 新会话**立刻**推给云端：另一台设备要等它发出第一条消息才能看见它
+    // （会话列表只能从消息反推，空会话一条消息都没有，就永远不出现）。
+    unawaited(_pushNewSession(newSession));
     _silentSyncFromServer();
+  }
+
+  /// 把刚建的会话推到云端，成功后才标记为已同步。
+  ///
+  /// 失败时**必须保持 `isSynced == false`**：下一轮 `_mergeRemoteSessions` 见到
+  /// "本地未同步"会把它反向补传；若提前标成已同步，下一轮就会因"云端没有它"
+  /// 把它当成已被删除而清掉 —— 表现是"新建的会话过几分钟自己没了"。
+  Future<void> _pushNewSession(ChatSession session) async {
+    final ok = await SyncService.instance.pushSessions(
+      userId: settingsProvider.syncUserId,
+      sessions: [session],
+      clientSessionId: settingsProvider.clientSessionId,
+    );
+    if (!ok) return;
+    final idx = _sessions.indexWhere((s) => s.id == session.id);
+    if (idx == -1) return;
+    _sessions[idx].isSynced = true;
+    if (_currentSession?.id == session.id) _currentSession!.isSynced = true;
+    await _storage.saveSession(_sessions[idx]);
   }
 
   void selectSession(ChatSession session) {
@@ -1367,11 +1389,11 @@ class ChatProvider extends ChangeNotifier {
         _currentSession!.updatedAt = _sessions[idx].updatedAt;
       }
       notifyListeners();
-      SyncService.instance.pushSessions(
+      unawaited(SyncService.instance.pushSessions(
         userId: settingsProvider.syncUserId,
         sessions: [_sessions[idx]],
         clientSessionId: settingsProvider.clientSessionId,
-      );
+      ));
     }
   }
 
@@ -2536,11 +2558,11 @@ class ChatProvider extends ChangeNotifier {
             session.lastSummarizedIndex = cutoffIndex;
             session.updatedAt = DateTime.now();
             await _storage.saveSession(session);
-            SyncService.instance.pushSessions(
+            unawaited(SyncService.instance.pushSessions(
               userId: settingsProvider.syncUserId,
               sessions: [session],
               clientSessionId: settingsProvider.clientSessionId,
-            );
+            ));
           }
         }
       }

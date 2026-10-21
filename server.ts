@@ -130,6 +130,16 @@ const AGENT_TASK_PENDING_GRACE_MS = AGENT_TASK_TIMEOUT_MS;
 const SERVER_BOOT_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const DATA_DIR = path.join(process.cwd(), "messages_data");
 const MESSAGES_FILE = path.join(DATA_DIR, "messages_v2.json"); // Use v2 to avoid conflicts
+/**
+ * 会话**元数据**表（标题 / 创建时间 / 摘要 …）。
+ *
+ * 以前服务端只存消息（`messages_v2.json`，每条挂一个 sessionId），会话本身没有落点。
+ * 后果是客户端只能"从消息反推会话"：
+ *   · 新建但还没发消息的会话，另一台设备完全看不到；
+ *   · 会话标题取的是"消息前 20 字"，用户改的名字同步不过去。
+ * 这里补上真正的会话表，形状与 messages 一致：`{ userId: [ session, ... ] }`。
+ */
+const SESSIONS_FILE = path.join(DATA_DIR, "sessions_v2.json");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 const ACTIVE_SESSIONS_FILE = path.join(DATA_DIR, "active_sessions.json");
@@ -769,14 +779,43 @@ async function verifyUserIdentity(
         ? 'desktop'
         : '';
 
-  const deny = (error: string, code: string) => {
+  const deny = (
+    error: string,
+    code: string,
+    opts?: { status?: number; forceLogout?: boolean; canTakeover?: boolean },
+  ) => {
     console.warn(
       `[安全] 已拦截未通过身份校验的请求：${action}（目标用户 ${userId || "?"}，` +
-        `来源 x-user-id=${headerUserId || "无"}，x-client-session-id=${clientSessionId ? "有" : "无"}）`,
+        `来源 x-user-id=${headerUserId || "无"}，` +
+        `x-client-session-id=${clientSessionId ? clientSessionId.slice(0, 8) + "…" : "无"}，` +
+        `设备=${deviceType || "未知"}，code=${code}）`,
     );
-    // 用 403 而不是 401：App 侧 `_checkAndTriggerForceLogout` 只在 401 + FORCE_LOGOUT
-    // 时触发顶号流程，用 403 不会把"被拦截"误报成"账号在别处登录了"。
-    res.status(403).json({ error, code });
+    const status = opts?.status ?? 403;
+    // 「凭证本身已失效」必须走 401 + FORCE_LOGOUT，其余拦截仍用 403。
+    //
+    // 为什么这条区分是硬要求（2026-10-21 实测又踩了一次）：App 侧
+    // `_checkAndTriggerForceLogout` **只认** `401 + error:'FORCE_LOGOUT'`。
+    // 所以只要这里回 403，客户端就完全不知道自己已经废了 —— 它会带着这个
+    // 早已作废的 id 继续轮询，每个请求都被拦，界面既不报错、也不提示重登，
+    // 只表现为「一直显示离线 / 发出去的消息没有回应」。当时的现象就是：
+    // `active_sessions.json` 里这个用户的 `desktop` 槽位不见了，电脑端一片死寂，
+    // 手机端（槽位还在）完全正常，而两端日志都看不出"哪一端被拒了"。
+    // 用 401+FORCE_LOGOUT 的话，客户端会当场发现并走「重新登录」流程，自己恢复。
+    if (opts?.forceLogout) {
+      res.status(401).json({
+        error: "FORCE_LOGOUT",
+        code,
+        // 形状与顶号一致（客户端两者走同一条恢复路径）
+        kickedSessionId: clientSessionId,
+        // canTakeover=true 时客户端会**静默**用账号密码重登接管，不弹"你被顶下线"。
+        // 服务端压根没记录过这台设备（槽位缺失）属于"分叉"而非"被别人顶掉"，
+        // 弹顶号提示是假的 —— 让人白紧张一次还解决不了问题。
+        canTakeover: opts.canTakeover === true,
+        reason: error,
+      });
+      return;
+    }
+    res.status(status).json({ error, code });
   };
 
   if (!userId || userId === 'guest' || userId === 'default_user') {
@@ -801,7 +840,18 @@ async function verifyUserIdentity(
     const candidates = deviceType ? [deviceType] : (['mobile', 'desktop'] as const);
     const matched = candidates.some((slot) => slots?.[slot]?.clientSessionId === clientSessionId);
     if (matched) return true;
-    deny('登录凭证已失效（该设备可能已在别处登录），请重新登录后重试', 'SESSION_INVALID');
+    // 槽位**根本不存在** == 服务端从没记录过这台设备（中继那边槽位丢了 / 从没写成），
+    // 属于"本地与服务端分叉"，不是"被另一台设备顶掉"。这种时候弹一句
+    // "你的账号已在另一台设备上登录"是假的，而且用户手动重登前一直用不了。
+    // 直接给 canTakeover=true，客户端会静默用账号密码重登、把槽位补回去。
+    const slotMissing = deviceType
+      ? !slots?.[deviceType]
+      : !slots?.['mobile'] && !slots?.['desktop'];
+    deny('登录凭证已失效', 'SESSION_INVALID', {
+      // 这一条是「凭证本身作废」，不是「请求写错了」—— 必须让客户端知道并重登
+      forceLogout: true,
+      canTakeover: slotMissing,
+    });
   } catch (e) {
     console.error('[安全] 身份校验读取会话槽位失败：', e);
     res.status(500).json({ error: '身份校验失败，请稍后重试', code: 'IDENTITY_CHECK_ERROR' });
@@ -2499,7 +2549,7 @@ async function startServer() {
    * 注销账号 · 第二步：验证通过后删除账号与全部关联数据。
    *
    * 删除范围（都是 `{ [username]: ... }` 结构，按账号名整键移除）：
-   *   users.json / messages_v2.json / settings.json / active_sessions.json
+   *   users.json / messages_v2.json / sessions_v2.json / settings.json / active_sessions.json
    *
    * ⚠️ **不删媒体文件**：`messages_media/` 里的文件名是 multer 随机生成的，
    *    不含用户信息，无法可靠判定归属 —— 宁可少删，也不能误删别人的文件。
@@ -2564,9 +2614,10 @@ async function startServer() {
         await safeWriteJSON(USERS_FILE, kept);
       });
 
-      // 2) 以账号名为顶层键的三个数据文件
+      // 2) 以账号名为顶层键的数据文件
       const targets: Array<[string, string]> = [
         [MESSAGES_FILE, "messages"],
+        [SESSIONS_FILE, "chatSessions"],
         [SETTINGS_FILE, "settings"],
         [ACTIVE_SESSIONS_FILE, "sessions"],
       ];
@@ -3190,6 +3241,60 @@ async function startServer() {
     }
   });
 
+  // ==================== 会话元数据（标题 / 创建时间 / 摘要） ====================
+  // 与消息分开存：消息是"说了什么"，会话是"这条对话叫什么、什么时候建的"。
+  // 客户端必须先拉会话表再拉消息 —— 空会话（还没发过消息）只有会话表里才有。
+
+  app.get("/api/sessions/:userId", async (req, res) => {
+    if (!(await verifyUserIdentity(req, res, req.params.userId, "读取会话列表"))) return;
+    try {
+      const allSessions = await safeReadJSON<Record<string, any[]>>(SESSIONS_FILE, {});
+      const list = (allSessions[req.params.userId] || []).filter(
+        (s: any) => s && typeof s.id === "string" && s.id.trim() !== ""
+      );
+      res.json(list);
+    } catch (error) {
+      res.status(500).json({ error: "Failed to load sessions" });
+    }
+  });
+
+  app.post("/api/sync-sessions", async (req, res) => {
+    const { userId, sessions } = req.body;
+    if (!(await verifyUserIdentity(req, res, userId, "写入会话列表"))) return;
+    try {
+      await withFileLock(SESSIONS_FILE, async () => {
+        const allSessions = await safeReadJSON<Record<string, any[]>>(SESSIONS_FILE, {});
+        if (!allSessions[userId]) allSessions[userId] = [];
+        const incoming = (sessions || []).filter(
+          (s: any) => s && typeof s.id === "string" && s.id.trim() !== ""
+        );
+        // 同 id 按 updatedAt 取新（"最后写入者赢"）。
+        // 必须做这个比较：否则一台设备拿着旧的本地副本回推，就会把另一台设备
+        // 刚改好的标题盖回去 —— 表现成"改名会自己弹回旧名字"。
+        const byId = new Map<string, any>();
+        for (const s of allSessions[userId]) {
+          if (s && typeof s.id === "string" && s.id.trim() !== "") byId.set(s.id, s);
+        }
+        for (const s of incoming) {
+          const prev = byId.get(s.id);
+          if (!prev) {
+            byId.set(s.id, s);
+            continue;
+          }
+          const prevAt = Date.parse(prev.updatedAt || "") || 0;
+          const nextAt = Date.parse(s.updatedAt || "") || 0;
+          if (nextAt >= prevAt) byId.set(s.id, s);
+        }
+        allSessions[userId] = Array.from(byId.values());
+        await safeWriteJSON(SESSIONS_FILE, allSessions);
+      });
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Sync sessions error:", error);
+      res.status(500).json({ error: "Failed to sync sessions" });
+    }
+  });
+
   app.post("/api/delete-message", async (req, res) => {
     const { userId, messageId } = req.body;
     if (!userId || !messageId) {
@@ -3227,6 +3332,17 @@ async function startServer() {
             (m: any) => m && m.sessionId && m.sessionId.toString().trim() !== cleanSessionId
           );
           await safeWriteJSON(MESSAGES_FILE, allMessages);
+        }
+      });
+      // 会话元数据必须一起删：只删消息的话，另一台设备下次拉会话表还能看到它，
+      // 于是"删掉的会话过一会儿又冒回来了"，且是个点进去空空如也的空壳。
+      await withFileLock(SESSIONS_FILE, async () => {
+        const allSessions = await safeReadJSON<Record<string, any[]>>(SESSIONS_FILE, {});
+        if (allSessions[userId]) {
+          allSessions[userId] = allSessions[userId].filter(
+            (s: any) => !(s && s.id && s.id.toString().trim() === cleanSessionId)
+          );
+          await safeWriteJSON(SESSIONS_FILE, allSessions);
         }
       });
       // Broadcast session deletion to all connected devices of this user

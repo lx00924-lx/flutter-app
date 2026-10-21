@@ -569,6 +569,32 @@ class SyncService {
       //     这一轮界面就是一致的，不用等下一次同步。
       await flushPendingPushes(userId: cleanUserId, clientSessionId: clientSessionId);
 
+      final storage = StorageService.instance;
+      final pendingDeleteIds = Set<String>.from(storage.getPendingDeleteSessionIds());
+      // 本轮会话表对齐已经处理过的会话 id（step 2 必须跳过它们）
+      final touchedThisRound = <String>{};
+
+      // 0c. 先对齐会话表 —— **还没发过消息的空会话只存在于这张表里**，
+      //     靠下面的消息列表永远反推不出来。所以必须发生在拉消息之前。
+      final remoteSessions =
+          await pullSessions(userId: cleanUserId, clientSessionId: clientSessionId);
+      // 空表 == 这套机制刚上线（服务端还没有存量），此时**不构成任何权威依据**，
+      // 必须退回落旧判据，否则会把本地全部历史会话一次性删光。
+      final Set<String>? serverSessionIdsFromTable =
+          (remoteSessions == null || remoteSessions.isEmpty)
+              ? null
+              : remoteSessions.map((s) => s.id).toSet();
+      if (remoteSessions != null) {
+        final merged = await _mergeRemoteSessions(
+          remoteSessions,
+          pendingDeleteIds,
+          userId: cleanUserId,
+          clientSessionId: clientSessionId,
+          touchedOut: touchedThisRound,
+        );
+        if (merged) sessionListChanged = true;
+      }
+
       final url = '$serverBaseUrl/api/messages/$cleanUserId';
       final response = await _dio.get(
         url,
@@ -577,8 +603,6 @@ class SyncService {
 
       if (response.statusCode == 200 && response.data is List) {
         final list = response.data as List;
-        final storage = StorageService.instance;
-        final pendingDeleteIds = Set<String>.from(storage.getPendingDeleteSessionIds());
 
         // 1. 提取服务器当前权威存活且未处于本地待删队列中的会话 ID 集合
         final serverSessionIds = <String>{};
@@ -591,14 +615,23 @@ class SyncService {
           }
         }
 
-        // 2. 检查本地所有会话，执行权威对齐与离线新会话保护：
+        // 2. 检查本地所有会话，执行权威对齐与离线新会话保护。
+        //
+        // "云端到底还有没有这个会话"的判据：
+        //   · 会话表拉成功且非空 → **以会话表为准**（这才是真相，空会话也在里面）
+        //   · 会话表为空 / 没拉到（老服务端、网络失败）→ 退回用消息反推的集合
+        // 顺序不能反：只看消息会把"还没发过消息的新会话"误判成已被删除。
+        final authoritativeSessionIds = serverSessionIdsFromTable ?? serverSessionIds;
         final allLocalSessions = storage.getAllSessions();
         for (var localSession in allLocalSessions) {
+          // 本轮会话表对齐已经处理过的（含刚被推上去的新会话），不再重复判定 ——
+          // 否则刚标成 isSynced 的会话会在同一轮里被当成"云端已删除"清掉。
+          if (touchedThisRound.contains(localSession.id)) continue;
           if (pendingDeleteIds.contains(localSession.id)) {
             // 处于待删除队列的本地会话必须清除
             await storage.deleteSession(localSession.id);
             sessionListChanged = true;
-          } else if (localSession.isSynced && !serverSessionIds.contains(localSession.id)) {
+          } else if (localSession.isSynced && !authoritativeSessionIds.contains(localSession.id)) {
             // 该会话曾经成功上过云端，但服务器现已不存在 -> 说明已被其他设备删除 -> 本地级联同步清除
             await storage.deleteSession(localSession.id);
             sessionListChanged = true;
@@ -827,17 +860,23 @@ class SyncService {
     }
   }
 
-  /// 实时静默推送会话元数据到服务器（用于会话重命名或创建时同步）
-  Future<void> pushSessions({
+  /// 实时静默推送会话元数据到服务器（用于会话新建 / 重命名 / 摘要更新时同步）。
+  ///
+  /// ⚠️ 端点必须是 `/api/sync-sessions`（用户身份校验），**不是** `/api/agent/sync-sessions`
+  /// （那是 DSH 桥接的 Agent Token 通道）。以前打错了，服务端一校验 token 就 401，
+  /// 而这里只吞成一行 debugPrint —— 于是"会话标题从来没同步成功过"这件事，
+  /// 两端界面上都完全看不出来。
+  /// @returns 是否真的推上去了（服务端确认 2xx）。
+  Future<bool> pushSessions({
     required String userId,
     required List<ChatSession> sessions,
     String? clientSessionId,
   }) async {
     final cleanUserId = userId.trim();
-    if (cleanUserId.isEmpty || sessions.isEmpty) return;
+    if (cleanUserId.isEmpty || sessions.isEmpty) return false;
 
     try {
-      final url = '$serverBaseUrl/api/agent/sync-sessions';
+      final url = '$serverBaseUrl/api/sync-sessions';
       await _dio.post(
         url,
         data: {
@@ -846,10 +885,144 @@ class SyncService {
         },
         options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
+      return true;
     } catch (e) {
       _checkAndTriggerForceLogout(e);
       debugPrint('[SyncService] Push sessions silent error: $e');
+      return false;
     }
+  }
+
+  /// 拉取云端的会话元数据表（标题 / 创建时间 / 摘要 / 未读数…）。
+  ///
+  /// 必须与 [pullAndMergeMessages] 分开：**还没发过消息的空会话只存在于这张表里**，
+  /// 光靠消息永远反推不出来（那正是"电脑上新建的会话手机上完全看不到"的根因）。
+  ///
+  /// 返回 `null` 表示这次没拉成（网络 / 权限 / 服务端还是老版本）——
+  /// 调用方必须**跳过**会话对齐，绝不能把 null 当成"云端一个会话都没有"去删本地。
+  Future<List<ChatSession>?> pullSessions({
+    required String userId,
+    String? clientSessionId,
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty) return null;
+    try {
+      final url = '$serverBaseUrl/api/sessions/$cleanUserId';
+      final response = await _dio.get(
+        url,
+        options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
+      );
+      if (response.statusCode == 200 && response.data is List) {
+        final out = <ChatSession>[];
+        for (final item in response.data as List) {
+          if (item is Map) {
+            try {
+              final s = ChatSession.fromMap(item);
+              if (s.id.trim().isNotEmpty) out.add(s);
+            } catch (_) {}
+          }
+        }
+        return out;
+      }
+      return null;
+    } catch (e) {
+      _checkAndTriggerForceLogout(e);
+      debugPrint('[SyncService] Pull sessions silent error: $e');
+      return null;
+    }
+  }
+
+  /// 把云端会话表合并进本地。
+  ///
+  /// [touchedOut] 会收到"这一轮已经处理过"的会话 id。调用方后续的会话对齐
+  /// **必须跳过这些 id** —— 否则本轮刚被标成 `isSynced` 的新会话，会被
+  /// "云端表里还没有它 → 判定为已被删除"当场清掉。
+  ///
+  /// @returns 本地会话列表是否发生了变化（调用方据此通知 UI 重新载入）
+  Future<bool> _mergeRemoteSessions(
+    List<ChatSession> remote,
+    Set<String> pendingDeleteIds, {
+    required String userId,
+    String? clientSessionId,
+    Set<String>? touchedOut,
+  }) async {
+    final storage = StorageService.instance;
+    var changed = false;
+
+    // ── 服务端会话表为空：这不是"用户把所有会话都删了"，而是这套机制刚上线 ──
+    // 升级后第一次同步时服务端 `sessions_v2.json` 还是空的，而本地几十个老会话
+    // 在历史数据里默认 `isSynced == true`。若按"云端没有 → 删本地"处理，
+    // 会把用户所有历史会话一次性清空。这里反过来做：以本地为准反向建档。
+    if (remote.isEmpty) {
+      final toPush = <ChatSession>[];
+      for (final s in storage.getAllSessions()) {
+        if (pendingDeleteIds.contains(s.id)) continue;
+        // 这一轮没有权威依据，本地会话一律不许删
+        touchedOut?.add(s.id);
+        if (!s.isSynced) {
+          s.isSynced = true;
+          await storage.saveSession(s);
+        }
+        toPush.add(s);
+      }
+      if (toPush.isNotEmpty) {
+        await pushSessions(userId: userId, sessions: toPush, clientSessionId: clientSessionId);
+      }
+      return false;
+    }
+
+    final remoteById = <String, ChatSession>{for (final s in remote) s.id: s};
+
+    // 1) 云端有、本地没有 → 直接建出来（**空会话就是在这一步出现的**）
+    for (final r in remote) {
+      if (pendingDeleteIds.contains(r.id)) continue;
+      if (storage.hasSession(r.id)) continue;
+      r.isSynced = true;
+      await storage.saveSession(r);
+      touchedOut?.add(r.id);
+      changed = true;
+    }
+
+    // 2) 逐条对齐本地已有会话
+    for (final l in storage.getAllSessions()) {
+      if (pendingDeleteIds.contains(l.id)) continue;
+      final r = remoteById[l.id];
+      if (r == null) {
+        if (l.isSynced) {
+          // 云端确实删了它（另一台设备上删的）→ 本地跟着删
+          await storage.deleteSession(l.id);
+          changed = true;
+        } else {
+          // 本地新建、还没推上去 → 反向补传（会话元数据 + 消息都推），
+          // 绝不能因为"云端没有"就删掉
+          final msgs = storage.getMessagesForSession(l.id);
+          if (msgs.isNotEmpty) {
+            await pushMessages(userId: userId, messages: msgs, clientSessionId: clientSessionId);
+          }
+          l.isSynced = true;
+          await storage.saveSession(l);
+          await pushSessions(userId: userId, sessions: [l], clientSessionId: clientSessionId);
+          touchedOut?.add(l.id);
+        }
+        continue;
+      }
+      // 两边都有：按 updatedAt 取新（"最后写入者赢"），
+      // 否则拿着旧本地副本回推会把另一台设备刚改的标题盖回去。
+      if (!l.isSynced || r.updatedAt.isAfter(l.updatedAt)) {
+        l.title = r.title;
+        l.updatedAt = r.updatedAt;
+        l.summary = r.summary;
+        l.lastSummarizedIndex = r.lastSummarizedIndex;
+        if (r.model != null && r.model!.isNotEmpty) l.model = r.model;
+        if (r.workspace != null && r.workspace!.isNotEmpty) l.workspace = r.workspace;
+        l.isSynced = true;
+        await storage.saveSession(l);
+        touchedOut?.add(l.id);
+        changed = true;
+      }
+    }
+
+    return changed;
   }
 
   /// 从云端拉取用户设置配置

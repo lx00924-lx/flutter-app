@@ -392,16 +392,16 @@ class MessageBubble extends StatelessWidget {
       child: Stack(
         children: [
           ClipRRect(
-            borderRadius: hasImagesOnly
-                ? BorderRadius.only(
-                    topLeft: const Radius.circular(16),
-                    topRight: const Radius.circular(16),
-                    bottomLeft: Radius.circular(isUser ? 16 : 4),
-                    bottomRight: Radius.circular(isUser ? 4 : 16),
-                  )
-                : BorderRadius.circular(10),
+            // 「只有图」时圆角交给气泡统一裁切（气泡已设 clipBehavior），
+            // 这里必须是 0 —— 否则两层圆角叠加，交汇处会露出气泡底色（蓝边）。
+            // 图文混排时气泡有 14px padding，图片自己带 10 的圆角是合适的。
+            borderRadius: hasImagesOnly ? BorderRadius.zero : BorderRadius.circular(10),
             child: Container(
               color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9),
+              // 缩略图高度上限：以前是 `width: double.infinity` 且不限高，
+              // 竖图会顶满一屏（用户：「图片占用显示太大了」）。
+              // 220 大约是「一眼能认出是什么、又不抢整屏」的折中。
+              constraints: const BoxConstraints(maxHeight: 220),
               child: Image(
                 image: imgProvider,
                 width: double.infinity,
@@ -564,6 +564,11 @@ class MessageBubble extends StatelessWidget {
                   maxWidth: MediaQuery.of(context).size.width - 44,
                 ),
                 padding: hasImagesOnly ? EdgeInsets.zero : const EdgeInsets.all(14),
+                // ⚠️ 让气泡自己裁切子内容。以前图片自带一层 ClipRRect（圆角 16/10），
+                //    和气泡的圆角（16/4）不一致，交汇处会露出气泡底色 ——
+                //    用户看到的就是「图片下面有个蓝色的气泡边」。
+                //    现在圆角只有一份来源（这个 Container），子内容不再画自己的框。
+                clipBehavior: Clip.antiAlias,
                 decoration: BoxDecoration(
                   color: isUser
                       ? const Color(0xFF0284C7)
@@ -691,7 +696,12 @@ class MessageBubble extends StatelessWidget {
                         // 流式期间不折叠：内容还在长，折起来反而看不清进度
                         collapsible: !message.isStreaming,
                         // 流式期间也不走 Markdown（半截语法会闪 + O(n²) 重解析）
-                        streaming: message.isStreaming,
+                        //
+                        // ⚠️ 必须**还有正文**才算流式：`streaming` 一开就会套上底部渐隐的
+                        //    ShaderMask，而"正在思考中..."那种 7 个字的占位文本只有两行高，
+                        //    整段都落在渐变段里 —— 用户看到的是一块发灰、像盖了层白蒙版的字。
+                        //    蒙版只属于"正在往外长正文"的那个状态，占位提示不该有。
+                        streaming: message.isStreaming && message.content.isNotEmpty,
                         // 气泡底色：折起来时底部渐隐要盖在它上面
                         fadeColor: isDark ? const Color(0xFF1E293B) : Colors.white,
                         builders: {
