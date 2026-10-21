@@ -125,6 +125,25 @@ class StorageService {
     }
   }
 
+  /// 消息库里出现过的所有 sessionId（含**没有任何会话指向**的那些）。
+  ///
+  /// 用途：把"孤儿的消息"重新接回会话。会话被误删时，聊天记录有可能还躺在
+  /// messages_box 里 —— 没有会话指向它，界面上就一条都看不见，用户以为数据没了。
+  /// 这个方法是那条找回路径的起点（见 ChatProvider._rebuildOrphanSessions）。
+  Set<String> getAllSessionIdsFromMessages() {
+    final box = _messagesBox;
+    final ids = <String>{};
+    if (box == null) return ids;
+    for (var key in box.keys) {
+      final val = box.get(key);
+      if (val is Map) {
+        final sid = (val['sessionId'] ?? '').toString().trim();
+        if (sid.isNotEmpty) ids.add(sid);
+      }
+    }
+    return ids;
+  }
+
   bool hasMessage(String messageId) {
     final box = _messagesBox;
     return box != null && box.containsKey(messageId);

@@ -1274,6 +1274,11 @@ class ChatProvider extends ChangeNotifier {
 
   void loadSessions() {
     _sessions = _storage.getAllSessions();
+    // 会话被误删之后，聊天记录有可能还躺在本地 messages box 里。
+    // 没有会话指向它，界面上就一条都看不见 —— 用户看到的就是"数据全没了"。
+    // 这里先把孤儿消息接回会话，再走下面的"当前会话是否有效"判断：
+    // 顺序反了的话，"一个会话都没有"会直接新建一个空对话把真相盖掉。
+    _rebuildOrphanSessions();
     // 启动或从存储重新载入时：检查当前选中会话是否依然有效且存在于列表中
     final currentId = _currentSession?.id;
     final current = _currentSession;
@@ -1298,6 +1303,44 @@ class ChatProvider extends ChangeNotifier {
       // 列表为空，自动创建全新干净会话
       createNewSession();
     }
+  }
+
+  /// 把"有消息、但没有会话指向"的那些会话重新建出来。
+  ///
+  /// 场景（2026-10-22 凌晨实测）：会话同步逻辑曾经把「云端会话表里没有」当成
+  /// 「已被删除」，在另一台设备只有 2 个会话时，把本机其余的会话级联删掉了。
+  /// 那种情况下消息有时仍在本地，只是失去了会话这条索引 —— 界面上完全看不到。
+  /// 这里以消息为准把会话补回来，标题沿用"前面 20 个字"的规则（原名字回不来了）。
+  void _rebuildOrphanSessions() {
+    final known = _sessions.map((s) => s.id).toSet();
+    final orphans = _storage
+        .getAllSessionIdsFromMessages()
+        .where((id) => !known.contains(id))
+        .toList();
+    if (orphans.isEmpty) return;
+    var rebuilt = 0;
+    for (final sid in orphans) {
+      final msgs = _storage.getMessagesForSession(sid);
+      if (msgs.isEmpty) continue;
+      final raw = msgs.first.content.trim();
+      final title = raw.isEmpty
+          ? '恢复的对话'
+          : (raw.length > 20 ? '${raw.substring(0, 20)}…' : raw);
+      final s = ChatSession(
+        id: sid,
+        title: title,
+        createdAt: msgs.first.createdAt,
+        updatedAt: msgs.last.createdAt,
+        // 消息是本地实证存在的，按"已同步"处理：下一轮会把它推回云端会话表
+        isSynced: true,
+      );
+      _sessions.add(s);
+      unawaited(_storage.saveSession(s));
+      rebuilt++;
+    }
+    if (rebuilt == 0) return;
+    _sessions.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    debugPrint('[ChatProvider] 已从本地消息恢复 $rebuilt 个会话（会话列表曾经丢失）');
   }
 
   void _silentSyncFromServer() {
