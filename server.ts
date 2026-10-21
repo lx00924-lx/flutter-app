@@ -5140,6 +5140,19 @@ if %errorlevel% neq 0 (
     };
     pendingQuestions.set(question.questionId, { ...payload, token: qToken, userId: userId || undefined });
     savePendingDecisions();
+    // 诊断：选择框到底推给了谁。
+    // 症状是"手机发起的提问，框只出在电脑上"—— 这种情况光看代码分不清是
+    // （a）推送没发出去、（b）发给了错的 userId、（c）手机端压根没连推送通道。
+    // 三者在现场唯一的区别就是下面这行里列出的连接。
+    const qTargets = [...appSockets.values()].filter((c) => c.userId === userId);
+    console.log(
+      `[选择框] 推送 userId=${userId || "(空)"} question=${question.questionId} ｜ 推送通道连接：` +
+        (qTargets.length
+          ? qTargets
+              .map((c) => `${c.deviceType}${c.ws.readyState === WSWebSocket.OPEN ? "(open)" : "(closed)"}`)
+              .join(", ")
+          : "无"),
+    );
     if (userId) io.to(`user_${userId}`).emit("agent_question", payload);
     else io.emit("agent_question", payload);
     // 正在流式接收的那一轮也顺手带一份（推送通道没连上时 SSE 是唯一活路）

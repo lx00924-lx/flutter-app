@@ -107,6 +107,14 @@ class SyncService {
   String _pushClientSessionId = '';
   String _pushDeviceType = 'mobile';
   bool _pushClosedByUs = false;
+  /// 上一次**收到任何帧**的时刻（含服务端每 20 秒一次的 ping）。
+  ///
+  /// 用来识别"半死连接"：中继重启、隧道中断、手机切网时，客户端 socket 常常
+  /// 长时间不报错（TCP 半开），`onDone` / `onError` 都不触发 —— 于是
+  /// `_pushConnected` 永远是 true，看着像连着，实际一个事件都收不到。
+  /// 而选择框、审批这类事件**只走推送通道**，表现就成了"手机上永远不弹框、
+  /// 电脑上等一会才冒出来"（后者是别的路径兜到的）。实测 2026-10-22 凌晨。
+  DateTime? _pushLastFrameAt;
 
   /// 推送通道是否已连通（界面与轮询频率据此自适应）
   bool get pushConnected => _pushConnected;
@@ -191,6 +199,8 @@ class SyncService {
     _pushSub = _pushChannel!.stream.listen(
       (raw) {
         _pushRetries = 0;
+        // 任何一帧都算"活着"（服务端每 20 秒会发一次 ping，见下方定时器注释）
+        _pushLastFrameAt = DateTime.now();
         if (!_pushConnected) {
           _pushConnected = true;
           debugPrint('[SyncService] 推送通道已连通');
@@ -226,8 +236,24 @@ class SyncService {
     );
 
     // 客户端心跳：服务端 20 秒发一次 ping，这里 25 秒回一次，双向都能发现死链
+    _pushLastFrameAt = DateTime.now();
     _pushPingTimer?.cancel();
     _pushPingTimer = Timer.periodic(const Duration(seconds: 25), (_) {
+      if (!_pushConnected) return;
+      // 半死检测（见 _pushLastFrameAt 的注释）：服务端 20 秒必发一次 ping，
+      // 75 秒一帧都没收到说明这条连接已经名存实亡 —— 主动断开重连，
+      // 否则它会一直"看起来连着"，而选择框/审批永远到不了。
+      final lastAt = _pushLastFrameAt;
+      if (lastAt != null && DateTime.now().difference(lastAt) > const Duration(seconds: 75)) {
+        debugPrint('[SyncService] 推送通道 75 秒无任何帧，判定半死，主动断开重连');
+        _pushLastFrameAt = null;
+        _handlePushDown();
+        try {
+          _pushChannel?.sink.close();
+        } catch (_) {}
+        _pushChannel = null;
+        return;
+      }
       if (_pushConnected) {
         try {
           _pushChannel?.sink.add(jsonEncode({'type': 'ping'}));
@@ -239,6 +265,7 @@ class SyncService {
   void _handlePushDown() {
     final wasConnected = _pushConnected;
     _pushConnected = false;
+    _pushLastFrameAt = null;
     _pushPingTimer?.cancel();
     if (wasConnected) onPushEvent?.call('push_disconnected', const {});
     if (!_pushClosedByUs) _schedulePushReconnect();

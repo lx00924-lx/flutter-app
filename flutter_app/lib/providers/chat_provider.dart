@@ -640,6 +640,16 @@ class ChatProvider extends ChangeNotifier {
       // 用户可能把通知清过、或手机重启过，而电脑端还在等 —— 这类"卡住"的状态
       // 必须持续可见（用户明确要求：别因为划掉通知就消失）。
       if (_periodicSyncTicks % 50 == 0) _refreshPendingNotifications();
+      // 每 12 秒对一次"挂起的选项框 / 审批"：推送通道半死时这是唯一的活路。
+      //
+      // 以前只在 App 启动和收到 `push_connected` 时各拉一次。可是推送通道一旦
+      // 半死（TCP 半开，`onDone` 不触发，`_pushConnected` 永远是 true），
+      // 这两个时机都不会再出现 —— 选择框就永远到不了。实测症状（2026-10-22 凌晨）：
+      // 手机上发起、框只出在电脑上，手机等到过期都没见过它。
+      // 两个调用内部都有幂等短路（已有挂起项时直接 return，不发请求），所以
+      // 每 12 秒问一次的开销可以忽略。
+      unawaited(refreshPendingQuestions());
+      unawaited(refreshPendingApprovals());
       // 设置补推：服务器没开时改的设置会被打上待补推标记（见 SettingsProvider），
       // 这里周期性试一次。没有标记时是空操作，所以放在提前 return 之前也几乎零开销。
       unawaited(settingsProvider.retryPendingSettingsPush());
