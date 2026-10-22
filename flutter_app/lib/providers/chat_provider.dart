@@ -1335,12 +1335,74 @@ class ChatProvider extends ChangeNotifier {
         isSynced: true,
       );
       _sessions.add(s);
-      unawaited(_storage.saveSession(s));
+      // 落盘的 Future 必须留着：它还没完成时，任何从磁盘读会话的同步逻辑
+      // 都看不到这些刚恢复的会话（下面 _pushRebuiltSessions 要等它们）。
+      _rebuiltSessionWrites.add(_storage.saveSession(s));
+      _rebuiltSessionIds.add(sid);
       rebuilt++;
     }
     if (rebuilt == 0) return;
     _sessions.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
     debugPrint('[ChatProvider] 已从本地消息恢复 $rebuilt 个会话（会话列表曾经丢失）');
+    // 恢复完立刻把它们推回云端，不等下一轮同步。
+    //
+    // 为什么不能等：`_silentSyncFromServer()` 里那条链是从**磁盘**读会话的，
+    // 而 saveSession 是异步的 —— 同步跑得比落盘快，就会只读到落盘前的那一份。
+    // 实测（2026-10-22 21:0x）：本地恢复了 10 个会话，云端只收到 1 个，
+    // 消息一条都没上去。这里显式 await 落盘再推，才是确定的。
+    unawaited(_pushRebuiltSessions());
+  }
+
+  /// 上面那些"从本地消息恢复出来的会话"的落盘 Future（等它们完成才能推）。
+  final List<Future<void>> _rebuiltSessionWrites = [];
+  final List<String> _rebuiltSessionIds = [];
+
+  /// 把刚恢复的会话（连同消息）立刻推回云端。
+  ///
+  /// 与 `_mergeRemoteSessions` 里的反向补传是同一件事，区别只在于**时机**：
+  /// 那里等的是下一轮同步，而恢复会话恰恰发生在那轮同步之前，所以必须自己推一次。
+  Future<void> _pushRebuiltSessions({int attempt = 0}) async {
+    final writes = List<Future<void>>.from(_rebuiltSessionWrites);
+    final ids = List<String>.from(_rebuiltSessionIds);
+    if (ids.isEmpty) return;
+    try {
+      if (writes.isNotEmpty) await Future.wait(writes);
+      final userId = settingsProvider.syncUserId;
+      // 冷启动时 syncUserId 可能还没从本地设置里读出来，这时推等于白发。
+      // 等 3 秒再试一次；两次都不行就交给下一轮同步（它走的是另一条路径）。
+      if (userId.isEmpty) {
+        if (attempt < 2) {
+          await Future<void>.delayed(const Duration(seconds: 3));
+          return _pushRebuiltSessions(attempt: attempt + 1);
+        }
+        debugPrint('[ChatProvider] 恢复会话未能推送：userId 还没就绪');
+        return;
+      }
+      _rebuiltSessionWrites.clear();
+      _rebuiltSessionIds.clear();
+      final sessions =
+          _sessions.where((s) => ids.contains(s.id)).toList();
+      if (sessions.isEmpty) return;
+      await SyncService.instance.pushSessions(
+        userId: userId,
+        sessions: sessions,
+        clientSessionId: settingsProvider.clientSessionId,
+      );
+      var pushed = 0;
+      for (final s in sessions) {
+        final msgs = _storage.getMessagesForSession(s.id);
+        if (msgs.isEmpty) continue;
+        final ok = await SyncService.instance.pushMessages(
+          userId: userId,
+          messages: msgs,
+          clientSessionId: settingsProvider.clientSessionId,
+        );
+        if (ok) pushed += msgs.length;
+      }
+      debugPrint('[ChatProvider] 已把 ${sessions.length} 个恢复会话、$pushed 条消息推回云端');
+    } catch (e) {
+      debugPrint('[ChatProvider] 推回恢复会话失败: $e');
+    }
   }
 
   void _silentSyncFromServer() {
