@@ -63,12 +63,18 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
               backgroundColor: Colors.redAccent,
               foregroundColor: Colors.white,
             ),
-            onPressed: () {
+            onPressed: () async {
               Navigator.pop(ctx);
-              context.read<ChatProvider>().deleteSession(session.id);
-              ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
-                SnackBar(content: Text('已删除会话「${session.title}」')),
-              );
+              final messenger = ScaffoldMessenger.of(context);
+              final ok = await context.read<ChatProvider>().deleteSession(session.id);
+              if (!mounted) return;
+              messenger
+                ..clearSnackBars()
+                ..showSnackBar(SnackBar(
+                  content: Text(ok
+                      ? '已删除会话「${session.title}」'
+                      : '连不上服务器，暂时不能删除（离线时不允许删会话）'),
+                ));
             },
             child: const Text('确认删除'),
           ),
@@ -105,17 +111,25 @@ class _SessionManagementScreenState extends State<SessionManagementScreen> {
               backgroundColor: Colors.redAccent,
               foregroundColor: Colors.white,
             ),
-            onPressed: () {
+            onPressed: () async {
               Navigator.pop(ctx);
               final count = ids.length;
-              context.read<ChatProvider>().deleteSessions(ids);
-              setState(() {
-                _selectedIds.clear();
-                _isBatchMode = false;
-              });
-              ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
-                SnackBar(content: Text('成功批量删除 $count 个会话')),
-              );
+              final messenger = ScaffoldMessenger.of(context);
+              final ok = await context.read<ChatProvider>().deleteSessions(ids);
+              if (!mounted) return;
+              if (ok) {
+                setState(() {
+                  _selectedIds.clear();
+                  _isBatchMode = false;
+                });
+              }
+              messenger
+                ..clearSnackBars()
+                ..showSnackBar(SnackBar(
+                  content: Text(ok
+                      ? '成功批量删除 $count 个会话'
+                      : '连不上服务器，暂时不能删除（离线时不允许删会话）'),
+                ));
             },
             child: const Text('确认彻底删除'),
           ),

@@ -1176,19 +1176,26 @@ class SyncService {
     }
   }
 
-  /// 实时静默删除云端会话（网络失败时自动存入离线待删除队列）
-  Future<void> deleteSession({
+  /// 实时静默删除云端会话。
+  ///
+  /// **返回是否删成功。** 调用方必须按这个结果决定本地动不动 —— 删不掉就不删。
+  ///
+  /// 不再"失败就排进待重发队列"：既然规则是**离线时禁止删除**，就不该存在
+  /// "离线的删除"这种东西。排队的删除指令会在上线后补发，而到那时本地早已
+  /// 没有这条会话、用户当时想删的东西也可能早就不是同一件事了（2026-10-22 的
+  /// 误删事故就是这条链路上的推论）。
+  Future<bool> deleteSession({
     required String userId,
     required String sessionId,
     String? clientSessionId,
   }) async {
     final cleanUserId = userId.trim();
     final cleanSessionId = sessionId.trim();
-    if (cleanUserId.isEmpty || cleanSessionId.isEmpty) return;
+    if (cleanUserId.isEmpty || cleanSessionId.isEmpty) return false;
 
     try {
       final url = '$serverBaseUrl/api/delete-session';
-      await _dio.post(
+      final resp = await _dio.post(
         url,
         data: {
           'userId': cleanUserId,
@@ -1196,13 +1203,15 @@ class SyncService {
         },
         options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
-      // 成功发送后从本地待重试删除队列中移除
-      await StorageService.instance.removePendingDeleteSessionId(cleanSessionId);
+      if (resp.statusCode == 200) {
+        await StorageService.instance.removePendingDeleteSessionId(cleanSessionId);
+        return true;
+      }
+      return false;
     } catch (e) {
       _checkAndTriggerForceLogout(e);
-      // 网络故障或服务器未开启，安全记入本地待重试队列
-      await StorageService.instance.addPendingDeleteSessionId(cleanSessionId);
-      debugPrint('[SyncService] Delete session recorded in pending queue: $e');
+      debugPrint('[SyncService] 删除会话失败（本地将保持不动）: $e');
+      return false;
     }
   }
 

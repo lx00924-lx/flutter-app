@@ -3288,6 +3288,16 @@ async function startServer() {
         allSessions[userId] = Array.from(byId.values());
         await safeWriteJSON(SESSIONS_FILE, allSessions);
       });
+      // 通知这个账号的其它设备："会话表变了，来对一次账"。
+      //
+      // 不加这一句时，另一台只能靠 12 秒一次的轮询发现新建/改名 —— 用户看到的是
+      // "我在这边建了会话，那边要过一会儿才出现"，而期间任何一次对账失败都会让它
+      // 更晚。这里只发一个**信号**（不带数据）：真正的合并逻辑仍然只在客户端，
+      // 避免两端各写一套"谁覆盖谁"的规则。
+      //
+      // `io.to(user_<id>)` 会被推送通道的包装层镜像到 /ws/app，所以手机/电脑都能收到。
+      // 发起方自己也会收到，但它收到后只是再对一次账，不会产生新的写入 → 不会自激。
+      io.to(`user_${userId}`).emit("sessions_updated", { userId });
       res.json({ success: true });
     } catch (error) {
       console.error("Sync sessions error:", error);

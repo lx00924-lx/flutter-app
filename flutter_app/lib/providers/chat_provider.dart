@@ -589,8 +589,27 @@ class ChatProvider extends ChangeNotifier {
         }
         return;
       case 'message_deleted':
-      case 'session_deleted':
         // 删除是用户主动行为，不该点亮"有新回复"
+        if (!_isGenerating) _silentSyncFromServer();
+        return;
+      case 'session_deleted':
+        // 另一台设备删了会话 → 服务端广播（带明确的 sessionId）→ 本机跟着删。
+        //
+        // 这跟「对账时发现云端没有它」是两回事：那个是推测、会误删（2026-10-22
+        // 删掉整段对话的就是它）；这个是**明确的指令**，带 id，有才删、没有就不动。
+        // 发起删除的那台自己也会收到（推送通道发全部设备），此时它已经删过了，
+        // 下面那句 `_sessions.any(...)` 会返回 false，自然就跳过了 —— 幂等。
+        final deletedSid = data['sessionId']?.toString() ?? '';
+        if (deletedSid.isNotEmpty && _sessions.any((s) => s.id == deletedSid)) {
+          unawaited(_applyRemoteSessionDeleted(deletedSid));
+        } else if (!_isGenerating) {
+          _silentSyncFromServer();
+        }
+        return;
+      case 'sessions_updated':
+        // 另一台设备新建/改名了会话（服务端在 /api/sync-sessions 里发的信号）。
+        // 收到就立刻对一次账，不用等 12 秒一次的轮询 —— 那正是"新建了要过一会儿
+        // 才在另一台出现"的来源。
         if (!_isGenerating) _silentSyncFromServer();
         return;
       case 'agent_waiting_approval':
@@ -1268,6 +1287,26 @@ class ChatProvider extends ChangeNotifier {
     return true;
   }
 
+  /// 收到另一台设备的删除广播后，把这台也删掉。
+  ///
+  /// 与 [deleteSession] 的区别：那个要等服务端确认（因为它是**发起方**），
+  /// 这个是在**服务端已经删完之后**才收到的，不需要再问一遍，直接跟。
+  Future<void> _applyRemoteSessionDeleted(String sessionId) async {
+    await _storage.deleteSession(sessionId);
+    _sessions.removeWhere((s) => s.id == sessionId);
+    if (_currentSession?.id == sessionId) {
+      if (_sessions.isNotEmpty) {
+        selectSession(_sessions.first);
+      } else {
+        createNewSession();
+      }
+    } else {
+      notifyListeners();
+    }
+    debugPrint('[ChatProvider] 另一台设备删除了会话 $sessionId，本地已跟进');
+    if (!_isGenerating) _silentSyncFromServer();
+  }
+
   void reloadFromStorage() {
     loadSessions();
   }
@@ -1512,9 +1551,30 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
-  void deleteSession(String sessionId) {
+  /// 删除一个会话。
+  ///
+  /// **曾经同步过的会话，必须服务端确认删掉了才删本地。** 服务端不可达时返回
+  /// false、本地**一个字节都不动**，由界面提示「离线，暂时不能删除」。
+  ///
+  /// 为什么不能"先删本地、删除指令排队等上线再补发"：补发发生在几分钟甚至几小时
+  /// 之后，那时本地已经没有这条会话，用户当时想删的东西也可能早就变了 —— 而补发
+  /// 出去的动作是确定的。**慢一拍的删除比删不掉更危险。**
+  Future<bool> deleteSession(String sessionId) async {
     final target = _sessions.where((s) => s.id == sessionId).firstOrNull;
     final wasSynced = target?.isSynced ?? true;
+    final cloudBound = settingsProvider.settings.isLoggedIn &&
+        settingsProvider.settings.loginAccount.trim().isNotEmpty &&
+        settingsProvider.settings.loginAccount.trim() != 'guest';
+
+    // 从没上过云的会话，云端本来就没有它，本地删掉不需要问任何人
+    if (wasSynced && cloudBound) {
+      final ok = await SyncService.instance.deleteSession(
+        userId: settingsProvider.syncUserId,
+        sessionId: sessionId,
+        clientSessionId: settingsProvider.clientSessionId,
+      );
+      if (!ok) return false;
+    }
 
     _storage.deleteSession(sessionId);
     _sessions.removeWhere((s) => s.id == sessionId);
@@ -1527,31 +1587,36 @@ class ChatProvider extends ChangeNotifier {
     } else {
       notifyListeners();
     }
-
-    // 只有曾经成功同步过云端的会话才需要向云端发起删除通知或存入重发队列
-    if (wasSynced) {
-      SyncService.instance.deleteSession(
-        userId: settingsProvider.syncUserId,
-        sessionId: sessionId,
-        clientSessionId: settingsProvider.clientSessionId,
-      );
-    }
+    return true;
   }
 
-  void deleteSessions(List<String> sessionIds) {
-    if (sessionIds.isEmpty) return;
-    for (final id in sessionIds) {
-      final target = _sessions.where((s) => s.id == id).firstOrNull;
-      final wasSynced = target?.isSynced ?? true;
+  /// 批量删除会话。规则同 [deleteSession]：**服务端确认删掉才动本地。**
+  ///
+  /// 中途失败时服务端可能已经删掉了一部分，本地则一个都没动 —— 表面上不一致，
+  /// 但服务端每删一条都会广播 `session_deleted`，本机收到广播后会把那些补齐，
+  /// 所以最终仍然一致，而且永远不会出现"本地删了、云端还在"。
+  Future<bool> deleteSessions(List<String> sessionIds) async {
+    if (sessionIds.isEmpty) return true;
+    final cloudBound = settingsProvider.settings.isLoggedIn &&
+        settingsProvider.settings.loginAccount.trim().isNotEmpty &&
+        settingsProvider.settings.loginAccount.trim() != 'guest';
 
-      _storage.deleteSession(id);
-      if (wasSynced) {
-        SyncService.instance.deleteSession(
+    if (cloudBound) {
+      for (final id in sessionIds) {
+        final target = _sessions.where((s) => s.id == id).firstOrNull;
+        // 从没上过云的会话，云端没有它，跳过
+        if (!(target?.isSynced ?? true)) continue;
+        final ok = await SyncService.instance.deleteSession(
           userId: settingsProvider.syncUserId,
           sessionId: id,
           clientSessionId: settingsProvider.clientSessionId,
         );
+        if (!ok) return false;
       }
+    }
+
+    for (final id in sessionIds) {
+      _storage.deleteSession(id);
     }
     _sessions.removeWhere((s) => sessionIds.contains(s.id));
     if (_currentSession != null && sessionIds.contains(_currentSession!.id)) {
@@ -1563,6 +1628,7 @@ class ChatProvider extends ChangeNotifier {
     } else {
       notifyListeners();
     }
+    return true;
   }
 
   int getMessageCount(String sessionId) {
