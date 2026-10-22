@@ -672,9 +672,11 @@ class ChatProvider extends ChangeNotifier {
       // 设置补推：服务器没开时改的设置会被打上待补推标记（见 SettingsProvider），
       // 这里周期性试一次。没有标记时是空操作，所以放在提前 return 之前也几乎零开销。
       unawaited(settingsProvider.retryPendingSettingsPush());
-      // 推送通道连通时降到 60 秒一次（只当兜底）：12 秒拉取每天每台设备 7200 次，
-      // 有长连接顶着就不必这么密。
-      if (SyncService.instance.pushConnected && _periodicSyncTicks % 5 != 0) return;
+      // 推送通道只负责"推"，它丢了的那些还得靠这里的对账补 —— 所以**不再因为
+      // 推送已连上就把轮询降到 60 秒**。以前那行是
+      // `if (pushConnected && _periodicSyncTicks % 5 != 0) return;`，
+      // 于是"另一端改了名，这一端最多要等一分钟才看见"，而推送一断（手机端一直连不上）
+      // 就彻底靠这一分钟一次的轮询兜着。
       if (!_isGenerating) _silentSyncFromServer();
     });
   }
@@ -1449,6 +1451,10 @@ class ChatProvider extends ChangeNotifier {
       userId: settingsProvider.syncUserId,
       clientSessionId: settingsProvider.clientSessionId,
       onNewMessagesImported: () {
+        // 生成中不动列表：回调会把 _messages 从磁盘重读一遍，而正在流式输出的
+        // 那条消息此刻可能还没落盘，重读会把它覆盖成"上一版"。生成结束后
+        // 下一轮同步自然会刷。
+        if (_isGenerating) return;
         // ⚠️ 必须按「回调执行这一刻」的当前会话恢复，**绝不能**用发起同步时捕获的会话 id。
         // 历史 bug（用户实测）：点历史面板的「+」新建会话时，若上一次同步还在飞，
         // 它的回调会抱着**旧会话 id** 回来把 _currentSession 顶回旧会话 —— 表现为

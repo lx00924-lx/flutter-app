@@ -754,7 +754,18 @@ class SyncService {
           updatedCount++;
         }
 
-        if ((importedCount > 0 || updatedCount > 0 || sessionListChanged) && onNewMessagesImported != null) {
+        if (onNewMessagesImported != null) {
+          // ⚠️ 无条件调用，**不要**再用"这一轮有没有改东西"来决定。
+          //
+          // 以前的条件是 `importedCount>0 || updatedCount>0 || sessionListChanged`，
+          // 而这几个计数只在"确实新增/采用了云端版本"时才涨。一旦某一轮判定
+          // 「本地更新、不该采用」，它什么都不做、回调也不调用 —— 界面就停在旧标题上，
+          // 而磁盘里其实早就是新的了（重启 App 才看到）。
+          //
+          // 2026-10-23 实测：电脑磁盘上会话已改名为 mmmm，界面还显示旧标题，
+          // 重启一次就对了。数据没错，错的是"没通知界面"。
+          //
+          // notifyListeners 的代价是一次重建，远小于「数据对、屏幕错」的代价。
           onNewMessagesImported();
         }
       }
