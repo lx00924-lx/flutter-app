@@ -70,10 +70,18 @@ class SyncService {
       // 15 秒太短：Agent 任务要等本地宿主跑完（服务端上限 300 秒），
       // 请求发出后十几秒没有任何事件就会被 Dio 判成 receive timeout，
       // 手机上表现为"发消息必失败：The request took longer than 0:00:15"。
-      // 这里放宽到 2 分钟，SSE 长连接另外单独设更长的超时（见 streamServerAgentChat）。
-      receiveTimeout: const Duration(minutes: 2),
+      //
+      // 2026-10-23 从 2 分钟提到 5 分钟：首次**全量**拉消息实测 139 秒
+      // （4MB / 208 条，走 Clash 时 Dio 在同一轮里重试了 3 次；同一份数据
+      // 公网单次只要 18 秒）。2 分钟离它太近，超时一次就白拉一整轮。
+      // SSE 长连接另有更长的超时（见 streamServerAgentChat），不受这里影响。
+      receiveTimeout: const Duration(minutes: 5),
       // 发请求的时间。Agent 消息可能带图片（base64 后几百 KB），
       // 15 秒在慢速上行时会不够。
+      //
+      // ⚠️ receiveTimeout 见下方单独说明（2026-10-23 从 2 分钟提到 5 分钟）：
+      // 首次全量拉 4MB 实测要 139 秒（走 Clash 时 Dio 会重试，公网单次只要 18 秒），
+      // 2 分钟的接收超时离它太近，一旦超时就白拉一整轮。
       sendTimeout: const Duration(seconds: 60),
     ),
   );
