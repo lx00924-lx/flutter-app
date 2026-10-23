@@ -1,4 +1,5 @@
 import 'package:hive/hive.dart';
+import 'sync_debug.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../models/app_settings.dart';
@@ -268,7 +269,10 @@ class StorageService {
   /// 所以这个值算错最多导致"多拉一次"，不会导致数据丢失。
   int getLastSyncedSeq() {
     final box = _settingsBox;
-    if (box == null) return 0;
+    if (box == null) {
+      SyncDebug.log('getLastSyncedSeq: settings_box 为 null（box 没打开？）');
+      return 0;
+    }
     try {
       final v = box.get('last_synced_seq');
       if (v is int) return v;
@@ -280,14 +284,22 @@ class StorageService {
 
   Future<void> setLastSyncedSeq(int seq) async {
     final box = _settingsBox;
-    if (box == null || seq < 0) return;
+    if (box == null) {
+      SyncDebug.log('setLastSyncedSeq($seq): settings_box 为 null，写不进去');
+      return;
+    }
+    if (seq < 0) return;
     try {
       final current = getLastSyncedSeq();
+      SyncDebug.log('setLastSyncedSeq($seq): current=$current');
       // 只增不减：seq 是"已经拿到的位置"，回退会让下次重复拉一大段
       if (seq > current) {
         await box.put('last_synced_seq', seq);
+        SyncDebug.log('setLastSyncedSeq($seq): 已写入，回读=${getLastSyncedSeq()}');
       }
-    } catch (_) {}
+    } catch (e) {
+      SyncDebug.log('setLastSyncedSeq($seq) 抛异常: $e');
+    }
   }
 
   List<String> getPendingDeleteSessionIds() {

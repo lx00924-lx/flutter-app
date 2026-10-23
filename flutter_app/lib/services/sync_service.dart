@@ -12,6 +12,7 @@ import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../utils/http_client_helper.dart';
 import 'storage_service.dart';
+import 'sync_debug.dart';
 
 /// 桥接控制指令的下发结果。
 ///
@@ -641,9 +642,16 @@ class SyncService {
       final url = isIncrementalPull
           ? '$serverBaseUrl/api/messages/$cleanUserId?afterSeq=$lastSyncedSeq'
           : '$serverBaseUrl/api/messages/$cleanUserId';
+      SyncDebug.log('拉消息: lastSyncedSeq=$lastSyncedSeq 增量=$isIncrementalPull');
       final response = await _dio.get(
         url,
         options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
+      );
+      SyncDebug.log(
+        '拉消息返回: status=${response.statusCode} '
+        'dataType=${response.data.runtimeType} '
+        'isList=${response.data is List} '
+        'len=${response.data is List ? (response.data as List).length : -1}',
       );
 
       if (response.statusCode == 200 && response.data is List) {
@@ -774,16 +782,24 @@ class SyncService {
         // 反过来（先写盘、游标推进失败）最坏只是下一轮重复拉一次，是安全的。
         try {
           var maxSeq = lastSyncedSeq;
+          var seqSamples = 0;
           for (var item in list) {
             if (item is Map) {
               final s = item['seq'];
-              if (s is num && s.toInt() > maxSeq) maxSeq = s.toInt();
+              if (s is num) {
+                seqSamples++;
+                if (s.toInt() > maxSeq) maxSeq = s.toInt();
+              }
             }
           }
+          SyncDebug.log('游标计算: 带seq的条目=$seqSamples/${list.length} maxSeq=$maxSeq 上次=$lastSyncedSeq');
           if (maxSeq > lastSyncedSeq) {
             await storage.setLastSyncedSeq(maxSeq);
+          } else {
+            SyncDebug.log('游标不推进: maxSeq($maxSeq) <= lastSyncedSeq($lastSyncedSeq)');
           }
         } catch (e) {
+          SyncDebug.log('更新增量游标抛异常: $e');
           debugPrint('[SyncService] 更新增量游标失败（下轮会重复拉一次，无副作用）: $e');
         }
 
