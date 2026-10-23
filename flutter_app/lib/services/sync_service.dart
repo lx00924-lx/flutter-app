@@ -622,7 +622,12 @@ class SyncService {
       // 为什么不用 WebSocket 广播就够了：广播只在对方此刻正好连着时有效。实测
       // 手机的推送通道断过一次 44 分钟，期间删除全部丢失。这里是轮询路径上的
       // 兜底，重复拉到是幂等的。
-      await flushRemoteDeletions(userId: cleanUserId, clientSessionId: clientSessionId);
+      //
+      // 返回的 id 要塞进 pendingDeleteIds：云端那几条可能还在（旧版本补传回去的），
+      // 否则 _mergeRemoteSessions 第 1 步会当场把它们重建，变成每轮删了又建。
+      pendingDeleteIds.addAll(
+        await flushRemoteDeletions(userId: cleanUserId, clientSessionId: clientSessionId),
+      );
 
       // 0c. 先对齐会话表 —— **还没发过消息的空会话只存在于这张表里**，
       //     靠下面的消息列表永远反推不出来。所以必须发生在拉消息之前。
@@ -972,42 +977,68 @@ class SyncService {
   ///
   /// ⚠️ 必须早于 `_mergeRemoteSessions`：那里有"云端缺了 → 反向补传本地"的保险，
   /// 先对账再删就会把已删会话又推回云端（"删掉的会话自己回来了"）。
-  Future<void> flushRemoteDeletions({
+  ///
+  /// @returns 这次按信号删掉的**会话 id**。调用方必须把它们并进本轮的
+  ///          `pendingDeleteIds`：云端可能还留着这些会话（旧版本补传回来的），
+  ///          否则 `_mergeRemoteSessions` 第 1 步"云端有、本地没有 → 建出来"
+  ///          会当场把它们又建回去，形成"每轮删 8 个、每轮又建 8 个"的死循环
+  ///          （2026-10-23 23:2x 实测日志：删会话 8 / 本地本来没有 2，连续 6 轮不变）。
+  Future<Set<String>> flushRemoteDeletions({
     required String userId,
     String? clientSessionId,
   }) async {
     final cleanUserId = userId.trim();
-    if (cleanUserId.isEmpty) return;
+    if (cleanUserId.isEmpty) return const {};
+
+    final deletedSessionIds = <String>{};
     final signals = await pullDeletionSignals(
       userId: cleanUserId,
       clientSessionId: clientSessionId,
     );
-    if (signals.isEmpty) return;
+    if (signals.isEmpty) return const {};
 
     final storage = StorageService.instance;
     var sessionsRemoved = 0;
     var messagesRemoved = 0;
+    var skippedMissing = 0;
+    var failed = 0;
     for (final signal in signals) {
-      final id = (signal['id'] as String?)?.trim() ?? '';
-      final kind = (signal['kind'] as String?)?.trim() ?? '';
-      if (id.isEmpty) continue;
-      if (kind == 'session') {
-        if (storage.hasSession(id)) {
-          await storage.deleteSession(id);
-          sessionsRemoved++;
+      // **逐条兜容错**：某一条删失败（key 有问题、级联删消息时抛错…）不该让
+      // 后面所有信号一起作废 —— 更不能把异常抛到外层，那会让整轮同步被
+      // 静默中断（外层 catch 只打日志），表现就是"信号一直在拉、却一条没删"。
+      try {
+        final id = (signal['id'] as String?)?.trim() ?? '';
+        final kind = (signal['kind'] as String?)?.trim() ?? '';
+        if (id.isEmpty) continue;
+        if (kind == 'session') {
+          // 无论本地有没有，都记进"本轮跳过的 id"：云端那份可能还在，
+          // 不跳过就会被重建。
+          deletedSessionIds.add(id);
+          if (storage.hasSession(id)) {
+            await storage.deleteSession(id);
+            sessionsRemoved++;
+          } else {
+            skippedMissing++;
+          }
+        } else if (kind == 'message') {
+          if (storage.getMessageById(id) != null) {
+            await storage.deleteMessage(id);
+            messagesRemoved++;
+          } else {
+            skippedMissing++;
+          }
         }
-      } else if (kind == 'message') {
-        if (storage.getMessageById(id) != null) {
-          await storage.deleteMessage(id);
-          messagesRemoved++;
-        }
+      } catch (e) {
+        failed++;
+        debugPrint('[SyncService] 执行删除信号失败（已跳过这条）: $e');
       }
     }
-    if (sessionsRemoved > 0 || messagesRemoved > 0) {
-      debugPrint(
-        '[SyncService] 执行远端删除信号：会话 $sessionsRemoved 个、消息 $messagesRemoved 条',
-      );
-    }
+    debugPrint(
+      '[SyncService] 删除信号处理完毕：收到 ${signals.length} 条，'
+      '删会话 $sessionsRemoved、删消息 $messagesRemoved、'
+      '本地本来没有 $skippedMissing、失败 $failed',
+    );
+    return deletedSessionIds;
   }
 
   /// 拉"别的设备删了什么"的清单（服务端 `/api/deletion-signals`）。

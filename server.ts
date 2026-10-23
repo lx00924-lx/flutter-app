@@ -3526,6 +3526,7 @@ async function startServer() {
           s.deletedAt > since,
       );
       res.json(list);
+      console.log(`[DEL-SIG] user=${userId} 下发 ${list.length} 条删除信号（since=${since}）`);
     } catch (error) {
       console.error("Load deletion signals error:", error);
       res.status(500).json({ error: "Failed to load deletion signals" });
