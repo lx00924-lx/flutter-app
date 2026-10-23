@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -5,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/app_settings.dart';
 import '../providers/settings_provider.dart';
+import '../services/sync_service.dart';
 import '../services/update_service.dart';
 import '../services/keep_alive_service.dart';
 import '../services/notification_service.dart';
@@ -20,8 +22,54 @@ import 'harness_settings_screen.dart';
 import 'storage_settings_screen.dart';
 import 'log_console_screen.dart';
 
-class SettingsScreen extends StatelessWidget {
+class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  /// 另一台设备正在改设置时，本页**只读**。
+  ///
+  /// 为什么要有这块：设置是整份推送的（54 个字段一次），两端同时改会互相覆盖 ——
+  /// 在 A 上刚调好字体，B 改个头像整份推上去，字体又变回去。时间戳只能裁决
+  /// 「先后」，裁决不了「同时」，所以进这一页先抢一把锁（服务端 90 秒过期）。
+  ///
+  /// 只读而不是"不让进"：至少让人看得见当前值在变，不会一脸茫然。
+  bool _lockedByOther = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _acquireSettingsLock();
+  }
+
+  @override
+  void dispose() {
+    // 离开设置页就放锁。注意 push 进子页面（API/语音/个性化…）时本页不会
+    // dispose，锁会一直握着 —— 这是想要的：那些子页面也在改同一份设置。
+    _releaseSettingsLock();
+    super.dispose();
+  }
+
+  Future<void> _acquireSettingsLock() async {
+    final sp = context.read<SettingsProvider>();
+    final ok = await SyncService.instance.acquireSettingsLock(
+      userId: sp.syncUserId,
+      clientSessionId: sp.clientSessionId,
+    );
+    if (!mounted) return;
+    if (!ok) setState(() => _lockedByOther = true);
+  }
+
+  void _releaseSettingsLock() {
+    final sp = context.read<SettingsProvider>();
+    unawaited(SyncService.instance.releaseSettingsLock(
+      userId: sp.syncUserId,
+      clientSessionId: sp.clientSessionId,
+    ));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -33,7 +81,45 @@ class SettingsScreen extends StatelessWidget {
       appBar: AppBar(
         title: const Text('系统设置'),
       ),
-      body: ListView(
+      body: Column(
+        children: [
+          // 另一台正在改设置 → 一条常驻提示 + 整页只读。
+          //
+          // 常驻而不是"弹一下"：弹窗会被划掉，划掉之后用户就会去点、
+          // 改、然后被覆盖，接着开始怀疑"设置存不住"。
+          if (_lockedByOther)
+            Container(
+              width: double.infinity,
+              color: isDark ? const Color(0xFF3A2A12) : const Color(0xFFFFF4E5),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  const Icon(Icons.lock_outline, size: 18, color: Color(0xFFD97706)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '另一台设备正在修改设置，这里暂时只能查看',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: isDark ? const Color(0xFFFCD34D) : const Color(0xFF92400E),
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      setState(() => _lockedByOther = false);
+                      _acquireSettingsLock();
+                    },
+                    child: const Text('重试', style: TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
+            ),
+          Expanded(
+            // 只读时挡住所有点击/滑动，避免"看着能点、点了白改"。
+            child: AbsorbPointer(
+              absorbing: _lockedByOther,
+              child: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         children: [
           // 头部版本与状态
@@ -244,6 +330,10 @@ class SettingsScreen extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 24),
+        ],
+              ),
+            ),
+          ),
         ],
       ),
     );

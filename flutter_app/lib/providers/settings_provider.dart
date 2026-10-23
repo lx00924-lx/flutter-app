@@ -1176,7 +1176,35 @@ class SettingsProvider extends ChangeNotifier {
         // 客户端据此判定"电脑端刚上线"，又去拉一次目录（App 时不时闪一下的根因）。
         // 注意：中继与 pushSettings 两侧也已不再上传/存储这个字段，这里是第三道闸。
         final keepHarnessOnline = _settings.isHarnessOnline;
-        _settings = cloud;
+
+        // 该不该用云端这一份覆盖本地？看**版本号**（服务端毫秒时间戳）。
+        //
+        // 2026-10-23 定的规则：设置同步的目的就是「另一台跟着变」，
+        // 所以云端更新时**整份覆盖，空值也覆盖**（「我主动清空了」也是合法改动）。
+        // 唯一的例外是「本地刚改完、推送还在路上」——那一瞬间云端还是旧的，
+        // 无条件覆盖会把用户刚改的冲回去（表现成改完又变回来）。
+        //
+        // 所以判据只有一条：云端版本 > 本地版本才覆盖。
+        //   · 云端从没设过（0）→ 本地新 → 不动，等本机把自己那份推上去；
+        //   · 两台都改过 → 版本大的赢（服务端时钟是唯一时钟，不受设备时差影响）。
+        final cloudVersion = cloud.settingsUpdatedAt;
+        final localVersion = _settings.settingsUpdatedAt;
+        if (cloudVersion > localVersion) {
+          _settings = cloud;
+        } else {
+          // 不覆盖本地，但要把本机的值推上去，让云端收敛到本地这一份。
+          // （否则本机永远停在"本地新、云端旧"，另一台就永远是旧的。）
+          debugPrint(
+            '[Settings] 跳过云端覆盖：cloud=$cloudVersion <= local=$localVersion，改为回推本地',
+          );
+          Future.microtask(() {
+            SyncService.instance.pushSettings(
+              userId: _settings.loginAccount,
+              settings: _settings,
+              clientSessionId: _settings.clientSessionId,
+            );
+          });
+        }
         _settings.isHarnessOnline = keepHarnessOnline;
 
         // 用云端**实际持有**的图像内容校准"已上云指纹"。

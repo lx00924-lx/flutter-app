@@ -1100,15 +1100,22 @@ class SyncService {
     }
 
     final remoteById = <String, ChatSession>{for (final s in remote) s.id: s};
+    SyncDebug.log(
+      '会话合并: 云端=${remote.length} 条, 本地=${storage.getAllSessions().length} 条',
+    );
 
     // 1) 云端有、本地没有 → 直接建出来（**空会话就是在这一步出现的**）
     for (final r in remote) {
-      if (pendingDeleteIds.contains(r.id)) continue;
+      if (pendingDeleteIds.contains(r.id)) {
+        SyncDebug.log('会话合并: 跳过「${r.title}」（在待删队列）');
+        continue;
+      }
       if (storage.hasSession(r.id)) continue;
       r.isSynced = true;
       await storage.saveSession(r);
       touchedOut?.add(r.id);
       changed = true;
+      SyncDebug.log('会话合并: ★新建「${r.title}」id=${r.id}');
     }
 
     // 2) 逐条对齐本地已有会话
@@ -1202,11 +1209,75 @@ class SyncService {
         data: settings.toCloudMap(),
         options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
-      return response.statusCode == 200;
+      if (response.statusCode != 200) return false;
+      // 把服务端生成的版本号写回传进来的这个对象（引用传递，调用方随后 _save 即可落盘）。
+      //
+      // 为什么必须回写：拉取时判断「该不该用云端覆盖本地」靠的就是这个值比大小。
+      // 推送完不更新它，本地版本会永远小于云端 → 每次拉取都判「云端更新」→
+      // 整份覆盖一次（虽然内容一样，但会把本地正在编辑的状态冲掉）。
+      final data = response.data;
+      if (data is Map) {
+        final payload = data['data'];
+        if (payload is Map) {
+          final v = payload['settingsUpdatedAt'];
+          if (v is num) settings.settingsUpdatedAt = v.toInt();
+        }
+      }
+      return true;
     } catch (e) {
       _checkAndTriggerForceLogout(e);
       debugPrint('[SyncService] Push settings error: $e');
       return false;
+    }
+  }
+
+  /// 抢设置编辑锁。返回 true = 拿到（或本来就是我持有），false = 另一台正占着。
+  ///
+  /// 为什么需要：设置是整份推送的（54 个字段一次），两端同时改会互相覆盖 ——
+  /// 在 A 上刚调好字体，B 改个头像整份推上去，字体又变回去。时间戳只能裁决
+  /// 「先后」，裁决不了「同时」。
+  ///
+  /// 失败一律当作「拿不到」（返回 false），不抛异常：调用方只需要知道能不能编辑，
+  /// 网络错误和被人占着在用户体验上是同一件事（这次先不能改）。
+  Future<bool> acquireSettingsLock({
+    required String userId,
+    String? clientSessionId,
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty || cleanUserId == 'guest') return true;
+    try {
+      final url = '$serverBaseUrl/api/settings-lock/acquire';
+      final resp = await _dio.post(
+        url,
+        data: {'userId': cleanUserId},
+        options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
+      );
+      if (resp.statusCode != 200) return false;
+      final data = resp.data;
+      return data is Map && data['ok'] == true;
+    } catch (e) {
+      debugPrint('[SyncService] acquireSettingsLock 失败: $e');
+      return false;
+    }
+  }
+
+  /// 释放设置编辑锁（保存完成 / 离开设置页 / App 退到后台时调用）。
+  ///
+  /// 服务端只允许持有者释放，所以多调几次、或在没锁时调用都是安全的。
+  Future<void> releaseSettingsLock({
+    required String userId,
+    String? clientSessionId,
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty || cleanUserId == 'guest') return;
+    try {
+      await _dio.post(
+        '$serverBaseUrl/api/settings-lock/release',
+        data: {'userId': cleanUserId},
+        options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
+      );
+    } catch (e) {
+      debugPrint('[SyncService] releaseSettingsLock 失败（无害，等它超时）: $e');
     }
   }
 

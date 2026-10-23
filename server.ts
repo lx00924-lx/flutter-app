@@ -3283,6 +3283,8 @@ async function startServer() {
 
   app.get("/api/sessions/:userId", async (req, res) => {
     if (!(await verifyUserIdentity(req, res, req.params.userId, "读取会话列表"))) return;
+    // 会话表拉取诊断：和 [MSG-PULL] 配对看，才能分清"另一端没拉"还是"拉了但没采用"。
+    console.log(`[SESS-PULL] user=${req.params.userId}`);
     try {
       const allSessions = await safeReadJSON<Record<string, any[]>>(SESSIONS_FILE, {});
       const list = (allSessions[req.params.userId] || []).filter(
@@ -3792,6 +3794,71 @@ async function startServer() {
   });
 
   /**
+   * 设置编辑锁：**一台设备正在改设置时，另一台只能看不能改。**
+   *
+   * 为什么需要它：设置是整份推送的（54 个字段一次推），两端同时改会互相覆盖 ——
+   * 用户在 A 上刚调好字体，B 那边改个头像整份推上去，字体又变回去了。
+   * 时间戳只能裁决「先后」，裁决不了「同时」，所以必须有一把锁。
+   *
+   * 语义：
+   *   · acquire → 拿到锁（持有者是 clientSessionId），同一持有者可重复取（续期）
+   *   · release → 主动放锁（保存完成 / 离开设置页 / App 退到后台）
+   *   · 超过 TTL 未续期 → 自动失效（防止 App 崩溃后永久锁死）
+   *
+   * 锁只存在内存里：中继重启后锁自然消失。这是**刻意**的 —— 宁可偶尔多一次
+   * 并发（由时间戳兜底），也不要因为一次异常退出把用户永久挡在设置之外。
+   */
+  const settingsLocks = new Map<string, { by: string; at: number }>();
+  const SETTINGS_LOCK_TTL_MS = 90 * 1000;
+
+  const readSettingsLock = (userId: string) => {
+    const cur = settingsLocks.get(userId);
+    if (!cur) return null;
+    if (Date.now() - cur.at > SETTINGS_LOCK_TTL_MS) {
+      settingsLocks.delete(userId);
+      return null;
+    }
+    return cur;
+  };
+
+  app.post("/api/settings-lock/acquire", async (req, res) => {
+    const userId = String(req.body?.userId ?? "").trim();
+    if (!userId || userId === "guest") return res.json({ ok: false, reason: "invalid_user" });
+    if (!(await verifyUserIdentity(req, res, userId, "获取设置编辑锁"))) return;
+    const me = String(req.headers["x-client-session-id"] ?? "").trim();
+    if (!me) return res.json({ ok: false, reason: "no_session" });
+
+    const held = readSettingsLock(userId);
+    if (held && held.by !== me) {
+      return res.json({ ok: false, reason: "locked_by_other" });
+    }
+    settingsLocks.set(userId, { by: me, at: Date.now() });
+    return res.json({ ok: true });
+  });
+
+  app.post("/api/settings-lock/release", async (req, res) => {
+    const userId = String(req.body?.userId ?? "").trim();
+    if (!userId || userId === "guest") return res.json({ ok: true });
+    if (!(await verifyUserIdentity(req, res, userId, "释放设置编辑锁"))) return;
+    const me = String(req.headers["x-client-session-id"] ?? "").trim();
+    const held = readSettingsLock(userId);
+    // 只允许持有者释放；不是自己的锁就什么都不做（不报错，避免无谓的重试）
+    if (held && held.by === me) settingsLocks.delete(userId);
+    return res.json({ ok: true });
+  });
+
+  /** 查询锁状态（另一台进设置页时用它判断「只读还是可编辑」）。 */
+  app.get("/api/settings-lock/:userId", async (req, res) => {
+    if (!(await verifyUserIdentity(req, res, req.params.userId, "查询设置编辑锁"))) return;
+    const me = String(req.headers["x-client-session-id"] ?? "").trim();
+    const held = readSettingsLock(req.params.userId);
+    res.json({
+      locked: !!held && held.by !== me,
+      // 不泄露对方的 sessionId，只说"有没有人正占着"
+    });
+  });
+
+  /**
    * 设置负载体积护栏（返回 true 表示已拒绝，调用方直接 return）。
    *
    * 图像字段是历史事故点：一张 6.14 MB 的 base64 头像让每次设置推送变成 6.6 MB
@@ -3826,6 +3893,10 @@ async function startServer() {
     if (!(await verifyUserIdentity(req, res, userId, "写入设置"))) return;
     if (settingsPayloadGuard(req.body, userId, res)) return;
     const newSettings = sanitizeSettings(req.body || {});
+    // 服务端时间戳 = 这份设置的「第几版」。用**服务端**时间而不是客户端传来的：
+    // 两台设备时钟可能差几分钟，用它裁决"谁新"会错；服务端只有一个时钟。
+    // 客户端把返回的值记下来，下次拉取时比自己这份新才覆盖。
+    newSettings.settingsUpdatedAt = Date.now();
     try {
       await withFileLock(SETTINGS_FILE, async () => {
         const allSettings = await loadSettingsFile();

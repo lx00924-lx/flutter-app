@@ -220,6 +220,17 @@ class AppSettings {
   String customDataPath;
   bool showDebugFab;
 
+  /// 这份设置的「第几版」——服务端在每次写入时生成的毫秒时间戳，0 = 从没同步过。
+  ///
+  /// 用途：**拉取时判断该不该覆盖本地**。设置是整份推送的（54 个字段一次），
+  /// 如果无条件「云端覆盖本地」，那么「本地刚改完、推送还在路上」的那一瞬间
+  /// 会被一份旧云端整份冲回去（用户看到的是改完又变回去）。
+  /// 有了它：云端时间 > 本地 → 覆盖（含空值，因为「用户主动清空」也是合法改动）；
+  /// 否则不动，等本机把自己那份推上去。
+  ///
+  /// 用**服务端**时间而不是本机时间：两台设备时钟可能差几分钟，用它裁决会错。
+  int settingsUpdatedAt;
+
   /// 会随设置一起上云、但**体积可能很大**的图像字段。
   ///
   /// 这些字段在界面上只占几十到几百像素，压过之后再上云即可；本地永远有一份
@@ -301,6 +312,7 @@ class AppSettings {
     String? githubRepo,
     this.customDataPath = '',
     this.showDebugFab = false,
+    this.settingsUpdatedAt = 0,
   }) : apiEndpoints = apiEndpoints ?? [
           ApiModelEndpoint(
             id: 'default-deepseek-v3',
@@ -382,6 +394,9 @@ class AppSettings {
       'githubRepo': githubRepo,
       'customDataPath': customDataPath,
       'showDebugFab': showDebugFab,
+      // 这份设置的「第几版」（服务端毫秒时间戳）。0 = 从没同步过。
+      // 拉取时只有当云端比它更大才整份覆盖，避免「用旧云端冲掉刚改的本地」。
+      'settingsUpdatedAt': settingsUpdatedAt,
     };
   }
 
@@ -475,7 +490,16 @@ class AppSettings {
       splashSubtitle: map['splashSubtitle']?.toString() ?? 'Loading AI Experience',
       splashDurationMs: (map['splashDurationMs'] as num?)?.toInt() ?? 1000,
       splashImage: map['splashImage']?.toString() ?? '',
-      systemPrompt: map['systemPrompt']?.toString() ?? '你是一个专业、诚实、乐于助人的 AI 助手。',
+      // 空字符串**回落默认**，而不是保留空。
+      //
+      // 实测事故（2026-10-23）：云端 `systemPrompt` 是空串（某台设备推上去的），
+      // 而这里原来是 `?? 默认值` —— 空串不是 null，`??` 不触发，于是拿到空串；
+      // 接着 pullCloudSettings 整份覆盖，另一台的提示词被清空，
+      // 表现成「手机有提示词、电脑没有」。空提示词对模型也没有任何意义，
+      // 所以这里把「空」和「没填过」统一按默认值处理。
+      systemPrompt: (map['systemPrompt']?.toString() ?? '').trim().isEmpty
+          ? '你是一个专业、诚实、乐于助人的 AI 助手。'
+          : map['systemPrompt']!.toString(),
       sendOnEnter: map['sendOnEnter'] as bool? ?? true,
       apiEndpoints: endpoints,
       asrProvider: map['asrProvider']?.toString() ?? 'siliconflow',
@@ -516,6 +540,7 @@ class AppSettings {
       githubRepo: officialGithubRepo,
       customDataPath: map['customDataPath']?.toString() ?? '',
       showDebugFab: map['showDebugFab'] as bool? ?? false,
+      settingsUpdatedAt: (map['settingsUpdatedAt'] as num?)?.toInt() ?? 0,
     );
   }
 

@@ -41,7 +41,7 @@ class QueuedMessage {
   });
 }
 
-class ChatProvider extends ChangeNotifier {
+class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   final SettingsProvider settingsProvider;
   final ApiService _apiService = ApiService();
   final StorageService _storage = StorageService.instance;
@@ -565,13 +565,30 @@ class ChatProvider extends ChangeNotifier {
   ChatProvider(this.settingsProvider) {
     _storage.cleanOrphanData().then((_) => loadSessions());
     _startPeriodicSync();
+    // 前台/后台切换要监听：Android 在 App 切到后台时会**冻结 Flutter 的 Timer**，
+    // 那段时间一轮同步都不会跑。等用户切回来，计时器才恢复，而且还要再等一个
+    // 周期 —— 表现就是「改完名放下手机，要等下次打开 App 才看到新名字」。
+    // 所以切回前台立刻补跑一轮，等价于「服务器推了一个我在线的信号」。
+    WidgetsBinding.instance.addObserver(this);
+    // 启动时也立刻跑一轮，不等第一个 12 秒（否则刚打开 App 的头 12 秒什么都不同步）。
+    unawaited(refreshPendingQuestions());
+    unawaited(refreshPendingApprovals());
+    _silentSyncFromServer();
     // 消息/审批类事件走推送通道：审批不再依赖"正好有 SSE 在流"，
     // 另一端的新消息也能立刻拉取，而不是等下一轮 12 秒轮询。
     settingsProvider.chatPushHandler = _handlePushEvent;
-    // 启动时补一次挂起的选择框（可能是在 App 没开/断线时提出来的）
-    unawaited(refreshPendingQuestions());
-    // 审批同理：电脑端后台触发/网页端发起的审批也要能补出来
-    unawaited(refreshPendingApprovals());
+  }
+
+  /// App 回到前台 → 立刻同步一轮。
+  ///
+  /// 为什么不是"只靠 12 秒轮询"：Android 会把后台 App 的 Timer 冻住，
+  /// 后台期间离线攒下的会话/消息/删除动作都得等切回来才补。这里让"切回来"
+  /// 本身成为一个触发点，用户感知就是「一打开就是最新的」。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      if (!_isGenerating) _silentSyncFromServer();
+    }
   }
 
   /// 来自推送长连接的事件（消息 / 审批）
@@ -709,6 +726,7 @@ class ChatProvider extends ChangeNotifier {
   @override
   void dispose() {
     _periodicSyncTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
