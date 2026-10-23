@@ -1202,12 +1202,11 @@ class SettingsProvider extends ChangeNotifier {
           // （否则本机永远停在"本地新、云端旧"，另一台就永远是旧的。）
           debugPrint(
             '[Settings] 跳过云端覆盖：cloud=$cloudVersion <= local=$localVersion'
-            '${hasUnpushedLocalEdits ? "（本地有未推送改动）" : ""}，改为回推本地',
+            '${hasUnpushedLocalEdits ? "（本地有未推送改动）" : ""}，保留本地并等推送',
           );
-          // 不在这里直接 pushSettings（那是整份全量推，会绕过指纹机制）。
-          // 只记一个"待补推"，由外层 _debouncePushSettings / retryPendingSettingsPush
-          // 走字段级增量路径推上去 —— 那样只发真正变过的那几个字段。
-          await StorageService.instance.setPendingSettingsPush(true);
+          // 这里不再设 "待补推" 标记：允许离线改+暂存那条路已经废弃（改成推送失败
+          // 就回滚）。残留的旧标记由 retryPendingSettingsPush 消化掉即可。
+          // 这种情况下的本地值会在随后的 _pushSettingsGated 里作为 delta 推上去。
         }
         _settings.isHarnessOnline = keepHarnessOnline;
 
@@ -1245,6 +1244,13 @@ class SettingsProvider extends ChangeNotifier {
         // 从这一刻起才允许推送：之前 `_pushSettingsGated` 会拒绝一切推送，
         // 防止用"新设备的默认值"把云端已有配置整份盖掉。
         _cloudSettingsPulledOnce = true;
+        // 刷新回滚目标：以这次拉到的为准（此时本地要么等于云端，要么是有意保留的本地版）。
+        _lastSyncedSnapshot = _snapshotOf(_settings);
+        // 老版本会在推失败时落一个"待补推"标记；那条路已废弃，顺手清掉，
+        // 免得它让 hasUnpushedLocalEdits 永远为真、把云端覆盖永久挡住。
+        if (StorageService.instance.pendingSettingsPush) {
+          await StorageService.instance.setPendingSettingsPush(false);
+        }
 
         _save(pushToCloud: false);
       }
@@ -1306,6 +1312,21 @@ class SettingsProvider extends ChangeNotifier {
   /// 「没保存到云端，稍后自动重试」—— 否则他以为改成功了，换机后就发现没了。
   String? _settingsPushError;
   String? get settingsPushError => _settingsPushError;
+
+  /// 上一次**确认同步成功**的那份设置（推送成功 / 拉到云端后存一份快照）。
+  ///
+  /// 用途：推送失败时**整体回滚到这个快照**。
+  ///
+  /// 为什么是回滚而不是"暂存待补推"（2026-10-23 定的）：
+  /// 允许"离线改 + 暂存"就必然要回答"本地和云端各改了一半怎么合" ——
+  /// 那需要逐字段合并 + 记录用户到底改过哪些字段，复杂且容易在某个分支上
+  /// 悄悄丢掉改动。更糟的是恢复后"全量推本地"会把另一台在这期间改的东西
+  /// 盖回旧值。既然会话的新建/删除早就定了"服务器不在线就不让操作"，
+  /// 设置索性一致：**改不动就明说，并把界面退回改动前**，不做半吊子同步。
+  AppSettings? _lastSyncedSnapshot;
+
+  AppSettings _snapshotOf(AppSettings settings) =>
+      AppSettings.fromMap(settings.toMap());
 
   /// 算一份"只含变化字段"的推送载荷。
   ///
@@ -1399,15 +1420,11 @@ class SettingsProvider extends ChangeNotifier {
     //
     // 新设备（或清缓存后）本地是一份代码默认值，不是空。启动时若 pull 失败，
     // 随手改个开关就会把这份默认值整份推上去 —— 云端另一台设备调过的配置
-    // （提示词、头像、开关）全被盖掉。这里先补拉一次，拉到了再按增量推；
-    // 拉不到就记"待补推"，等服务器回来由 retryPendingSettingsPush 补。
+    // （提示词、头像、开关）全被盖掉。这里先补拉一次，拉到了再按增量推。
     if (!_cloudSettingsPulledOnce) {
       await pullCloudSettings();
       if (!_cloudSettingsPulledOnce) {
-        await StorageService.instance.setPendingSettingsPush(true);
-        _settingsPushError = '服务器未连接，设置改动已暂存，连上后自动同步';
-        notifyListeners();
-        debugPrint('[Settings] 尚未拉到云端设置，放弃本次推送（避免用本地默认值覆盖云端）');
+        _rollbackFailedPush('服务器未连接，改动未保存（已恢复原设置）');
         return false;
       }
     }
@@ -1418,6 +1435,7 @@ class SettingsProvider extends ChangeNotifier {
     final deltaPayload = _buildDeltaPayload(fullPayload);
     if (deltaPayload.isEmpty) {
       // 一个字段都没变（比如只是触发了防抖、实际值没动）：不必发请求。
+      _lastSyncedSnapshot ??= _snapshotOf(_settings);
       return true;
     }
 
@@ -1434,6 +1452,8 @@ class SettingsProvider extends ChangeNotifier {
         final value = _mediaValueOf(key);
         if (value.isNotEmpty) _pushedMediaHashes[key] = _contentFingerprint(value);
       }
+      // 这一份现在是"确认同步过"的，作为下次失败时的回滚目标
+      _lastSyncedSnapshot = _snapshotOf(_settings);
       debugPrint('[Settings] 已推送 ${deltaPayload.length}/${fullPayload.length} 个变更字段');
       if (omit.isNotEmpty) {
         debugPrint('[Settings] 本次推送省略未变更的图像字段: ${omit.join(', ')}');
@@ -1443,16 +1463,34 @@ class SettingsProvider extends ChangeNotifier {
         notifyListeners();
       }
     } else {
-      // 服务器没开/断网：记一个持久标记，等同步时由 retryPendingSettingsPush 补推。
-      // 以前失败就完全没人管了 —— 那条改动一直躺在本地，换机恢复时看不到。
-      await StorageService.instance.setPendingSettingsPush(true);
-      if (_settingsPushError == null) {
-        _settingsPushError = '服务器未连接，设置改动已暂存，连上后自动同步';
-        notifyListeners();
-      }
-      debugPrint('[Settings] 设置推送失败，已标记待补推');
+      // 推不上去（服务器没开 / 断网）→ **回滚到上次同步成功的那份**，并明确提示。
+      //
+      // 不做"暂存待补推"：允许离线改就必须回答"本地和云端各改了一半怎么合"，
+      // 那需要逐字段合并 + 记住用户改过哪些字段，复杂且容易在某个分支上悄悄
+      // 丢掉改动；更糟的是恢复后"全量推本地旧值"会把另一台在这期间的改动盖回去。
+      // 与"服务器不在线不允许新建/删除会话"保持一致：改不动就明说，界面退回原样。
+      _rollbackFailedPush('服务器未连接，改动未保存（已恢复原设置）');
     }
     return ok;
+  }
+
+  /// 推送失败时把设置整体退回上一次同步成功的那份，并给出提示。
+  ///
+  /// 注意这里用的是 `_save(pushToCloud: false)` —— 回滚本身不能再触发一次推送，
+  /// 否则会陷入"推失败 → 回滚 → 又推"的循环。
+  void _rollbackFailedPush(String message) {
+    final snapshot = _lastSyncedSnapshot;
+    if (snapshot != null) {
+      _settings = _snapshotOf(snapshot);
+      _save(pushToCloud: false);
+      debugPrint('[Settings] 推送失败，已回滚到上次同步成功的设置');
+    } else {
+      // 还没成功同步过任何一份（新设备 + 服务器一直连不上）—— 没有可回滚的目标。
+      // 此时如实告诉用户"没保存"，不要谎称"已恢复"。
+      debugPrint('[Settings] 推送失败且没有可回滚的快照，本地改动保持未保存状态');
+    }
+    _settingsPushError = snapshot != null ? message : '服务器未连接，设置未能保存';
+    notifyListeners();
   }
 
   /// 补推"上次没推上去"的设置。由同步循环周期性调用（见 ChatProvider 的周期同步）。
