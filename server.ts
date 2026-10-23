@@ -3204,6 +3204,18 @@ async function startServer() {
   });
 
   // REST API for messages (Per user)
+  //
+  // `?afterSeq=N` = **增量拉取**；不带就是全量（首次登录 / 换机恢复用）。
+  //
+  // 为什么需要它：消息表只会越来越长（现在 223 条 / 4.1MB，大头是 base64 的图片和语音）。
+  // 客户端以前每 12 秒拉一次**全量**，一轮几十秒，期间它的单飞锁把后面每一轮都跳过 ——
+  // 「12 秒一轮」从来没真跑成过，表现成「改个名字要等半分钟」「设置要等十秒」。
+  //
+  // seq = 数组下标 + 1，**不落盘**：
+  //   · 新消息只会 append 到末尾 → seq 单调递增，客户端记住「我拿到第几个」即可；
+  //   · 删除不会让客户端错乱 —— 删除是**用户主动行为**，由 `session_deleted` 广播负责，
+  //     绝不靠增量同步去「发现」缺席（那正是 10-22 误删事故的根源）。
+  // 所以 seq 只回答一个问题：**上次之后又多了哪些？**
   app.get("/api/messages/:userId", async (req, res) => {
     if (!(await verifyUserIdentity(req, res, req.params.userId, "读取聊天记录"))) return;
     try {
@@ -3211,7 +3223,23 @@ async function startServer() {
       const userMsgs = (allMessages[req.params.userId] || []).filter(
         (m: any) => m && m.id && m.sessionId && m.sessionId.toString().trim() !== ''
       );
-      res.json(userMsgs);
+      const rawAfter = String((req.query.afterSeq as string | undefined) ?? "").trim();
+      if (rawAfter === "") {
+        // 全量：每条带上 seq，客户端据此记住「我拿到第几个」
+        res.json(userMsgs.map((m: any, i: number) => ({ ...m, seq: i + 1 })));
+        return;
+      }
+      const afterSeq = Number(rawAfter);
+      // 非数字 / 负数一律拒绝：静默当成 0 会让客户端误以为"全都拿过了"
+      if (!Number.isFinite(afterSeq) || afterSeq < 0) {
+        res.status(400).json({ error: "Invalid afterSeq" });
+        return;
+      }
+      res.json(
+        userMsgs
+          .map((m: any, i: number) => ({ ...m, seq: i + 1 }))
+          .filter((m: any) => m.seq > afterSeq),
+      );
     } catch (error) {
       res.status(500).json({ error: "Failed to load messages" });
     }

@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:hive/hive.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
@@ -259,6 +258,38 @@ class StorageService {
   }
 
   // --- 离线待删除会话队列 (Pending Deletions Queue) ---
+  /// 上次从云端拉消息拉到了第几个（服务端的 seq，1 开始，0 = 还没拉过）。
+  ///
+  /// 用途：只在**增量拉取**时作为游标传给 `/api/messages/:userId?afterSeq=N`，
+  /// 这样每轮只传"上次之后新增的那几条"，而不是把整张消息表（现在 4.1MB）重传一遍。
+  ///
+  /// ⚠️ 它**只**用来回答"还有哪些没拿过"，**绝不用来判断谁被删了** ——
+  /// 删除必须由明确的删除指令驱动（2026-10-22 误删事故的教训）。
+  /// 所以这个值算错最多导致"多拉一次"，不会导致数据丢失。
+  int getLastSyncedSeq() {
+    final box = _settingsBox;
+    if (box == null) return 0;
+    try {
+      final v = box.get('last_synced_seq');
+      if (v is int) return v;
+      if (v is num) return v.toInt();
+      if (v is String) return int.tryParse(v) ?? 0;
+    } catch (_) {}
+    return 0;
+  }
+
+  Future<void> setLastSyncedSeq(int seq) async {
+    final box = _settingsBox;
+    if (box == null || seq < 0) return;
+    try {
+      final current = getLastSyncedSeq();
+      // 只增不减：seq 是"已经拿到的位置"，回退会让下次重复拉一大段
+      if (seq > current) {
+        await box.put('last_synced_seq', seq);
+      }
+    } catch (_) {}
+  }
+
   List<String> getPendingDeleteSessionIds() {
     final box = _settingsBox;
     if (box == null) return [];

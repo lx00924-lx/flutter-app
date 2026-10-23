@@ -583,9 +583,10 @@ class SyncService {
     if (cleanUserId.isEmpty || _isSyncing) return 0;
     _isSyncing = true;
     int importedCount = 0;
-    // 用云端更完整的版本覆盖本地半截内容的条数（断流场景，见下方注释）
-    int updatedCount = 0;
-    bool sessionListChanged = false;
+    // 注：`updatedCount` / `sessionListChanged` 曾经用来决定"要不要通知界面"。
+    // 2026-10-23 起通知改成**无条件调用**（见下方 onNewMessagesImported 处的长注释：
+    // 按"这轮改没改东西"来决定，会导致数据已经是新的、界面却停在旧的），
+    // 这两个计数因此没人读了，一并删掉。
 
     try {
       // 0. 先将离线期间积压的会话删除指令补发给云端
@@ -603,26 +604,41 @@ class SyncService {
 
       // 0c. 先对齐会话表 —— **还没发过消息的空会话只存在于这张表里**，
       //     靠下面的消息列表永远反推不出来。所以必须发生在拉消息之前。
+      //
+      // ⚠️ 这里曾经算过一个 `serverSessionIdsFromTable`（会话表里的 id 集合），
+      // 用来"云端没有就把本地会话删掉"。那条级联在 2026-10-22 误删事故后已移除，
+      // 这个变量成了死代码，2026-10-23 一并删掉。
+      //
+      // 顺带：它以前还是"消息列表缺失的兜底权威"。现在**增量拉取**只回新增消息，
+      // 消息里涉及的 sessionId 本来就不完整 —— 那个兜底已经彻底失效了，
+      // 而正确做法本来也不该是"从消息反推谁被删了"。
       final remoteSessions =
           await pullSessions(userId: cleanUserId, clientSessionId: clientSessionId);
-      // 空表 == 这套机制刚上线（服务端还没有存量），此时**不构成任何权威依据**，
-      // 必须退回落旧判据，否则会把本地全部历史会话一次性删光。
-      final Set<String>? serverSessionIdsFromTable =
-          (remoteSessions == null || remoteSessions.isEmpty)
-              ? null
-              : remoteSessions.map((s) => s.id).toSet();
       if (remoteSessions != null) {
-        final merged = await _mergeRemoteSessions(
+        // 返回值（这一轮有没有改动会话表）不再参与"要不要通知界面"的判断 ——
+        // 通知改成无条件调用了，理由见下方 onNewMessagesImported 处。
+        await _mergeRemoteSessions(
           remoteSessions,
           pendingDeleteIds,
           userId: cleanUserId,
           clientSessionId: clientSessionId,
           touchedOut: touchedThisRound,
         );
-        if (merged) sessionListChanged = true;
       }
 
-      final url = '$serverBaseUrl/api/messages/$cleanUserId';
+      // 增量拉取：带上"上次拉到第几个"的游标，只取之后新增的消息。
+      //
+      // 以前这里是**每轮都拉全量**（现在 223 条 / 4.1MB，图片语音都以 base64 内嵌），
+      // 一轮几十秒；而整个方法外面有一把单飞锁（`_isSyncing`），期间后面每一次
+      // 12 秒轮询都被直接跳过 —— 于是「12 秒一轮」从来只是纸面上的，
+      // 实际间隔是「上一轮跑完 + 12 秒」。改名要等半分钟、设置要等十秒，都是这么来的。
+      //
+      // 游标为 0 时（首次登录 / 换机 / 清过缓存）仍走全量，这是唯一需要"拉全部"的场合。
+      final lastSyncedSeq = storage.getLastSyncedSeq();
+      final isIncrementalPull = lastSyncedSeq > 0;
+      final url = isIncrementalPull
+          ? '$serverBaseUrl/api/messages/$cleanUserId?afterSeq=$lastSyncedSeq'
+          : '$serverBaseUrl/api/messages/$cleanUserId';
       final response = await _dio.get(
         url,
         options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
@@ -631,24 +647,22 @@ class SyncService {
       if (response.statusCode == 200 && response.data is List) {
         final list = response.data as List;
 
-        // 1. 提取服务器当前权威存活且未处于本地待删队列中的会话 ID 集合
-        final serverSessionIds = <String>{};
-        for (var item in list) {
-          if (item is Map && item['sessionId'] != null) {
-            final sId = item['sessionId'].toString().trim();
-            if (sId.isNotEmpty && !pendingDeleteIds.contains(sId)) {
-              serverSessionIds.add(sId);
-            }
-          }
-        }
+        // 1. （已移除）这里曾经收集"消息列表涉及的 sessionId 集合"，作为"云端还有哪些会话"
+        //    的判据之一。两条路都断了：
+        //      · 级联删除本身在 2026-10-22 误删事故后被移除；
+        //      · 现在改成**增量拉取**，`list` 只含上次之后的新消息，这个集合天然不完整。
+        //    会话的权威来源只有一个：上面 0c 拉到的会话表。
 
-        // 2. 检查本地所有会话，执行权威对齐与离线新会话保护。
+        // 2. 检查本地所有会话，执行离线新会话保护。
         //
         // "云端到底还有没有这个会话"的判据：
         //   · 会话表拉成功且非空 → **以会话表为准**（这才是真相，空会话也在里面）
         //   · 会话表为空 / 没拉到（老服务端、网络失败）→ 退回用消息反推的集合
         // 顺序不能反：只看消息会把"还没发过消息的新会话"误判成已被删除。
-        final authoritativeSessionIds = serverSessionIdsFromTable ?? serverSessionIds;
+        // ⚠️ `authoritativeSessionIds` 曾经在这里声明（= 会话表 ?? 消息反推的集合），
+        // 用来级联删除"云端已不存在"的本地会话。那条级联已在 2026-10-22 误删事故后移除，
+        // 变量成了死代码，2026-10-23 一并删掉 —— 留着它只会让人误以为"云端缺席"仍是删除依据。
+        // 现在的原则：**删除只由明确的删除指令驱动**，对账发现缺席什么都不做。
         final allLocalSessions = storage.getAllSessions();
         for (var localSession in allLocalSessions) {
           // 本轮会话表对齐已经处理过的（含刚被推上去的新会话），不再重复判定 ——
@@ -657,7 +671,6 @@ class SyncService {
           if (pendingDeleteIds.contains(localSession.id)) {
             // 处于待删除队列的本地会话必须清除
             await storage.deleteSession(localSession.id);
-            sessionListChanged = true;
           } else if (!localSession.isSynced) {
             // 该会话是在离线/未开启服务器时本地新建的 -> 坚决不误删，将其本地消息反向补传至云端
             final localMsgs = storage.getMessagesForSession(localSession.id);
@@ -739,7 +752,6 @@ class SyncService {
         for (var session in neededSessions.values) {
           session.isSynced = true;
           await storage.saveSession(session);
-          sessionListChanged = true;
         }
 
         // 保存新消息
@@ -751,7 +763,26 @@ class SyncService {
         // 用云端更完整的版本覆盖本地（断流后本地只剩半截 + 连接中断提示的场景）
         for (var msg in updatedMessages) {
           await storage.saveMessage(msg);
-          updatedCount++;
+        }
+
+        // 记录本轮拉到了哪一条 —— 下一轮就只拉它之后的新增。
+        //
+        // 必须放在"消息都已落盘之后"：如果先推进游标再写盘、而写盘中途失败，
+        // 那批消息就永远拉不回来了（游标说"拿过了"，本地却什么都没有）。
+        // 反过来（先写盘、游标推进失败）最坏只是下一轮重复拉一次，是安全的。
+        try {
+          var maxSeq = lastSyncedSeq;
+          for (var item in list) {
+            if (item is Map) {
+              final s = item['seq'];
+              if (s is num && s.toInt() > maxSeq) maxSeq = s.toInt();
+            }
+          }
+          if (maxSeq > lastSyncedSeq) {
+            await storage.setLastSyncedSeq(maxSeq);
+          }
+        } catch (e) {
+          debugPrint('[SyncService] 更新增量游标失败（下轮会重复拉一次，无副作用）: $e');
         }
 
         if (onNewMessagesImported != null) {
