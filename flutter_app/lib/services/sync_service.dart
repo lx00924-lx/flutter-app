@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:dio/dio.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 import '../models/app_settings.dart';
@@ -800,14 +802,45 @@ class SyncService {
           onNewMessagesImported();
         }
       }
-    } catch (e) {
+    } catch (e, st) {
       _checkAndTriggerForceLogout(e);
       debugPrint('[SyncService] Pull messages silent error: $e');
+      // ⚠️ 落盘，不要只 debugPrint。
+      //
+      // 2026-10-23 排查「增量拉取」时踩到：App 明明收到了 4.1MB 的全量消息
+      // （CPU 6.3s→16.8s、内存 202→253MB 都验证过），但本地游标始终没写进去 ——
+      // 说明处理途中抛了异常。而 release 版的 Windows App **没有控制台**，
+      // `debugPrint` 谁看不见，于是「静默失败」在用户眼里就是「同步不动了」。
+      // 这正是「坏的链路假装自己是好的」那个老毛病，只是发生在日志层。
+      unawaited(_dumpSyncError(e, st));
     } finally {
       _isSyncing = false;
     }
 
     return importedCount;
+  }
+
+  /// 把同步异常追加写到 `Documents/LxAI_sync_error.log`。
+  ///
+  /// 用 `getApplicationDocumentsDirectory()`（Windows 上是%USERPROFILE%\Documents），
+  /// 和 Hive 数据同处，用户找得到；文件超过 256KB 时直接截断重来，避免无限增长。
+  /// 自己出错一律吞掉 —— 记录日志失败不该反过来影响同步。
+  Future<void> _dumpSyncError(Object error, StackTrace st) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/LxAI_sync_error.log');
+      if (await file.exists() && await file.length() > 256 * 1024) {
+        await file.writeAsString('', flush: true);
+      }
+      await file.writeAsString(
+        '\n===== ${DateTime.now().toIso8601String()} =====\n'
+        '$error\n$st\n',
+        mode: FileMode.append,
+        flush: true,
+      );
+    } catch (_) {
+      // 记录日志都失败了，那就真没办法了；不要再往上抛
+    }
   }
 
   /// 实时静默推送单条或多条消息至服务器。

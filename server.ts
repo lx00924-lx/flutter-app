@@ -3218,6 +3218,14 @@ async function startServer() {
   // 所以 seq 只回答一个问题：**上次之后又多了哪些？**
   app.get("/api/messages/:userId", async (req, res) => {
     if (!(await verifyUserIdentity(req, res, req.params.userId, "读取聊天记录"))) return;
+    // 拉取类型诊断：`(full)` = 全量（首次登录 / 换机），数字 = 增量游标。
+    //
+    // 为什么值得留这一行：增量拉取到底有没有生效，**从服务端只能看这个参数**。
+    // 2026-10-23 排查时正是靠它先确认了「App 启动 6 分钟一次请求都没发」，
+    // 否则只能对着客户端代码猜。一行约 60 字节，日志有 5MB 轮转，成本可忽略。
+    console.log(
+      `[MSG-PULL] user=${req.params.userId} afterSeq=${String((req.query.afterSeq as string | undefined) ?? "(full)")}`,
+    );
     try {
       const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
       const userMsgs = (allMessages[req.params.userId] || []).filter(
