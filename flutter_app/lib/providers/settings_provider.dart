@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -1223,6 +1224,21 @@ class SettingsProvider extends ChangeNotifier {
           }
         }
 
+        // 字段级增量推送的指纹基线也要跟着对齐到"刚拉到的那份"。
+        //
+        // 覆盖完之后本地 == 云端，此刻**没有任何字段需要再推**。若基线不更新，
+        // 下一次防抖推送会把整份当成"全变了"重发一遍（内容一样但白跑一次，
+        // 并且会把云端 settingsUpdatedAt 顶掉，让另一端误以为设置变过）。
+        //
+        // 用 toCloudMap() 而不是 toMap()：前者已按隐私规则脱敏（密钥置空），
+        // 与真正发出去的字段集一致，基线才对得上。
+        _pushedFieldHashes
+          ..clear()
+          ..addAll({
+            for (final entry in _settings.toCloudMap().entries)
+              entry.key: _valueFingerprint(entry.value),
+          });
+
         _save(pushToCloud: false);
       }
     } catch (e) {
@@ -1250,6 +1266,55 @@ class SettingsProvider extends ChangeNotifier {
   /// [pullCloudSettings] 时按云端返回的内容**重新校准** —— 后者让这份指纹跨
   /// App 重启依然有效，避免每次冷启动都把几百 KB 图片全量重传一遍。
   final Map<String, String> _pushedMediaHashes = <String, String>{};
+
+  /// 每个设置字段上一次**成功推到云端**时的指纹（字段名 → 指纹）。
+  ///
+  /// 用途：**只推改过的字段**。设置一共 55 个字段，以前改一个开关也整份推上去，
+  /// 于是"两端同时改会互相覆盖"——A 刚调好字体，B 改个头像整份推上去，字体又变回去。
+  /// 有了这份指纹，payload 里只出现真正变过的字段；服务端 `{ ...old, ...new }`
+  /// 合并会自动保留没推的那些，冲突面从"整份"缩到"同一个字段"。
+  ///
+  /// 为什么**只记成功推送的那些**：推失败时不能记账，否则下次重试会以为
+  /// "这个字段已经同步过了"而跳过，那处改动就永远上不了云。
+  ///
+  /// 首次推送（表为空）时所有字段都算"变了"，自然是全量 —— 正是需要的。
+  final Map<String, String> _pushedFieldHashes = <String, String>{};
+
+  /// 算一份"只含变化字段"的推送载荷。
+  ///
+  /// [full] 是整份设置（已按隐私规则脱敏、已剔除未变更的图像字段）。
+  /// 返回的 map 只含指纹与上次记录不一致的字段。
+  Map<String, dynamic> _buildDeltaPayload(Map<String, dynamic> full) {
+    final delta = <String, dynamic>{};
+    for (final entry in full.entries) {
+      final fingerprint = _valueFingerprint(entry.value);
+      if (_pushedFieldHashes[entry.key] != fingerprint) {
+        delta[entry.key] = entry.value;
+      }
+    }
+    return delta;
+  }
+
+  /// 把这次推成功的字段指纹记下来（只在服务端确认 2xx 后调用）。
+  void _commitFieldHashes(Map<String, dynamic> pushed) {
+    for (final entry in pushed.entries) {
+      _pushedFieldHashes[entry.key] = _valueFingerprint(entry.value);
+    }
+  }
+
+  /// 任意字段值的稳定指纹（跨进程有效，所以不能用 hashCode）。
+  ///
+  /// 字符串走 FNV-1a；其余类型先转成 JSON 文本再走同一套 —— 布尔/数字/
+  /// 列表型字段（如 apiEndpoints）也能得到稳定指纹。
+  static String _valueFingerprint(Object? value) {
+    if (value == null) return 'null';
+    if (value is String) return _contentFingerprint(value);
+    try {
+      return _contentFingerprint(jsonEncode(value));
+    } catch (_) {
+      return _contentFingerprint(value.toString());
+    }
+  }
 
   /// 轻量稳定哈希（FNV-1a）：只用于"内容有没有变"，不需要密码学强度，
   /// 但要跨进程稳定，所以不能用 String.hashCode。
@@ -1303,17 +1368,29 @@ class SettingsProvider extends ChangeNotifier {
       ..clear()
       ..addAll(omit);
 
+    // 只推变化的字段：图片字段上面已按需剔除，其余字段按指纹比对。
+    // 首次推送时表为空 → 全部字段都算"变了" → 自动退化成全量（正是需要的）。
+    final fullPayload = _settings.toCloudMap();
+    final deltaPayload = _buildDeltaPayload(fullPayload);
+    if (deltaPayload.isEmpty) {
+      // 一个字段都没变（比如只是触发了防抖、实际值没动）：不必发请求。
+      return true;
+    }
+
     final ok = await SyncService.instance.pushSettings(
       userId: _settings.loginAccount,
       settings: _settings,
       clientSessionId: _settings.clientSessionId,
+      deltaPayload: deltaPayload,
     );
     if (ok) {
       await StorageService.instance.setPendingSettingsPush(false);
+      _commitFieldHashes(deltaPayload);
       for (final key in AppSettings.mediaSettingKeys) {
         final value = _mediaValueOf(key);
         if (value.isNotEmpty) _pushedMediaHashes[key] = _contentFingerprint(value);
       }
+      debugPrint('[Settings] 已推送 ${deltaPayload.length}/${fullPayload.length} 个变更字段');
       if (omit.isNotEmpty) {
         debugPrint('[Settings] 本次推送省略未变更的图像字段: ${omit.join(', ')}');
       }

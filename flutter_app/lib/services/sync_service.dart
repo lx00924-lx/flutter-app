@@ -1197,6 +1197,15 @@ class SyncService {
     required String userId,
     required AppSettings settings,
     String? clientSessionId,
+    /// 只推这些字段（字段级增量）。为空时推整份。
+    ///
+    /// 为什么需要：设置是 55 个字段整份推的，改一个开关也会把其余 54 个旧值
+    /// 一起推上去 —— 两端同时改会互相覆盖（A 刚调好字体，B 改个头像整份推上去，
+    /// 字体又变回去）。改成只发变化的字段后，服务端 `{ ...old, ...new }` 合并
+    /// 会自动保留没推的那些，冲突面从"整份"缩到"同一个字段"。
+    ///
+    /// 清空照样能传：值从有变成空，指纹变了就会把空值推上去。
+    Map<String, dynamic>? deltaPayload,
   }) async {
     final cleanUserId = userId.trim();
     if (cleanUserId.isEmpty || cleanUserId == 'guest' || cleanUserId == 'default_user') {
@@ -1204,9 +1213,14 @@ class SyncService {
     }
     try {
       final url = '$serverBaseUrl/api/settings/$cleanUserId';
+      final payload = deltaPayload ?? settings.toCloudMap();
+      if (payload.isEmpty) {
+        // 一个字段都没变：这次推送没有意义，直接算成功（不消耗一次网络往返）。
+        return true;
+      }
       final response = await _dio.post(
         url,
-        data: settings.toCloudMap(),
+        data: payload,
         options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
       if (response.statusCode != 200) return false;
@@ -1278,6 +1292,29 @@ class SyncService {
       );
     } catch (e) {
       debugPrint('[SyncService] releaseSettingsLock 失败（无害，等它超时）: $e');
+    }
+  }
+
+  /// 查设置编辑锁是否被**别的设备**占着。
+  ///
+  /// 只读页用它来"盯着锁"：另一台释放后自动恢复可编辑，不用用户手动点重试。
+  /// 查询失败一律返回 false（当作没被占）—— 网络抖一下不该把用户锁在只读里。
+  Future<bool> isSettingsLockedByOther({
+    required String userId,
+    String? clientSessionId,
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty || cleanUserId == 'guest') return false;
+    try {
+      final resp = await _dio.get(
+        '$serverBaseUrl/api/settings-lock/$cleanUserId',
+        options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
+      );
+      if (resp.statusCode != 200) return false;
+      final data = resp.data;
+      return data is Map && data['locked'] == true;
+    } catch (_) {
+      return false;
     }
   }
 

@@ -39,6 +39,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// 只读而不是"不让进"：至少让人看得见当前值在变，不会一脸茫然。
   bool _lockedByOther = false;
 
+  /// 只读时盯着锁的定时器。
+  ///
+  /// 没有它的话，A 改完退出、B 还得自己点「重试」才能编辑 —— 而用户的正常
+  /// 操作顺序就是"这边改完那边接着改"，多一步手点很怪。
+  /// 3 秒一次只读轮询，响应只有几十字节，且只在「两端同时开着设置」这种少数
+  /// 情况下才会跑，正常人完全碰不到。
+  Timer? _lockWatchTimer;
+
   @override
   void initState() {
     super.initState();
@@ -47,6 +55,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   @override
   void dispose() {
+    _lockWatchTimer?.cancel();
     // 离开设置页就放锁。注意 push 进子页面（API/语音/个性化…）时本页不会
     // dispose，锁会一直握着 —— 这是想要的：那些子页面也在改同一份设置。
     _releaseSettingsLock();
@@ -60,7 +69,38 @@ class _SettingsScreenState extends State<SettingsScreen> {
       clientSessionId: sp.clientSessionId,
     );
     if (!mounted) return;
-    if (!ok) setState(() => _lockedByOther = true);
+    if (!ok) {
+      setState(() => _lockedByOther = true);
+      _startLockWatch();
+    }
+  }
+
+  /// 只读时每 3 秒问一次"那把锁还在别人手里吗"，释放了自动恢复编辑。
+  void _startLockWatch() {
+    _lockWatchTimer?.cancel();
+    _lockWatchTimer = Timer.periodic(const Duration(seconds: 3), (timer) async {
+      final sp = context.read<SettingsProvider>();
+      final stillLocked = await SyncService.instance.isSettingsLockedByOther(
+        userId: sp.syncUserId,
+        clientSessionId: sp.clientSessionId,
+      );
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      if (stillLocked) return;
+      // 锁没了：停轮询、去掉只读态，并顺手把锁拿回自己手里（否则这 3 秒里
+      // 可能又被别的设备抢走，界面短暂可编辑却推不上去）。
+      timer.cancel();
+      _lockWatchTimer = null;
+      final gotIt = await SyncService.instance.acquireSettingsLock(
+        userId: sp.syncUserId,
+        clientSessionId: sp.clientSessionId,
+      );
+      if (!mounted) return;
+      setState(() => _lockedByOther = !gotIt);
+      if (!gotIt) _startLockWatch();
+    });
   }
 
   void _releaseSettingsLock() {
