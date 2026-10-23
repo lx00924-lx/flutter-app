@@ -292,10 +292,18 @@ class StorageService {
     try {
       final current = getLastSyncedSeq();
       SyncDebug.log('setLastSyncedSeq($seq): current=$current');
-      // 只增不减：seq 是"已经拿到的位置"，回退会让下次重复拉一大段
+      // 只增不减 —— 但**允许重置为 0**。
+      //
+      // 0 是"重新全量拉"的显式信号：服务端的 seq 是数组下标+1，删消息会让它回退
+      // （用户删光后 210 条变 4 条），这时旧游标 212 会把所有消息永久过滤掉。
+      // 调用方发现回退后置 0，下一轮走全量重拉一遍（重复保存是幂等的）。
+      // 注意要把 0 真正写进 box：直接 return 的话旧值还在，等于没重置。
       if (seq > current) {
         await box.put('last_synced_seq', seq);
         SyncDebug.log('setLastSyncedSeq($seq): 已写入，回读=${getLastSyncedSeq()}');
+      } else if (seq == 0 && current > 0) {
+        await box.put('last_synced_seq', 0);
+        SyncDebug.log('setLastSyncedSeq(0): 强制重置（seq 回退保护），回读=${getLastSyncedSeq()}');
       }
     } catch (e) {
       SyncDebug.log('setLastSyncedSeq($seq) 抛异常: $e');

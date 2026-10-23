@@ -3329,6 +3329,16 @@ async function startServer() {
         res.status(400).json({ error: "Invalid afterSeq" });
         return;
       }
+      // ⚠️ seq 是「数组下标 + 1」，所以**删消息会让它回退**。
+      //
+      // 而客户端游标只增不减：用户删光消息后数组从 210 条缩到 4 条，seq 变成
+      // 1~4，可客户端还记着 212 —— 于是 afterSeq=212 永远过滤掉所有消息，
+      // 表现就是「另一端新建会话、发了消息，这台机器只看得到空会话，消息永远不来」
+      // （2026-10-23 23:5x 实测：手机 lastSyncedSeq=212，云端只有 4 条）。
+      //
+      // 这里把「当前总条数」额外下发（响应头，不破坏数组返回体），客户端发现
+      // total < 自己的游标就知道 seq 回退过，把游标重置成 0 重新全量拉一次。
+      res.setHeader("X-Msg-Total", String(userMsgs.length));
       res.json(
         userMsgs
           .map((m: any, i: number) => ({ ...m, seq: i + 1 }))

@@ -681,6 +681,28 @@ class SyncService {
       if (response.statusCode == 200 && response.data is List) {
         final list = response.data as List;
 
+        // seq 回退保护（2026-10-23 23:5x 实测踩到）。
+        //
+        // 服务端的 seq 是「数组下标 + 1」，**删消息会让它回退**：用户把消息删光后
+        // 数组从 210 条缩到 4 条，seq 变成 1~4；可本地游标还记着 212 ——
+        // afterSeq=212 于是把所有消息都过滤掉，表现是「另一端新建会话、发了消息，
+        // 这台机器只看得到空会话，消息永远不来」。
+        //
+        // 服务端在响应头里给了当前总条数，一旦发现它比游标小，就说明 seq 回退过：
+        // 把游标清零，下一轮走全量把消息重新拉一遍（重复保存是幂等的）。
+        final totalHeader = response.headers.value('x-msg-total');
+        final serverTotal = int.tryParse(totalHeader ?? '');
+        if (isIncrementalPull && serverTotal != null && serverTotal < lastSyncedSeq) {
+          SyncDebug.log(
+            '检测到 seq 回退: 云端总条数=$serverTotal < 本地游标=$lastSyncedSeq，重置游标后重新全量拉',
+          );
+          debugPrint(
+            '[SyncService] 云端消息变少（$serverTotal < $lastSyncedSeq），游标重置，下轮全量重拉',
+          );
+          await storage.setLastSyncedSeq(0);
+          // 这一轮先照常处理已拿到的（通常为空），下一轮全量会补齐。
+        }
+
         // 1. （已移除）这里曾经收集"消息列表涉及的 sessionId 集合"，作为"云端还有哪些会话"
         //    的判据之一。两条路都断了：
         //      · 级联删除本身在 2026-10-22 误删事故后被移除；
