@@ -155,6 +155,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ],
               ),
             ),
+          // 设置没推上云（服务器离线）→ 明确告诉用户"已暂存，会补"。
+          //
+          // 不说的话用户以为改成功了，换台设备/重装后就发现配置没了，
+          // 而且完全不知道该怪谁。
+          if (settingsProvider.settingsPushError != null)
+            Container(
+              width: double.infinity,
+              color: isDark ? const Color(0xFF2A3441) : const Color(0xFFEFF6FF),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  const Icon(Icons.cloud_off_outlined, size: 18, color: Color(0xFF3B82F6)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      settingsProvider.settingsPushError!,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: isDark ? const Color(0xFFBFDBFE) : const Color(0xFF1E40AF),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           Expanded(
             // 只读时挡住所有点击/滑动，避免"看着能点、点了白改"。
             child: AbsorbPointer(

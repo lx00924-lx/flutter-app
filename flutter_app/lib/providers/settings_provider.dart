@@ -1190,21 +1190,24 @@ class SettingsProvider extends ChangeNotifier {
         //   · 两台都改过 → 版本大的赢（服务端时钟是唯一时钟，不受设备时差影响）。
         final cloudVersion = cloud.settingsUpdatedAt;
         final localVersion = _settings.settingsUpdatedAt;
-        if (cloudVersion > localVersion) {
+        // 本地有**还没推上去的改动**（pendingSettingsPush）时，绝不能用云端覆盖本地 ——
+        // 那正是"离线改了设置、恢复后一联网就被打回原值"的形状。
+        // 这种情况下面会走"不覆盖 + 回推本地"，让云端收敛到用户刚改的那份。
+        final hasUnpushedLocalEdits = StorageService.instance.pendingSettingsPush;
+        final didApplyCloud = cloudVersion > localVersion && !hasUnpushedLocalEdits;
+        if (didApplyCloud) {
           _settings = cloud;
         } else {
           // 不覆盖本地，但要把本机的值推上去，让云端收敛到本地这一份。
           // （否则本机永远停在"本地新、云端旧"，另一台就永远是旧的。）
           debugPrint(
-            '[Settings] 跳过云端覆盖：cloud=$cloudVersion <= local=$localVersion，改为回推本地',
+            '[Settings] 跳过云端覆盖：cloud=$cloudVersion <= local=$localVersion'
+            '${hasUnpushedLocalEdits ? "（本地有未推送改动）" : ""}，改为回推本地',
           );
-          Future.microtask(() {
-            SyncService.instance.pushSettings(
-              userId: _settings.loginAccount,
-              settings: _settings,
-              clientSessionId: _settings.clientSessionId,
-            );
-          });
+          // 不在这里直接 pushSettings（那是整份全量推，会绕过指纹机制）。
+          // 只记一个"待补推"，由外层 _debouncePushSettings / retryPendingSettingsPush
+          // 走字段级增量路径推上去 —— 那样只发真正变过的那几个字段。
+          await StorageService.instance.setPendingSettingsPush(true);
         }
         _settings.isHarnessOnline = keepHarnessOnline;
 
@@ -1226,18 +1229,22 @@ class SettingsProvider extends ChangeNotifier {
 
         // 字段级增量推送的指纹基线也要跟着对齐到"刚拉到的那份"。
         //
-        // 覆盖完之后本地 == 云端，此刻**没有任何字段需要再推**。若基线不更新，
-        // 下一次防抖推送会把整份当成"全变了"重发一遍（内容一样但白跑一次，
-        // 并且会把云端 settingsUpdatedAt 顶掉，让另一端误以为设置变过）。
-        //
-        // 用 toCloudMap() 而不是 toMap()：前者已按隐私规则脱敏（密钥置空），
-        // 与真正发出去的字段集一致，基线才对得上。
-        _pushedFieldHashes
-          ..clear()
-          ..addAll({
-            for (final entry in _settings.toCloudMap().entries)
-              entry.key: _valueFingerprint(entry.value),
-          });
+        // ⚠️ **只在真的用云端覆盖了本地时才对齐**。没覆盖时（本地更新 / 有未推改动）
+        // 本地才是权威，基线必须保持"落后"状态，让下一次推送把本地这份整份发上去；
+        // 若这时对齐，delta 会算成空集，用户刚改的东西永远推不出去。
+        if (didApplyCloud) {
+          _pushedFieldHashes
+            ..clear()
+            ..addAll({
+              for (final entry in _settings.toCloudMap().entries)
+                entry.key: _valueFingerprint(entry.value),
+            });
+        }
+
+        // 走到这里说明 pull 成功了 —— 云端真值已经拿到（覆盖或不覆盖都已裁决完毕）。
+        // 从这一刻起才允许推送：之前 `_pushSettingsGated` 会拒绝一切推送，
+        // 防止用"新设备的默认值"把云端已有配置整份盖掉。
+        _cloudSettingsPulledOnce = true;
 
         _save(pushToCloud: false);
       }
@@ -1279,6 +1286,26 @@ class SettingsProvider extends ChangeNotifier {
   ///
   /// 首次推送（表为空）时所有字段都算"变了"，自然是全量 —— 正是需要的。
   final Map<String, String> _pushedFieldHashes = <String, String>{};
+
+  /// 本次进程里**是否已经成功拉到过一次云端设置**。
+  ///
+  /// 用途：**没拿到云端真值之前，禁止整份推送。**
+  ///
+  /// 为什么必须有这道闸：新设备（或清过缓存）的本地 Hive 里是一份**代码默认值**，
+  /// 而不是空。如果启动时 pull 失败（服务器离线 / 网络抖动），随后用户随手改个
+  /// 开关触发推送，`_pushedFieldHashes` 还是空的 → 55 个字段全被当成"变了" →
+  /// 把这份默认值整份推上去，**云端另一台设备调过的配置就被盖掉了**。
+  ///
+  /// 刻意**不落盘**：每次启动都重新验证一次。代价是服务器离线启动时改的设置
+  /// 要等恢复后才保存，但这正是要的行为 —— 宁可晚一点保存，也不能用默认值覆盖。
+  bool _cloudSettingsPulledOnce = false;
+
+  /// 设置推送失败时给界面看的一句话（null = 一切正常）。
+  ///
+  /// 用途：服务器离线时用户改设置，改动其实只是暂存在本地，必须明确告诉他
+  /// 「没保存到云端，稍后自动重试」—— 否则他以为改成功了，换机后就发现没了。
+  String? _settingsPushError;
+  String? get settingsPushError => _settingsPushError;
 
   /// 算一份"只含变化字段"的推送载荷。
   ///
@@ -1368,6 +1395,23 @@ class SettingsProvider extends ChangeNotifier {
       ..clear()
       ..addAll(omit);
 
+    // 没拿到云端真值之前，**一律不许推**。
+    //
+    // 新设备（或清缓存后）本地是一份代码默认值，不是空。启动时若 pull 失败，
+    // 随手改个开关就会把这份默认值整份推上去 —— 云端另一台设备调过的配置
+    // （提示词、头像、开关）全被盖掉。这里先补拉一次，拉到了再按增量推；
+    // 拉不到就记"待补推"，等服务器回来由 retryPendingSettingsPush 补。
+    if (!_cloudSettingsPulledOnce) {
+      await pullCloudSettings();
+      if (!_cloudSettingsPulledOnce) {
+        await StorageService.instance.setPendingSettingsPush(true);
+        _settingsPushError = '服务器未连接，设置改动已暂存，连上后自动同步';
+        notifyListeners();
+        debugPrint('[Settings] 尚未拉到云端设置，放弃本次推送（避免用本地默认值覆盖云端）');
+        return false;
+      }
+    }
+
     // 只推变化的字段：图片字段上面已按需剔除，其余字段按指纹比对。
     // 首次推送时表为空 → 全部字段都算"变了" → 自动退化成全量（正是需要的）。
     final fullPayload = _settings.toCloudMap();
@@ -1394,10 +1438,18 @@ class SettingsProvider extends ChangeNotifier {
       if (omit.isNotEmpty) {
         debugPrint('[Settings] 本次推送省略未变更的图像字段: ${omit.join(', ')}');
       }
+      if (_settingsPushError != null) {
+        _settingsPushError = null;
+        notifyListeners();
+      }
     } else {
       // 服务器没开/断网：记一个持久标记，等同步时由 retryPendingSettingsPush 补推。
       // 以前失败就完全没人管了 —— 那条改动一直躺在本地，换机恢复时看不到。
       await StorageService.instance.setPendingSettingsPush(true);
+      if (_settingsPushError == null) {
+        _settingsPushError = '服务器未连接，设置改动已暂存，连上后自动同步';
+        notifyListeners();
+      }
       debugPrint('[Settings] 设置推送失败，已标记待补推');
     }
     return ok;
