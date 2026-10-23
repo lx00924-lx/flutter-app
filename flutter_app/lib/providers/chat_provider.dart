@@ -10,7 +10,6 @@ import '../services/api_service.dart';
 import '../services/asr_service.dart';
 import '../services/notification_service.dart';
 import '../services/storage_service.dart';
-import '../services/sync_debug.dart';
 import '../services/sync_service.dart';
 import '../services/tts_service.dart';
 import '../main.dart' show rootNavigatorKey;
@@ -656,12 +655,6 @@ class ChatProvider extends ChangeNotifier {
     _periodicSyncTicks = 0;
     _periodicSyncTimer = Timer.periodic(const Duration(seconds: 12), (_) {
       _periodicSyncTicks++;
-      // 诊断打点：用来区分「定时器本身没跑」和「跑了但被状态挡住」。
-      // 2026-10-23 实测：游标写成功后 2 分半没有任何请求，而 CPU 几乎不动 ——
-      // 这两种情况的修法完全不同，只靠外部观察分不出来。
-      SyncDebug.log(
-        'tick #$_periodicSyncTicks isGenerating=$_isGenerating',
-      );
       // 每 10 分钟重发一次待办通知（同一个通知 id，只是刷新时间）：
       // 用户可能把通知清过、或手机重启过，而电脑端还在等 —— 这类"卡住"的状态
       // 必须持续可见（用户明确要求：别因为划掉通知就消失）。
@@ -1421,7 +1414,7 @@ class ChatProvider extends ChangeNotifier {
       if (userId.isEmpty) {
         if (attempt < 2) {
           await Future<void>.delayed(const Duration(seconds: 3));
-          return _pushRebuiltSessions(attempt: attempt + 1);
+          return await _pushRebuiltSessions(attempt: attempt + 1);
         }
         debugPrint('[ChatProvider] 恢复会话未能推送：userId 还没就绪');
         return;
