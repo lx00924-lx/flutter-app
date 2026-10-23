@@ -613,6 +613,17 @@ class SyncService {
       // 本轮会话表对齐已经处理过的会话 id（step 2 必须跳过它们）
       final touchedThisRound = <String>{};
 
+      // 0bb. 先消化"别的设备删掉了什么"——**必须早于会话表对账**。
+      //
+      // 对账里有一条"云端缺了某个会话 → 把本地那份反向补传上去"（10-22 误删
+      // 事故后加的保险）。如果先对账再处理删除信号，本地还留着那些已删会话，
+      // 就会被反向补传推回云端 —— 表现就是"删掉的会话过一会儿自己回来了"。
+      //
+      // 为什么不用 WebSocket 广播就够了：广播只在对方此刻正好连着时有效。实测
+      // 手机的推送通道断过一次 44 分钟，期间删除全部丢失。这里是轮询路径上的
+      // 兜底，重复拉到是幂等的。
+      await flushRemoteDeletions(userId: cleanUserId, clientSessionId: clientSessionId);
+
       // 0c. 先对齐会话表 —— **还没发过消息的空会话只存在于这张表里**，
       //     靠下面的消息列表永远反推不出来。所以必须发生在拉消息之前。
       //
@@ -945,6 +956,84 @@ class SyncService {
     await StorageService.instance.addPendingPushMessageIds(
       messages.map((m) => m.id).where((id) => id.isNotEmpty),
     );
+  }
+
+  /// 拉取并执行"别的设备发来的删除信号"。
+  ///
+  /// 服务端删除时除了广播 `session_deleted` / `message_deleted`，还会往
+  /// `deletion_signals.json` 追加一条记录。这里每轮同步拉一次，把自己也有的
+  /// 东西删掉 —— 于是**推送通道断着也能收敛**。
+  ///
+  /// 三条安全性：
+  /// 1. 只在服务端**明确记了**"这个 id 被删了"时才删本地（不是靠"云端缺席"推断，
+  ///    那正是 10-22 误删事故的形状）；
+  /// 2. 重复拉到同一信号是幂等的（删不存在的东西是空操作）；
+  /// 3. 服务端 7 天自动清理，不会无限增长。
+  ///
+  /// ⚠️ 必须早于 `_mergeRemoteSessions`：那里有"云端缺了 → 反向补传本地"的保险，
+  /// 先对账再删就会把已删会话又推回云端（"删掉的会话自己回来了"）。
+  Future<void> flushRemoteDeletions({
+    required String userId,
+    String? clientSessionId,
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty) return;
+    final signals = await pullDeletionSignals(
+      userId: cleanUserId,
+      clientSessionId: clientSessionId,
+    );
+    if (signals.isEmpty) return;
+
+    final storage = StorageService.instance;
+    var sessionsRemoved = 0;
+    var messagesRemoved = 0;
+    for (final signal in signals) {
+      final id = (signal['id'] as String?)?.trim() ?? '';
+      final kind = (signal['kind'] as String?)?.trim() ?? '';
+      if (id.isEmpty) continue;
+      if (kind == 'session') {
+        if (storage.hasSession(id)) {
+          await storage.deleteSession(id);
+          sessionsRemoved++;
+        }
+      } else if (kind == 'message') {
+        if (storage.getMessageById(id) != null) {
+          await storage.deleteMessage(id);
+          messagesRemoved++;
+        }
+      }
+    }
+    if (sessionsRemoved > 0 || messagesRemoved > 0) {
+      debugPrint(
+        '[SyncService] 执行远端删除信号：会话 $sessionsRemoved 个、消息 $messagesRemoved 条',
+      );
+    }
+  }
+
+  /// 拉"别的设备删了什么"的清单（服务端 `/api/deletion-signals`）。
+  ///
+  /// 失败时返回空列表 —— 删东西这件事宁可这一轮不做，也绝不能因为网络抖动误删。
+  Future<List<Map<String, dynamic>>> pullDeletionSignals({
+    required String userId,
+    String? clientSessionId,
+  }) async {
+    final cleanUserId = userId.trim();
+    if (cleanUserId.isEmpty) return const [];
+    try {
+      final resp = await _dio.get(
+        '$serverBaseUrl/api/deletion-signals/$cleanUserId',
+        options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
+      );
+      final data = resp.data;
+      if (data is! List) return const [];
+      return data
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList(growable: false);
+    } catch (e) {
+      debugPrint('[SyncService] 拉删除信号失败（本轮跳过，不误删）: $e');
+      return const [];
+    }
   }
 
   /// 补推离线期间没推上去的消息。

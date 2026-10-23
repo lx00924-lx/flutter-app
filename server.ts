@@ -997,7 +997,91 @@ async function safeWriteJSON(filePath: string, data: any): Promise<void> {
   const tempPath = `${filePath}.tmp.${Math.random().toString(36).substring(2, 9)}`;
   const content = JSON.stringify(data, null, 2);
   await fs.writeFile(tempPath, content, "utf-8");
-  await fs.rename(tempPath, filePath);
+
+  // rename 覆盖目标文件在 **Windows** 上是"有机会失败"的：只要那一刻有别的
+  // 句柄打开着目标文件（读了一半的 safeReadJSON、杀毒软件扫描、索引服务），
+  // MoveFileEx 就会抛 EPERM/EBUSY。实测生产库里发生过：
+  //   Delete session error: EPERM: rename 'messages_v2.json.tmp.eh2scj6'
+  //   -> 'messages_v2.json'
+  // 而"删除会话"恰好是先删消息再存 messages_v2.json —— 于是用户的删除
+  // 在界面上看着是成功的（请求 500 但客户端未必提示），云端其实一条没少。
+  //
+  // 这里做有限次重试（总共约 0.7 秒）。仍然失败就把临时文件收拾掉再抛出，
+  // 让调用方看到真实错误，而不是留下满地 .tmp 残骸。
+  let lastErr: any = null;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await fs.rename(tempPath, filePath);
+      return;
+    } catch (err: any) {
+      lastErr = err;
+      const code = err?.code ?? "";
+      if (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES") break;
+      // 20 / 40 / 80 / 160 / 320 ms
+      await new Promise((r) => setTimeout(r, 20 * Math.pow(2, attempt)));
+    }
+  }
+  await fs.unlink(tempPath).catch(() => {});
+  throw lastErr ?? new Error(`safeWriteJSON: rename failed for ${filePath}`);
+}
+
+/**
+ * 删除信号清单：`{ <userId>: [ { id, kind, deletedAt }, ... ] }`
+ *
+ * 为什么单独一张表、而不是在会话表里打墓碑标记：
+ * 会话表参与"对账合并"，往里塞墓碑会让「云端缺了某个会话」重新变成可推断的
+ * 删除依据 —— 那正是 10-22 误删整段对话的根源。这里是一份**独立的事件清单**，
+ * 只由客户端主动读取，不参与任何合并判定。
+ */
+const DELETION_SIGNALS_FILE = path.join(DATA_DIR, "deletion_signals.json");
+
+/** 信号保留 7 天：足够覆盖"对方好几天没开 App"的情况，又不会无限增长。 */
+const DELETION_SIGNAL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** 记一条删除信号（会话或消息），并顺手清理过期的。 */
+async function appendDeletionSignal(
+  userId: string,
+  id: string,
+  kind: "session" | "message",
+): Promise<void> {
+  const cleanUserId = (userId || "").trim();
+  const cleanId = (id || "").trim();
+  if (!cleanUserId || !cleanId) return;
+  try {
+    await withFileLock(DELETION_SIGNALS_FILE, async () => {
+      const all = await safeReadJSON<Record<string, any[]>>(DELETION_SIGNALS_FILE, {});
+      const now = Date.now();
+      const list = (all[cleanUserId] || []).filter(
+        (s: any) => s && typeof s.deletedAt === "number" && now - s.deletedAt < DELETION_SIGNAL_TTL_MS,
+      );
+      // 同一个 id 只留一条（重复删同一会话时不该堆积）
+      const already = list.some((s: any) => s.id === cleanId && s.kind === kind);
+      if (!already) list.push({ id: cleanId, kind, deletedAt: now });
+      all[cleanUserId] = list;
+      await safeWriteJSON(DELETION_SIGNALS_FILE, all);
+    });
+  } catch (err) {
+    // 信号写失败不能影响删除本身（删除已经生效了，只是这次传播可能丢）
+    console.error("appendDeletionSignal error:", err);
+  }
+}
+
+/** 清掉历史遗留的 `*.tmp.*` 残骸（进程启动时跑一次）。 */
+async function sweepStaleTempFiles(): Promise<void> {
+  for (const dir of [DATA_DIR, UPLOADS_DIR]) {
+    try {
+      const entries = await fs.readdir(dir);
+      let removed = 0;
+      for (const name of entries) {
+        if (!name.includes(".tmp.")) continue;
+        await fs.unlink(path.join(dir, name)).catch(() => {});
+        removed++;
+      }
+      if (removed > 0) console.log(`[维护] 清理了 ${removed} 个残留临时文件（${dir}）`);
+    } catch {
+      /* 目录不存在就算了 */
+    }
+  }
 }
 
 // Robust JSON reader with auto-recovery for corrupted JSON files
@@ -2155,6 +2239,8 @@ const upload = multer({
 
 async function startServer() {
   await ensureDirs();
+  // 清掉历史上 rename 失败留下的 .tmp 残骸（不影响数据，只是脏文件）
+  await sweepStaleTempFiles();
 
   const app = express();
   /**
@@ -3358,6 +3444,8 @@ async function startServer() {
         }
       });
       io.to(`user_${userId}`).emit("message_deleted", messageId);
+      // 与删会话同理：广播之外再落一条信号，让"当时不在线"的另一端也能收敛。
+      await appendDeletionSignal(userId, String(messageId).trim(), "message");
       res.json({ success: true });
     } catch (error) {
       console.error("Delete message error:", error);
@@ -3396,6 +3484,16 @@ async function startServer() {
       // Broadcast session deletion to all connected devices of this user
       io.to(`user_${userId}`).emit("session_deleted", { sessionId: cleanSessionId });
       io.emit("session_deleted", { userId, sessionId: cleanSessionId });
+      // **删除信号**（不依赖 WebSocket 的那条路）
+      //
+      // 广播只在对方"此刻正好连着"时才有效 —— 实测手机的推送通道可能连续几十分钟
+      // 连不上（22:07 断开后 44 分钟没重连），于是删除永远传不过去；而另一端对账时
+      // 又因为"云端缺席 ≠ 被删了"这条保险而不敢删，最后变成"删了又自己补回来"。
+      //
+      // 所以除广播外再落一条信号：另一端每轮同步多拉一次这个清单（几十字节），
+      // 看到自己有的 id 就删本地。重复拉到是幂等的，信号 7 天后清理，
+      // 不需要 ACK 也不需要墓碑参与会话表合并。
+      await appendDeletionSignal(userId, cleanSessionId, "session");
       res.json({ success: true });
     } catch (error) {
       console.error("Delete session error:", error);
@@ -3403,9 +3501,39 @@ async function startServer() {
     }
   });
 
+  /**
+   * 拉删除信号清单。
+   *
+   * 客户端每轮同步（12 秒一次）多拉这个，看到自己有的 id 就删本地 —— 这样
+   * 即使推送通道一直断着，删除也会在下一轮轮询里收敛。返回体很小（通常几条）。
+   *
+   * `since` 可选：只返回该时间戳之后的信号，客户端可以记住上次拉到的位置。
+   * 不传就全给（7 天内的），重复处理是幂等的。
+   */
+  app.get("/api/deletion-signals/:userId", async (req, res) => {
+    const userId = (req.params.userId || "").trim();
+    if (!(await verifyUserIdentity(req, res, userId, "读取删除信号"))) return;
+    try {
+      const all = await safeReadJSON<Record<string, any[]>>(DELETION_SIGNALS_FILE, {});
+      const now = Date.now();
+      const sinceRaw = parseInt(String(req.query.since ?? ""), 10);
+      const since = Number.isFinite(sinceRaw) ? sinceRaw : 0;
+      const list = (all[userId] || []).filter(
+        (s: any) =>
+          s &&
+          typeof s.deletedAt === "number" &&
+          now - s.deletedAt < DELETION_SIGNAL_TTL_MS &&
+          s.deletedAt > since,
+      );
+      res.json(list);
+    } catch (error) {
+      console.error("Load deletion signals error:", error);
+      res.status(500).json({ error: "Failed to load deletion signals" });
+    }
+  });
+
   // REST API for active session IDs of a user
-  app.get("/api/active-sessions/:userId", async (req, res) => {
-    if (!(await verifyUserIdentity(req, res, req.params.userId, "读取会话编号"))) return;
+  app.get("/api/active-sessions/:userId", async (req, res) => {    if (!(await verifyUserIdentity(req, res, req.params.userId, "读取会话编号"))) return;
     try {
       const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
       const userMessages = allMessages[req.params.userId] || [];
