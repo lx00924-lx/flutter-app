@@ -57,6 +57,18 @@ class BridgeTransition {
 /// 后台静默实时同步服务：实现 Flutter 客户端与服务端的自动增量同步及多端互斥下线监控
 class SyncService {
   static final SyncService instance = SyncService._();
+
+  /// 「生成中」的占位消息最多把游标挡多久。
+  ///
+  /// 正常情况下不该走到这个分支：任务结束后服务端会把那条占位写成最终版本
+  /// （状态不再是 generating），游标立刻就能推进。只有进程崩了、任务永远没结束、
+  /// 或者那条占位被彻底遗弃时，才需要靠超时把它放行 —— 否则游标会被一条
+  /// 卡死的占位永久挡住，后面的消息全都拉不下来。
+  ///
+  /// 5 分钟的依据：服务端等待本地宿主的硬上限是 300 秒（AGENT_TASK_TIMEOUT_MS），
+  /// 比它还久就说明这条占位不会再有下文了。
+  static const Duration _generatingStallTimeout = Duration(minutes: 5);
+
   SyncService._() {
     HttpClientHelper.configureProxy(_dio);
   }
@@ -826,19 +838,52 @@ class SyncService {
         // 必须放在"消息都已落盘之后"：如果先推进游标再写盘、而写盘中途失败，
         // 那批消息就永远拉不回来了（游标说"拿过了"，本地却什么都没有）。
         // 反过来（先写盘、游标推进失败）最坏只是下一轮重复拉一次，是安全的。
+        //
+        // ⚠️ **「生成中」的消息不能推进游标**（2026-10-24 排查出的死锁）：
+        //
+        //   服务端会在任务开始时就落盘一条空占位（content=''、status='generating'），
+        //   跑完后**原地覆盖**成最终答案 —— 数组位置没变 → seq 也没变。
+        //   如果占位的 seq 被记进游标（比如 50），那答案就永远满足不了 `seq > 50`，
+        //   手机问多少次都拿不到它（表现：卡在"连接中断"、下拉刷新也救不回来）。
+        //
+        // 跳过它之后：占位那条每轮会被重复拉一次（几十字节），一旦服务端把它写成
+        // 最终版本，它的 seq 就 > 旧游标，于是能正常拿到。
+        //
+        // 兜底：超过 [_generatingStallTimeout] 还停在 generating 的（进程崩了 / 任务
+        // 永远没结束）就允许推进 —— 否则游标会被一条卡死的占位永远挡住。
         try {
+          final now = DateTime.now();
           var maxSeq = lastSyncedSeq;
           var seqSamples = 0;
+          var stalled = 0;
           for (var item in list) {
-            if (item is Map) {
-              final s = item['seq'];
-              if (s is num) {
-                seqSamples++;
-                if (s.toInt() > maxSeq) maxSeq = s.toInt();
-              }
+            if (item is! Map) continue;
+            final s = item['seq'];
+            if (s is! num) continue;
+            seqSamples++;
+            final seq = s.toInt();
+            if (seq <= maxSeq) continue;
+
+            final isGenerating = (item['status']?.toString() ?? '') == 'generating';
+            if (!isGenerating) {
+              maxSeq = seq;
+              continue;
+            }
+            // 生成中：看它躺了多久。时间戳解析不出来也按"刚生成"处理（更保守）。
+            DateTime? startedAt;
+            final raw = item['timestamp'] ?? item['createdAt'];
+            if (raw != null) startedAt = DateTime.tryParse(raw.toString());
+            final age = startedAt == null ? Duration.zero : now.difference(startedAt);
+            if (age > _generatingStallTimeout) {
+              stalled++;
+              maxSeq = seq;
             }
           }
-          SyncDebug.log('游标计算: 带seq的条目=$seqSamples/${list.length} maxSeq=$maxSeq 上次=$lastSyncedSeq');
+          SyncDebug.log(
+            '游标计算: 带seq的条目=$seqSamples/${list.length} maxSeq=$maxSeq 上次=$lastSyncedSeq'
+            '${stalled > 0 ? "（跳过 $stalled 条超时占位）" : ""}'
+            '（本轮跳过生成中的占位，不推进游标）',
+          );
           if (maxSeq > lastSyncedSeq) {
             await storage.setLastSyncedSeq(maxSeq);
           } else {

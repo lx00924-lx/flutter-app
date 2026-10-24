@@ -1409,12 +1409,42 @@ async function upsertMessage(userId: string, message: any) {
   await withFileLock(MESSAGES_FILE, async () => {
     const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
     if (!allMessages[userId]) allMessages[userId] = [];
-    const idx = allMessages[userId].findIndex((m: any) => m.id === message.id);
-    if (idx !== -1) {
-      allMessages[userId][idx] = { ...allMessages[userId][idx], ...message };
-    } else {
-      allMessages[userId].push(message);
+    const list = allMessages[userId];
+    const idx = list.findIndex((m: any) => m.id === message.id);
+    if (idx === -1) {
+      list.push(message);
+      allMessages[userId] = list;
+      await safeWriteJSON(MESSAGES_FILE, allMessages);
+      return;
     }
+
+    const prev = list[idx];
+    const wasGenerating = (prev?.status ?? '').toString() === 'generating';
+    const nowGenerating = (message?.status ?? '').toString() === 'generating';
+
+    // ⚠️ 「占位 → 最终版本」必须**换一个新的 seq**，不能原地覆盖。
+    //
+    // 本文件的 seq 是「数组下标 + 1」（见 /api/messages 的实现），所以原地覆盖
+    // 不会改变它的 seq。而客户端靠 `afterSeq = 上次拉到的 seq` 做增量：
+    // 任务开始时那条空占位（status=generating）被客户端拉到、游标推进到它，
+    // 等它被原地写成最终答案时 seq 没变 —— 客户端问「50 之后的」永远拿不到它，
+    // 回复就此永久丢失（2026-10-24 Gemini 审核指出 + 我核对代码确认）。
+    //
+    // 客户端那侧已经加了「生成中的占位不推进游标」作为第一道防线；这里把完成的
+    // 那条**挪到数组末尾**，让它拿到一个必然大于任何旧游标的 seq，作为第二道。
+    // 只有当「旧的是 generating、新来的不是」时才移动 —— 否则每次内容更新都会
+    // 改变位置，把时间顺序搅乱。
+    if (wasGenerating && !nowGenerating) {
+      const merged = { ...prev, ...message };
+      list.splice(idx, 1);
+      list.push(merged);
+      allMessages[userId] = list;
+      await safeWriteJSON(MESSAGES_FILE, allMessages);
+      return;
+    }
+
+    list[idx] = { ...prev, ...message };
+    allMessages[userId] = list;
     await safeWriteJSON(MESSAGES_FILE, allMessages);
   });
 }
@@ -2318,6 +2348,13 @@ async function startServer() {
         "x-client-session-id",
       ],
       methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      // 允许浏览器端读取的**响应**头。
+      //
+      // X-Msg-Total 是 `/api/messages` 下发的"当前总条数"，客户端靠它发现
+      // "seq 回退过"（删消息会让 seq = 下标+1 缩短）并重置游标。
+      // Flutter 原生客户端拿响应头不受 CORS 约束，但 Web 端读不到 —— 不声明的话
+      // 这段逻辑在浏览器里就是静默失效（值恒为 null，看起来像"没回退"）。
+      exposedHeaders: ["X-Msg-Total"],
       credentials: false,
       maxAge: 600,
     }) as any,
@@ -3318,6 +3355,13 @@ async function startServer() {
         (m: any) => m && m.id && m.sessionId && m.sessionId.toString().trim() !== ''
       );
       const rawAfter = String((req.query.afterSeq as string | undefined) ?? "").trim();
+      // 当前总条数：全量与增量都下发。
+      //
+      // 客户端用它判断「seq 是不是回退过」（删消息会让 seq = 下标+1 缩短）：
+      // total < 本地游标 就说明游标跑到前面去了，需要重置成全量重拉。
+      // 以前只加在增量分支里：全量时拿不到这个头不影响功能，但将来谁想在全量
+      // 路径上也做一次校验就会踩空 —— 干脆两条路都给。
+      res.setHeader("X-Msg-Total", String(userMsgs.length));
       if (rawAfter === "") {
         // 全量：每条带上 seq，客户端据此记住「我拿到第几个」
         res.json(userMsgs.map((m: any, i: number) => ({ ...m, seq: i + 1 })));
@@ -3338,7 +3382,7 @@ async function startServer() {
       //
       // 这里把「当前总条数」额外下发（响应头，不破坏数组返回体），客户端发现
       // total < 自己的游标就知道 seq 回退过，把游标重置成 0 重新全量拉一次。
-      res.setHeader("X-Msg-Total", String(userMsgs.length));
+      // （响应头已在函数上方统一设过，这里不再重复。）
       res.json(
         userMsgs
           .map((m: any, i: number) => ({ ...m, seq: i + 1 }))
