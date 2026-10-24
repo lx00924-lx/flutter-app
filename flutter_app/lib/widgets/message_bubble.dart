@@ -496,12 +496,24 @@ class MessageBubble extends StatelessWidget {
           if (!groupedWithPrev)
             Padding(
               padding: const EdgeInsets.only(bottom: 4),
-              child: AppAvatar(
-                imageBytes: isUser ? userAvatarBytes : aiAvatarBytes,
-                radius: 18,
-                fallbackIcon: isUser ? Icons.person : Icons.smart_toy_outlined,
-                fallbackBgColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFE0F2FE),
-                fallbackIconColor: const Color(0xFF0284C7),
+              child: Row(
+                // 名字紧挨着头像，但**朝气泡那一侧**：
+                //   自己的消息右对齐 → 名字在头像左边
+                //   AI 的消息左对齐 → 名字在头像右边
+                // 这样读起来是「名字先出现、然后是这个人说的话」。
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: isUser
+                    ? [
+                        _buildSenderName(settingsProvider.settings.userName, isDark, isUser: true),
+                        const SizedBox(width: 8),
+                        _buildAvatar(isUser, userAvatarBytes, aiAvatarBytes, isDark),
+                      ]
+                    : [
+                        _buildAvatar(isUser, userAvatarBytes, aiAvatarBytes, isDark),
+                        const SizedBox(width: 8),
+                        _buildSenderName(settingsProvider.settings.aiName, isDark, isUser: false),
+                      ],
               ),
             ),
           Row(
@@ -791,6 +803,38 @@ class MessageBubble extends StatelessWidget {
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  /// 头像（从原来的内联写法抽出来，好和名字并排）。
+  Widget _buildAvatar(bool isUser, Uint8List? userAvatarBytes, Uint8List? aiAvatarBytes, bool isDark) {
+    return AppAvatar(
+      imageBytes: isUser ? userAvatarBytes : aiAvatarBytes,
+      radius: 18,
+      fallbackIcon: isUser ? Icons.person : Icons.smart_toy_outlined,
+      fallbackBgColor: isDark ? const Color(0xFF1E293B) : const Color(0xFFE0F2FE),
+      fallbackIconColor: const Color(0xFF0284C7),
+    );
+  }
+
+  /// 头像旁边的发送者名字（用户 2026-10-24 要求：画红框的位置补上名字）。
+  ///
+  /// 名字为空时**不占位**（返回 `SizedBox.shrink()` 而不是一个空 Text）——
+  /// 否则会留出一段莫名的空白，看起来像对齐错了。
+  /// 名字用比正文小一号、更淡的颜色：它是**标识**，不该和内容抢注意力。
+  Widget _buildSenderName(String rawName, bool isDark, {required bool isUser}) {
+    final name = rawName.trim();
+    if (name.isEmpty) return const SizedBox.shrink();
+    return Text(
+      name,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontSize: 12.5,
+        fontWeight: FontWeight.w600,
+        letterSpacing: 0.2,
+        color: isDark ? const Color(0xFFCBD5E1) : const Color(0xFF475569),
       ),
     );
   }
