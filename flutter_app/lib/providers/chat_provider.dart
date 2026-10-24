@@ -1493,16 +1493,13 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
           _currentSession = _sessions.first;
           _messages = _storage.getMessagesForSession(_sessions.first.id);
         } else {
-          // 若全部被清空，自动新建一个干净对话
-          final newSession = ChatSession(
-            id: const Uuid().v4(),
-            title: '新对话 ${DateTime.now().hour}:${DateTime.now().minute.toString().padLeft(2, '0')}',
-            model: settingsProvider.activeModelDisplayName,
-            isSynced: false,
-          );
-          _storage.saveSession(newSession);
-          _sessions = [newSession];
-          _currentSession = newSession;
+          // 列表真的空了（用户把会话全删了）→ **保持空**，不再自动新建。
+          //
+          // 以前这里会立刻建一个「新对话 HH:mm」，于是用户删完 1 秒后列表里又冒出
+          // 一个空会话（2026-10-24 实测：删完发消息，界面自己多出一个新对话）。
+          // 空列表是合法状态：界面显示空态，用户点「+」或直接发消息时才创建 ——
+          // `sendMessage` 开头已有 `if (_currentSession == null) createNewSession();` 兜底。
+          _currentSession = null;
           _messages = [];
         }
         notifyListeners();
@@ -1547,10 +1544,32 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void selectSession(ChatSession session) {
+    final leaving = _currentSession;
+    // 切走时顺手清掉**空壳会话**：一条消息都没有的会话留着只会让列表越来越脏
+    // （2026-10-24 用户报：新建会话后不发消息返回其他会话，空会话仍然存在）。
+    //
+    // 只清「正要离开的那个」而不是扫全表：扫全表会在同步还没把消息拉回来时
+    // 误删刚收到消息的会话。删的是**同一台设备的本地+云端**（走 deleteSession），
+    // 所以另一端也会跟着清掉 —— 它本来就是空的，删了不损失任何内容。
+    if (leaving != null &&
+        leaving.id != session.id &&
+        _storage.getMessagesForSession(leaving.id).isEmpty) {
+      unawaited(_discardEmptySession(leaving.id));
+    }
     _currentSession = session;
     _messages = _storage.getMessagesForSession(session.id);
     notifyListeners();
     _silentSyncFromServer();
+  }
+
+  /// 丢掉一个空壳会话（本地立刻消失，服务端在后台删）。
+  ///
+  /// 用 `deleteSession` 而不是只删本地：只删本地的话下一轮对账会从云端把它拉回来，
+  /// 白删一遍。
+  Future<void> _discardEmptySession(String sessionId) async {
+    _sessions.removeWhere((s) => s.id == sessionId);
+    notifyListeners();
+    await deleteSession(sessionId);
   }
 
   void renameSession(String sessionId, String newTitle) {
@@ -2178,6 +2197,9 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     if (idx == -1) return false;
     final userMsg = _messages[idx];
     if (userMsg.role != MessageRole.user) return false;
+    // 会话可能为空（用户把会话全删了，列表现在是合法空态）—— 那时没有会话可重发。
+    // 下面几处 `_currentSession!` 依赖这里挡住。
+    if (_currentSession == null) return false;
 
     final online = await isNetworkOnline();
     if (!online) {
@@ -2344,6 +2366,8 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
     if (idx == -1) return false;
     final targetMsg = _messages[idx];
     if (targetMsg.role != MessageRole.assistant) return false;
+    // 同 resendMessage：空列表是合法状态，没有会话就没有"重新生成"。
+    if (_currentSession == null) return false;
 
     // 🛡️ Agent 模式双重防护：避免重复调用本地 Agent 执行具有副作用的真实任务
     if (targetMsg.isAgentMode || settingsProvider.settings.defaultAgentMode) {
