@@ -726,7 +726,19 @@ const isPlausibleAgentToken = (token: string): boolean => {
  */
 const readUserAgentToken = (record: any): string => {
   if (!record || typeof record !== "object") return "";
-  const candidate = record.harnessToken ?? record.agentToken ?? "";
+  const raw = record.harnessToken ?? record.agentToken ?? "";
+  // ⚠️ **必须先解密**：`harnessToken` 在 settings 里是加密存储的（`enc:v1:<iv>:<tag>:<ct>`，
+  // 见 `decryptSecret` / `SECRET_FIELDS`）。
+  //
+  // 不解密会怎样（2026-10-24 实测踩到）：`isPlausibleAgentToken` 只校验"长度 ≥ 16"，
+  // 加密串（113 字符）**能通过**，于是它被当成明文 token 去 `connectedAgents.get(...)`
+  // 里查 —— 而这个 Map 的 key 是桥接注册时的**明文** token，永远查不到。
+  // 结果：桥接明明连着（日志有 `Local Agent connected`），服务端却判定"未连接"，
+  // 用户点新建会话收到「请确认电脑 LxAI 正在运行」，切思考深度也偶发"桥接不在线"。
+  //
+  // `decryptSecret` 对历史明文是幂等的（`isEncryptedSecret` 判断在前），所以这里加它
+  // 对老数据同样安全。
+  const candidate = decryptSecret(raw);
   return isPlausibleAgentToken(String(candidate)) ? String(candidate).trim() : "";
 };
 
