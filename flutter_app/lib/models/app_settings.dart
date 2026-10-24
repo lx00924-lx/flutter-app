@@ -472,7 +472,15 @@ class AppSettings {
     return AppSettings(
       isDarkMode: map['isDarkMode'] as bool? ?? false,
       activeEndpointId: activeId,
-      activeModelDisplayName: map['activeModelDisplayName']?.toString() ?? activeEp.cardName,
+      // 标题里括号那一段**永远跟着"当前激活的卡片"走**，不再读存下来的旧值。
+      //
+      // 以前是 `map['activeModelDisplayName'] ?? activeEp.cardName`，而那个字段
+      // 只在「切换接口」那一刻才更新（SettingsProvider 的 setActive 系列）。
+      // 用户从没切过接口 → 字段永远停在初始值「模型 V3」，于是界面上明明选的是
+      // deepseek-flash、标题却写着「hgggg (模型 V3)」（2026-10-24 实测：
+      // 云端 activeModelDisplayName=模型 V3，唯一卡片 cardName=deepseek-flash）。
+      // 它本来就该是派生值，不该有自己的持久状态。
+      activeModelDisplayName: activeEp.cardName,
       isLoggedIn: map['isLoggedIn'] as bool? ?? false,
       loginAccount: map['loginAccount']?.toString() ?? '',
       userName: map['userName']?.toString() ?? '用户',
