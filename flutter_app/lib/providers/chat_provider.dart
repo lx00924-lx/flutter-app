@@ -1238,14 +1238,34 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   /// 补拉服务端挂起的选择框：App 启动、重连、推送通道刚连上时都要对一次账，
   /// 否则断线期间挂起的问题在端上永远看不到（服务端 10 分钟后才过期）。
   Future<void> refreshPendingQuestions() async {
-    if (_pendingQuestion != null) return;
     try {
       final items = await SyncService.instance.fetchPendingQuestions(
         token: settingsProvider.settings.harnessToken,
         userId: settingsProvider.syncUserId,
         clientSessionId: settingsProvider.clientSessionId,
       );
-      if (items.isEmpty || _pendingQuestion != null) return;
+
+      if (items.isEmpty) {
+        // 服务端已经没有待答的问题了 —— 说明它被**另一台设备**答掉、或者宿主那边
+        // 已经作废。本地必须跟着收掉，否则这个弹窗会一直挂着等一个永远不会来的答案。
+        //
+        // ⚠️ 这里原来写的是 `if (_pendingQuestion != null) return;`（一律不动本地那份），
+        // 于是出现「手机上答完了，电脑上的弹窗不消失」（2026-10-24 实测用户报的）。
+        // 界面右侧那句「另一台设备回答后会自动收起」原本靠推送通道的
+        // `question_answered` 事件实现；但推送通道在穿透路径上会断（见 SyncService
+        // 的推送通道注释），断了就只剩这条轮询兜底 —— 所以这里**必须**能自愈。
+        //
+        // `orphaned`（宿主已不在）是给用户看的提示，不是"等待回答"，
+        // 不自动收，留给用户自己点。
+        final local = _pendingQuestion;
+        if (local != null && (local['state']?.toString() ?? 'pending') != 'orphaned') {
+          debugPrint('[ChatProvider] 选择框已被别处处理，本地收回: ${local['questionId']}');
+          dismissQuestion();
+        }
+        return;
+      }
+
+      if (_pendingQuestion != null) return;
       final first = items.first;
       final rawQuestions = first['questions'];
       _setPendingQuestion({
