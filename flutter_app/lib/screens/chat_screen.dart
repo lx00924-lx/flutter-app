@@ -34,6 +34,36 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _userScrolledUp = false;
   bool _isUserInteracting = false;
 
+  /// 打开「选择模型」底部面板 / 会话抽屉之前，输入焦点在哪个节点上（null = 当时键盘没开）。
+  ///
+  /// 为什么需要：这两个入口都会让 Flutter 把焦点挪走（抽屉抢焦点、bottom sheet 是新 route），
+  /// 于是**软键盘被收起来**；用户只是一个顺手改档位 / 翻一下会话列表，回来还得再点一次
+  /// 输入框才能接着打字。这里按打开前的真实状态恢复：原本开着就还给原来那个输入框，
+  /// 原本没开就什么都不做 —— 绝不擅自改变用户的状态。
+  ///
+  /// 和 `agent_quick_bar.dart` 的 `_imeNodeBeforeMenu` 是同一套做法（那边管下拉菜单，
+  /// 这边管抽屉和底部面板）。
+  FocusNode? _imeNodeBeforePanel;
+
+  /// 记下当前输入法状态（键盘开着记节点，没开记 null）
+  void _rememberImeState() {
+    final focus = FocusManager.instance.primaryFocus;
+    final isInput = focus != null && focus != FocusManager.instance.rootScope && focus.hasFocus;
+    _imeNodeBeforePanel = isInput ? focus : null;
+  }
+
+  /// 面板/抽屉关掉之后按原状态恢复焦点。
+  ///
+  /// 用 `addPostFrameCallback` 等一帧：面板路由关闭时 Flutter 自己也会做一轮焦点回收，
+  /// 抢在它前面恢复会被覆盖掉。
+  void _restoreImeState() {
+    final node = _imeNodeBeforePanel;
+    if (node == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!node.hasFocus) node.requestFocus();
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -165,7 +195,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _showModelSelector(BuildContext context) {
-    FocusManager.instance.primaryFocus?.unfocus();
+    // 先记下输入法状态，选完按原样恢复（以前这里直接 unfocus，选个模型就把键盘踢掉）
+    _rememberImeState();
     final settingsProvider = context.read<SettingsProvider>();
     final endpoints = settingsProvider.settings.apiEndpoints;
 
@@ -228,7 +259,8 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       },
     ).then((_) {
-      FocusManager.instance.primaryFocus?.unfocus();
+      // 面板关掉了：原来键盘开着就还给它，原来没开就什么都不做
+      _restoreImeState();
     });
   }
 
@@ -277,7 +309,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
     return Scaffold(
       onDrawerChanged: (isOpen) {
-        FocusManager.instance.primaryFocus?.unfocus();
+        // 打开时记下输入法状态，关闭时按原样还回去 —— 顺手翻一下会话列表再回来，
+        // 键盘应该还在，不用重新点输入框（以前这里无条件 unfocus，等于每次都踢掉键盘）。
+        if (isOpen) {
+          _rememberImeState();
+        } else {
+          _restoreImeState();
+        }
       },
       appBar: AppBar(
         title: InkWell(

@@ -1842,7 +1842,13 @@ class _ChatInputBarState extends State<ChatInputBar> with SingleTickerProviderSt
                               height: 6,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
-                                color: isHarnessOnline ? const Color(0xFF10B981) : const Color(0xFFF59E0B),
+                                // 在线 = 绿点；离线 = **灰点**。
+                                // 原来是琥珀黄（#F59E0B），用户 2026-10-24 要求改灰：
+                                // 黄色在状态语义里是"警告"，而 agent 离线是常态，
+                                // 一直亮着警示色会让人误以为出了问题。
+                                color: isHarnessOnline
+                                    ? const Color(0xFF10B981)
+                                    : (isDark ? const Color(0xFF64748B) : const Color(0xFF94A3B8)),
                               ),
                             ),
                           ],
