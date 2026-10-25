@@ -747,6 +747,19 @@ interface DeviceSession {
   deviceType: 'mobile' | 'desktop';
   loginTime: number;
   lastActive: number;
+  /**
+   * 客户端在**发起这次登录那一刻**的时间戳（毫秒），由客户端随请求带上来。
+   *
+   * 用途：挡住「在路上的旧登录请求」。实测场景（2026-10-25）：
+   *   A 发登录 → 先到 → 槽位 = A，A 显示"登录成功"；
+   *   B 的登录请求**更早发出、更晚到达** → 槽位被改回 B；
+   *   于是 A 刚拿到的凭证立刻无主，它的每个请求都被 403 拦下，
+   *   而界面上 A 还显示"已登录" —— 就是用户说的「1 顶回来之后 1 却提示登录失效」。
+   *
+   * 老客户端不带这个字段（=0），服务端**跳过**这项检查，保持原有行为：
+   * 宁可少一层保护，也不能把没升级的客户端锁在门外。
+   */
+  clientLoginAt?: number;
 }
 
 /**
@@ -3029,11 +3042,31 @@ async function startServer() {
       const cleanDeviceType: 'mobile' | 'desktop' = (deviceType === 'mobile') ? 'mobile' : 'desktop';
       const sessionId = (clientSessionId || `sess_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`).toString();
 
+      // 客户端发起这次登录的时刻（毫秒）。用来挡住「在路上的旧登录请求」——
+      // 见 DeviceSession.clientLoginAt 的注释。老客户端不带 → 0 → 跳过检查。
+      const incomingLoginAt = Number((req.body?.loginAt ?? 0)) || 0;
+
+      // 被判定为「过期登录」时不写盘，等锁释放后再回 409（reason 带出去便于排障）
+      let staleLogin = false;
+      let staleSlotAt = 0;
+
       await withFileLock(ACTIVE_SESSIONS_FILE, async () => {
         const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
         if (!sessions[username]) sessions[username] = {};
 
         const existingSession = sessions[username][cleanDeviceType];
+
+        // ⚠️ 先做时序检查，再做顶号：一旦槽位里那次登录比本次更晚，本次就该被拒绝。
+        //    这不会挡住正常的"用户换了设备主动登录"（那是更晚的请求），只挡迟到者。
+        if (existingSession && incomingLoginAt > 0) {
+          const slotAt = Number(existingSession.clientLoginAt ?? 0);
+          if (slotAt > 0 && incomingLoginAt < slotAt) {
+            staleLogin = true;
+            staleSlotAt = slotAt;
+            return;
+          }
+        }
+
         if (existingSession && existingSession.clientSessionId && existingSession.clientSessionId !== sessionId) {
           const reason = `您的账号已在另一台${cleanDeviceType === 'mobile' ? '手机' : '电脑'}上登录，当前设备已被下线。`;
           console.log(`[Kick] User ${username} logged in on new ${cleanDeviceType}, kicking previous session ${existingSession.clientSessionId}`);
@@ -3059,9 +3092,24 @@ async function startServer() {
           deviceType: cleanDeviceType,
           loginTime: Date.now(),
           lastActive: Date.now(),
+          // 记下这套凭证是"客户端什么时刻发起的登录"，供下一次比较先后
+          ...(incomingLoginAt > 0 ? { clientLoginAt: incomingLoginAt } : {}),
         };
         await safeWriteJSON(ACTIVE_SESSIONS_FILE, sessions);
       });
+
+      // ⚠️ 这次登录比槽位里已生效的那次更早 → 是迟到的旧请求，不能让它把别人顶下去。
+      //    客户端收到这个码应当**立即重试一次**（重试会带新的 loginAt，必然更大）。
+      if (staleLogin) {
+        console.log(
+          `[Login] 拒绝过期登录 username=${username} device=${cleanDeviceType} ` +
+            `incoming=${incomingLoginAt} < slot=${staleSlotAt}`,
+        );
+        return res.status(409).json({
+          error: "STALE_LOGIN",
+          message: "这次登录比已生效的那次更早（可能是在路上耽搁了），请重试。",
+        });
+      }
 
       console.log(`Login successful for username: ${username} on ${cleanDeviceType}`);
       res.json({

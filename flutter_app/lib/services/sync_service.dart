@@ -505,41 +505,68 @@ class SyncService {
     required String clientSessionId,
     required String deviceType,
   }) async {
-    try {
-      final url = '$serverBaseUrl/api/login';
-      final response = await _dio.post(
-        url,
-        data: {
-          'username': username.trim(),
-          'password': password,
-          'deviceType': deviceType,
-          'clientSessionId': clientSessionId,
-        },
-      );
+    final url = '$serverBaseUrl/api/login';
 
-      if (response.statusCode == 200 && response.data is Map) {
-        return {
-          'success': true,
-          'data': response.data,
-        };
-      }
-      return {
-        'success': false,
-        'message': '登录失败，请检查网络后重试',
-      };
-    } catch (e) {
-      if (e is DioException && e.response?.data is Map) {
-        final err = e.response!.data['error']?.toString();
+    // 最多试两次：第二次只为「这次登录被判为过期」而发。
+    //
+    // 为什么要带 `loginAt`：服务端拿它挡住**在路上的旧登录请求**。两台设备（或同一台
+    // 机器上的两个实例）几乎同时登录时，先到的那个可能被「发出更早、到得更晚」的请求
+    // 顶掉 —— 结果是刚登录成功的那台凭证立刻无主、每个请求都被 403 拦下，而界面上还
+    // 显示"已登录"（2026-10-25 实测：1 顶回账号后，1 自己反而提示登录失效）。
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        final response = await _dio.post(
+          url,
+          data: {
+            'username': username.trim(),
+            'password': password,
+            'deviceType': deviceType,
+            'clientSessionId': clientSessionId,
+            'loginAt': DateTime.now().millisecondsSinceEpoch,
+          },
+        );
+
+        if (response.statusCode == 200 && response.data is Map) {
+          return {
+            'success': true,
+            'data': response.data,
+          };
+        }
         return {
           'success': false,
-          'message': err ?? '账号或密码错误',
+          'message': '登录失败，请检查网络后重试',
+        };
+      } catch (e) {
+        if (e is DioException) {
+          final status = e.response?.statusCode;
+          final data = e.response?.data;
+          // 服务端判定这次登录比槽位里那一次更早（迟到了）→ 重试一次即可，
+          // 新请求的 loginAt 必然更大（除非系统时间被往回拨）。
+          if (status == 409 && data is Map && data['error'] == 'STALE_LOGIN') {
+            if (attempt == 0) continue;
+            return {
+              'success': false,
+              'message': '系统时间可能不准（登录时间早于已生效的那次），请校准时间后重试。',
+            };
+          }
+          if (data is Map) {
+            final err = data['error']?.toString();
+            return {
+              'success': false,
+              'message': err ?? '账号或密码错误',
+            };
+          }
+        }
+        return {
+          'success': false,
+          'message': '无法连接到服务器，请检查网络连接',
         };
       }
-      return {
-        'success': false,
-        'message': '无法连接到服务器，请检查网络连接',
-      };
     }
+    return {
+      'success': false,
+      'message': '登录失败，请重试',
+    };
   }
 
   /// 客户端向服务端发起注册。
