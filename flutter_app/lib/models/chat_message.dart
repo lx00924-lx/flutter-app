@@ -120,8 +120,14 @@ class ChatMessage {
       'text': content,
       'reasoningContent': reasoningContent,
       'thought': reasoningContent,
-      'createdAt': createdAt.toIso8601String(),
-      'timestamp': createdAt.toIso8601String(),
+      // 一律序列化成**带 Z 的 UTC**。
+      //
+      // 本地 DateTime 的 toIso8601String() 产出 `2026-10-25T15:30:46.097809` —— 没有
+      // 时区标记，等于把时区信息丢掉了。它在生成它的那台设备上解读正确，换到另一台
+      // 时区不同的设备（或用户改了系统时区）就会被当成本地时间，直接差几小时。
+      // 内存里仍保留本地时间（显示直接用它），只在存盘 / 上云这一刻转 UTC。
+      'createdAt': createdAt.toUtc().toIso8601String(),
+      'timestamp': createdAt.toUtc().toIso8601String(),
       'elapsedSeconds': elapsedSeconds,
       'attachments': attachments,
       'status': status,
@@ -180,8 +186,14 @@ class ChatMessage {
       'text': payloadContent,
       'reasoningContent': reasoningContent,
       'thought': reasoningContent,
-      'createdAt': createdAt.toIso8601String(),
-      'timestamp': createdAt.toIso8601String(),
+      // 一律序列化成**带 Z 的 UTC**。
+      //
+      // 本地 DateTime 的 toIso8601String() 产出 `2026-10-25T15:30:46.097809` —— 没有
+      // 时区标记，等于把时区信息丢掉了。它在生成它的那台设备上解读正确，换到另一台
+      // 时区不同的设备（或用户改了系统时区）就会被当成本地时间，直接差几小时。
+      // 内存里仍保留本地时间（显示直接用它），只在存盘 / 上云这一刻转 UTC。
+      'createdAt': createdAt.toUtc().toIso8601String(),
+      'timestamp': createdAt.toUtc().toIso8601String(),
       'elapsedSeconds': elapsedSeconds,
       'attachments': aiAttachments,
       'status': status,
