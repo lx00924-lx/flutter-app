@@ -2025,14 +2025,11 @@ async def execute_dsh_sse_stream(
     （用户实测反馈："没有展示你给我发的内容"）。
     """
     loop = asyncio.get_running_loop()
-    endpoints = [
-        f"{harness_base}/v1/agent/prompt/stream",
-        f"{harness_base}/v1/agent/prompt"
-    ]
-    if "3080" in harness_base:
-        endpoints.append(f"{harness_base.replace('3080', '3081')}/v1/agent/prompt/stream")
-    elif "3081" in harness_base:
-        endpoints.append(f"{harness_base.replace('3081', '3080')}/v1/agent/prompt/stream")
+    # ⚠️ 只在「设置里填的那个宿主地址」上、只调插件提供的这一条执行端点
+    #    （2026-10-25 用户决定去掉降级链：要可预测、失败立刻暴露）。
+    #    以前这里还有 /v1/agent/prompt 和一个 3081 适配器候选，而 3081 在本机根本
+    #    不存在 —— 每个候选都要等一次失败超时，用户感知成"卡很久然后报 HTTP 404"。
+    endpoints = [f"{harness_base}/v1/agent/prompt/stream"]
 
     real_session_id = None
     if active_session_id and active_session_id not in ("__auto__", "__auto_new__", "default_session", "none", "null"):
@@ -2135,13 +2132,20 @@ async def execute_dsh_sse_stream(
 
         while True:
             try:
-                ev_type, ev_data = await asyncio.wait_for(msg_queue.get(), timeout=20.0)
+                # 首个事件最多等 600 秒（与 HTTP 超时一致）。深度思考 / 跑长命令 /
+                # 等用户拍板，都可能长时间不产生任何事件，而任务**已经在宿主上跑起来了**。
+                # 实测 2026-10-25：5 分钟任务在第 20 秒就被判失败，但任务照跑，
+                # 结果永久丢失（桥接不再读流），用户只看到一句 HTTP 404。
+                # 一旦收到过事件，就退回 20 秒的"静默间隙"判定。
+                ev_type, ev_data = await asyncio.wait_for(
+                    msg_queue.get(),
+                    timeout=600.0 if not received_any_event else 20.0,
+                )
             except asyncio.TimeoutError:
                 if received_any_event:
-                    # 如果有持续收到过流，超时 20s 可能是长命令输出间歇，继续等待
+                    # 收到过事件说明链路是活的，20 秒静默只是长命令输出间歇，继续等待
                     continue
-                else:
-                    break
+                break
 
             if ev_type == "stream_error":
                 break
@@ -2338,9 +2342,11 @@ async def create_dsh_session_explicit(harness_url: str, workspace: str = "", tit
                                         }
                                         LOCAL_SESSION_CACHE = [session_info] + [s for s in LOCAL_SESSION_CACHE if (s.get("sessionId") or s.get("id")) != str(s_id)]
                                         return True, str(s_id), session_info
-                        except Exception:
+                        except Exception as _exc:
+                            print(f"[create_session] 发 session.create 失败({ws_url}): {_exc!r}", flush=True)
                             continue
-            except Exception:
+            except Exception as _exc:
+                print(f"[create_session] 连宿主 WS 失败({ws_url}): {_exc!r}", flush=True)
                 continue
 
     fallback_id = str(uuid.uuid4())
@@ -2352,6 +2358,7 @@ async def create_dsh_session_explicit(harness_url: str, workspace: str = "", tit
         "updatedAt": int(time.time() * 1000)
     }
     LOCAL_SESSION_CACHE = [fallback_session] + [s for s in LOCAL_SESSION_CACHE if (s.get("sessionId") or s.get("id")) != fallback_id]
+    print("[create_session] 所有通道都没拿到真实会话 id，返回 fallback", flush=True)
     return False, fallback_id, fallback_session
 
 def is_harness_error_response(resp_obj):
@@ -2608,8 +2615,23 @@ async def execute_local_harness(
         if sse_ok and sse_out and not is_html_content(sse_out):
             await on_step_callback("✅ [3/3] 本地 Agent 宿主智能体已完成本轮所有操作，正在向 App 调度中心回传结果...")
             return True, str(sse_out)
+        # ⚠️ 不降级（2026-10-25 用户决定）：SSE 是唯一正确的执行通道
+        #    （POST /v1/agent/prompt/stream，由 dsh-app-bridge 插件提供，已实测连通）。
+        #    原先后面那条降级链（3081 适配器 / /v1/chat/completions / /api/chat）对
+        #    `dsh web` 全是 404，而且最坏的情况是：任务其实已经送进宿主并开始执行，
+        #    桥接却判失败再去重复投递 —— 用户看到的是一句"HTTP 404"和一条不知道
+        #    从哪冒出来的结果。宁可明确报错，也不要静默走错路。
+        return False, (
+            "❌ 本地 Agent 宿主没有受理本轮任务。\n"
+            f"   已尝试: POST {harness_base}/v1/agent/prompt/stream\n"
+            "   💡 排查:\n"
+            "   1. 确认宿主在跑（dsh web，默认 3080）；\n"
+            "   2. 确认 dsh-app-bridge 插件已安装且已加载（这个端点由插件提供）；\n"
+            "   3. 设置里的宿主地址要和实际一致。"
+        )
     except Exception as sse_e:
-        logger.debug(f"SSE 流式尝试暂不可用: {sse_e}，无缝回退至适配器通道")
+        logger.debug(f"SSE 流式尝试失败（不再降级）: {sse_e}")
+        return False, f"❌ 调用本地 Agent 宿主失败: {sse_e}"
 
     # 图片只有 SSE 主通道送得进去（走插件的 admitPromptContent）。备用通道是
     # /v1/chat/completions 那种纯文本接口，塞不进 ImageBlock。不吭声的话用户会以为
