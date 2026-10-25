@@ -498,21 +498,26 @@ class SyncService {
     }
   }
 
-  /// 客户端向服务端发起登录认证，并注册当前设备的唯一会话 ID
+  /// 客户端向服务端发起登录认证，并注册当前设备的唯一会话 ID。
+  ///
+  /// [baseVersion] 是**上次登录成功后服务端给的那个 version**（首次登录传 0）。
+  /// 服务端拿它做 CAS（比较并交换）：只有与槽位当前版本一致才允许登录。
+  ///
+  /// 为什么要这个：两个实例几乎同时登录时，「发出更早、到得更晚」的那个请求
+  /// 会把刚登录成功的设备顶掉 —— 赢家手里的凭证立刻无主、每个请都被 403，
+  /// 而界面还显示"已登录"（2026-10-25 实测）。CAS 只判断"你看到的是不是当前状态"，
+  /// **不依赖任何时间**，所以改系统时间对它没有任何影响。
   Future<Map<String, dynamic>> loginWithServer({
     required String username,
     required String password,
     required String clientSessionId,
     required String deviceType,
+    int baseVersion = 0,
   }) async {
     final url = '$serverBaseUrl/api/login';
 
-    // 最多试两次：第二次只为「这次登录被判为过期」而发。
-    //
-    // 为什么要带 `loginAt`：服务端拿它挡住**在路上的旧登录请求**。两台设备（或同一台
-    // 机器上的两个实例）几乎同时登录时，先到的那个可能被「发出更早、到得更晚」的请求
-    // 顶掉 —— 结果是刚登录成功的那台凭证立刻无主、每个请求都被 403 拦下，而界面上还
-    // 显示"已登录"（2026-10-25 实测：1 顶回账号后，1 自己反而提示登录失效）。
+    // 最多试两次：第二次只为 CAS 冲突而发（服务端会告诉我们当前 version）。
+    var attemptVersion = baseVersion;
     for (var attempt = 0; attempt < 2; attempt++) {
       try {
         final response = await _dio.post(
@@ -522,14 +527,16 @@ class SyncService {
             'password': password,
             'deviceType': deviceType,
             'clientSessionId': clientSessionId,
-            'loginAt': DateTime.now().millisecondsSinceEpoch,
+            'baseVersion': attemptVersion,
           },
         );
 
         if (response.statusCode == 200 && response.data is Map) {
+          final data = response.data as Map;
           return {
             'success': true,
-            'data': response.data,
+            'data': data,
+            'version': (data['version'] as num?)?.toInt() ?? (attemptVersion + 1),
           };
         }
         return {
@@ -540,13 +547,19 @@ class SyncService {
         if (e is DioException) {
           final status = e.response?.statusCode;
           final data = e.response?.data;
-          // 服务端判定这次登录比槽位里那一次更早（迟到了）→ 重试一次即可，
-          // 新请求的 loginAt 必然更大（除非系统时间被往回拨）。
-          if (status == 409 && data is Map && data['error'] == 'STALE_LOGIN') {
-            if (attempt == 0) continue;
+          // CAS 冲突：我们手里的 version 过期了（典型场景见方法注释）。
+          // 服务端会带回当前 version，用它再试一次 —— 重试即成为"最后一个"，理应赢。
+          if (status == 409 &&
+              data is Map &&
+              data['error'] == 'VERSION_CONFLICT') {
+            final serverVersion = (data['version'] as num?)?.toInt();
+            if (attempt == 0 && serverVersion != null) {
+              attemptVersion = serverVersion;
+              continue;
+            }
             return {
               'success': false,
-              'message': '系统时间可能不准（登录时间早于已生效的那次），请校准时间后重试。',
+              'message': '登录状态刚被其他设备更新，请再试一次。',
             };
           }
           if (data is Map) {

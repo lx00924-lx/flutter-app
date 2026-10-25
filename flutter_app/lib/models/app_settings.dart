@@ -101,6 +101,11 @@ class AppSettings {
   String aiAvatar; // Base64 或本地图片路径
   String accountPassword;
   String clientSessionId;
+  /// 登录槽位的 CAS 版本号（比较并交换）。
+  /// 每次登录成功由服务端返回、本地存下，下次登录作为 baseVersion 带上去。
+  /// 对不上就说明「你看到的是旧状态」→ 服务端拒绝、客户端用返回的新版重试。
+  /// 不依赖任何时间，改系统时间对它无影响。
+  int sessionVersion;
 
   /// 动态识别当前 Flutter 运行的设备分类：手机端 (mobile) / 电脑端 (desktop)
   static String get currentDeviceType {
@@ -262,6 +267,7 @@ class AppSettings {
     this.aiAvatar = '',
     this.accountPassword = '',
     this.clientSessionId = '',
+    this.sessionVersion = 0,
     // 个性化
     this.customBackground = '',
     this.backgroundOpacity = 100,
@@ -352,6 +358,7 @@ class AppSettings {
       'aiAvatar': aiAvatar,
       'accountPassword': accountPassword,
       'clientSessionId': clientSessionId,
+      'sessionVersion': sessionVersion,
       'customBackground': customBackground,
       'backgroundOpacity': backgroundOpacity,
       'showBackgroundInDarkMode': showBackgroundInDarkMode,
@@ -489,6 +496,7 @@ class AppSettings {
       aiAvatar: map['aiAvatar']?.toString() ?? '',
       accountPassword: map['accountPassword']?.toString() ?? '',
       clientSessionId: map['clientSessionId']?.toString() ?? '',
+      sessionVersion: (map['sessionVersion'] as num?)?.toInt() ?? 0,
       customBackground: map['customBackground']?.toString() ?? '',
       backgroundOpacity: (map['backgroundOpacity'] as num?)?.toInt() ?? 100,
       showBackgroundInDarkMode: map['showBackgroundInDarkMode'] as bool? ?? true,

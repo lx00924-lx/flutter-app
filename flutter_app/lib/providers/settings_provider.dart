@@ -614,11 +614,18 @@ class SettingsProvider extends ChangeNotifier {
       password: password,
       clientSessionId: newSessionId,
       deviceType: AppSettings.currentDeviceType,
+      // CAS：带上本地上次拿到的槽位版本；首次登录是 0。
+      // 服务端只接受与槽位一致的版本，对不上就回 409 让我们用新版本重试
+      // —— 这样「发出更早、到得更晚」的旧请求不会把刚登录的设备顶掉。
+      baseVersion: _settings.sessionVersion,
     );
 
     if (res['success'] == true) {
       // 服务端已把本次会话写进 active_sessions，本地才跟着换 id，两边始终一致
       _settings.clientSessionId = newSessionId;
+      // 存下这次的槽位版本，下次登录作为 baseVersion
+      final v = res['version'];
+      if (v is int) _settings.sessionVersion = v;
       _settings.loginAccount = cleanAccount;
       _settings.accountPassword = password;
       _settings.isLoggedIn = true;

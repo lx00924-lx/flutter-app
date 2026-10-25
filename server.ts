@@ -748,18 +748,18 @@ interface DeviceSession {
   loginTime: number;
   lastActive: number;
   /**
-   * 客户端在**发起这次登录那一刻**的时间戳（毫秒），由客户端随请求带上来。
+   * 登录槽位的 CAS 版本号（比较并交换，见 `/api/login` 的注释）。
    *
-   * 用途：挡住「在路上的旧登录请求」。实测场景（2026-10-25）：
-   *   A 发登录 → 先到 → 槽位 = A，A 显示"登录成功"；
-   *   B 的登录请求**更早发出、更晚到达** → 槽位被改回 B；
-   *   于是 A 刚拿到的凭证立刻无主，它的每个请求都被 403 拦下，
-   *   而界面上 A 还显示"已登录" —— 就是用户说的「1 顶回来之后 1 却提示登录失效」。
+   * 每次**通过校验**的登录把它 +1；客户端存下自己拿到的那一个，
+   * 下次登录作为 `baseVersion` 带上来。对不上就说明"你看到的是旧状态"，拒绝重试。
    *
-   * 老客户端不带这个字段（=0），服务端**跳过**这项检查，保持原有行为：
-   * 宁可少一层保护，也不能把没升级的客户端锁在门外。
+   * 为什么不用时间戳：时间由客户端提供，改系统时间（例如改到 2099 年）就能让
+   * 某台设备永久压制其他设备；加偏差检查也治不了根（仍需可信参照）。
+   * version 完全不参与时间判定，改时间毫无用处。
+   *
+   * 老槽位没有这个字段 → 按 0 处理（等价于"还没人用过新逻辑"）。
    */
-  clientLoginAt?: number;
+  version?: number;
 }
 
 /**
@@ -3042,29 +3042,44 @@ async function startServer() {
       const cleanDeviceType: 'mobile' | 'desktop' = (deviceType === 'mobile') ? 'mobile' : 'desktop';
       const sessionId = (clientSessionId || `sess_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`).toString();
 
-      // 客户端发起这次登录的时刻（毫秒）。用来挡住「在路上的旧登录请求」——
-      // 见 DeviceSession.clientLoginAt 的注释。老客户端不带 → 0 → 跳过检查。
-      const incomingLoginAt = Number((req.body?.loginAt ?? 0)) || 0;
+      // ── CAS（比较并交换）登录时序 ─────────────────────────────────────
+      //
+      // 要解决的问题（2026-10-25 用户实测）：两个实例几乎同时登录时，
+      // 「发出更早、到得更晚」的那个请求会把刚登录成功的设备顶掉，
+      // 于是赢家手里的凭证立刻无主、每个请求都被 403，而界面上还显示"已登录"。
+      //
+      // 为什么不用时间戳：时间由客户端提供 → 用户改系统时间（比如改到 2099 年）
+      // 就能让某台设备**永久压制**其他设备。加偏差检查也治不了根（还得有可信参照）。
+      //
+      // CAS 的思路：不判断"谁更晚"，只判断"你看到的是不是当前状态"。
+      //   客户端带上「它上次登录成功后拿到的 version」，服务端只接受与槽位一致的。
+      //   迟到者的 baseVersion 是它出发时读到的旧值 → 必然对不上 → 被拒。
+      //   时间完全不参与判定，改时间毫无用处。
+      //
+      // 兼容：老客户端不传 baseVersion → 按 0 处理。槽位 version 也是 0 时直接通过；
+      //       槽位已有 version（说明是新版客户端写的）→ 冲突，客户端重试即可。
+      const rawBaseVersion = Number((req.body?.baseVersion ?? 0));
+      const baseVersion = Number.isFinite(rawBaseVersion) && rawBaseVersion >= 0
+        ? Math.floor(rawBaseVersion)
+        : 0;
 
-      // 被判定为「过期登录」时不写盘，等锁释放后再回 409（reason 带出去便于排障）
-      let staleLogin = false;
-      let staleSlotAt = 0;
+      // 冲突时不写盘，等锁释放后回 409 并带出当前 version
+      let versionConflict = false;
+      let currentVersion = 0;
 
       await withFileLock(ACTIVE_SESSIONS_FILE, async () => {
         const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
         if (!sessions[username]) sessions[username] = {};
 
         const existingSession = sessions[username][cleanDeviceType];
+        const slotVersion = Number(existingSession?.version ?? 0);
 
-        // ⚠️ 先做时序检查，再做顶号：一旦槽位里那次登录比本次更晚，本次就该被拒绝。
-        //    这不会挡住正常的"用户换了设备主动登录"（那是更晚的请求），只挡迟到者。
-        if (existingSession && incomingLoginAt > 0) {
-          const slotAt = Number(existingSession.clientLoginAt ?? 0);
-          if (slotAt > 0 && incomingLoginAt < slotAt) {
-            staleLogin = true;
-            staleSlotAt = slotAt;
-            return;
-          }
+        // ⚠️ 先比 version，再决定要不要顶号。顺序不能颠倒：
+        //    一旦直接顶号，迟到者就已经把别人踢掉了，再拒绝也没意义。
+        if (existingSession && baseVersion !== slotVersion) {
+          versionConflict = true;
+          currentVersion = slotVersion;
+          return;
         }
 
         if (existingSession && existingSession.clientSessionId && existingSession.clientSessionId !== sessionId) {
@@ -3092,30 +3107,35 @@ async function startServer() {
           deviceType: cleanDeviceType,
           loginTime: Date.now(),
           lastActive: Date.now(),
-          // 记下这套凭证是"客户端什么时刻发起的登录"，供下一次比较先后
-          ...(incomingLoginAt > 0 ? { clientLoginAt: incomingLoginAt } : {}),
+          // 每次通过的登录都把版本 +1；客户端拿它当下一轮的 baseVersion
+          version: slotVersion + 1,
         };
         await safeWriteJSON(ACTIVE_SESSIONS_FILE, sessions);
       });
 
-      // ⚠️ 这次登录比槽位里已生效的那次更早 → 是迟到的旧请求，不能让它把别人顶下去。
-      //    客户端收到这个码应当**立即重试一次**（重试会带新的 loginAt，必然更大）。
-      if (staleLogin) {
+      // ⚠️ CAS 冲突：客户端看到的 version 已经不是槽位里那个了。
+      //    典型成因是「两个实例几乎同时登录，后到的是更早发出的那个」——
+      //    它拿着出发时的旧 version，不能让它把别人顶下去。
+      //    客户端收到后应该**用返回的 version 立刻重试一次**（重试即成为最后一个，理应赢）。
+      if (versionConflict) {
         console.log(
-          `[Login] 拒绝过期登录 username=${username} device=${cleanDeviceType} ` +
-            `incoming=${incomingLoginAt} < slot=${staleSlotAt}`,
+          `[Login] CAS 冲突 username=${username} device=${cleanDeviceType} ` +
+            `base=${baseVersion} != slot=${currentVersion}`,
         );
         return res.status(409).json({
-          error: "STALE_LOGIN",
-          message: "这次登录比已生效的那次更早（可能是在路上耽搁了），请重试。",
+          error: "VERSION_CONFLICT",
+          version: currentVersion,
+          message: "登录状态已被更新，请用最新版本重试。",
         });
       }
 
-      console.log(`Login successful for username: ${username} on ${cleanDeviceType}`);
+      console.log(`Login successful for username: ${username} on ${cleanDeviceType} v${baseVersion + 1}`);
       res.json({
         user: { id: user.id, username: user.username },
         deviceType: cleanDeviceType,
         clientSessionId: sessionId,
+        // 客户端必须存下这个值，下次登录作为 baseVersion 带上来
+        version: baseVersion + 1,
       });
     } catch (e) {
       console.error(`Login error for ${username}:`, e);
