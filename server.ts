@@ -1461,6 +1461,45 @@ async function upsertMessage(userId: string, message: any) {
   });
 }
 
+/**
+ * 把盘上残留的 `status=generating` 占位收尾成「已中断」。
+ *
+ * 为什么必须有这一步：生成任务的收尾写在 `runServerSideGeneration` 的 try/catch 里，
+ * **中继重启或进程被杀时它根本不会执行**，可空占位已经落盘了。而客户端不允许跳过
+ * `generating` 推进增量游标（见 /api/messages 的 afterSeq 逻辑），所以只要盘上卡着
+ * 一条，那台设备每轮增量都会重新拿到它 —— 表现为永久挂着的**空白气泡**。
+ *
+ * 启动时调用最安全（那时内存里没有任何活跃生成，凡是 generating 都是僵尸）；
+ * 运行期调用也安全，会跳过 activeGenerations 里还活着的那几轮。
+ */
+async function sweepStaleGeneratingPlaceholders() {
+  try {
+    const all = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+    let fixed = 0;
+    const fixedIds: string[] = [];
+    for (const [userId, list] of Object.entries(all)) {
+      if (!Array.isArray(list)) continue;
+      for (const msg of list) {
+        if (!msg || String(msg.status ?? "") !== "generating") continue;
+        // 还活着的这一轮不要动
+        if (activeGenerations.has(`${userId}_${msg.id}`)) continue;
+        const keep = String(msg.content ?? "");
+        msg.content = keep || "（这条回复在生成过程中被中断了）";
+        msg.status = "cancelled";
+        msg.timestamp = new Date().toISOString();
+        fixed++;
+        if (fixedIds.length < 5) fixedIds.push(String(msg.id ?? "?"));
+      }
+    }
+    if (fixed > 0) {
+      await safeWriteJSON(MESSAGES_FILE, all);
+      console.log(`[Startup] 收尾 ${fixed} 条卡在 generating 的残留占位（例：${fixedIds.join(", ")}）`);
+    }
+  } catch (err: any) {
+    console.warn(`[Startup] 清理残留占位失败: ${err?.message || err}`);
+  }
+}
+
 /** 按消息 id 读取云端已存的那条（用于"不要用更短的内容覆盖更长内容"）。 */
 async function findMessageById(userId: string, messageId: string): Promise<any | undefined> {
   if (!userId || userId === 'guest' || !messageId) return undefined;
@@ -1526,7 +1565,10 @@ async function runServerSideGeneration({
   // 不要用这个空占位覆盖云端已有的同 id 消息：那条可能已经有内容
   // （例如客户端在插话前已经把半句推上来过），覆盖掉就会出现"这端有、那端空"。
   const existingBeforeStart = await findMessageById(userId, assistantMessageId);
-  if (!existingBeforeStart || (existingBeforeStart.content ?? '').toString().trim().isEmpty) {
+  // ⚠️ 这里原本写的是 `.trim().isEmpty` —— 那是 Dart 的写法，JS 里 `String.isEmpty`
+  // 恒为 undefined（假值），整条判断等于只剩「消息不存在才写占位」，
+  // 「云端已有内容就不要用空占位覆盖」这半句从来没生效过。改成 `.length === 0`。
+  if (!existingBeforeStart || (existingBeforeStart.content ?? '').toString().trim().length === 0) {
     await upsertMessage(userId, initialAssistantMessage);
   }
 
@@ -3656,6 +3698,33 @@ async function startServer() {
       if (assistantMessageId) gen = activeGenerations.get(`${userId}_${assistantMessageId}`);
       if (!gen && sessionId) gen = findActiveGenerationBySession(userId, sessionId);
       if (!gen) {
+        // ⚠️ 内存里没有这一轮（中继重启过 / 任务已自行结束），但云端可能还留着一条
+        // status=generating 的空占位。用户点「终止」时如果什么都不做，那条占位就永远
+        // 卡在「生成中」：客户端不允许跳过 generating 推进游标，于是每次增量拉取都会
+        // 重新拿到它 —— 另一端（以及重开 App）会一直挂着一个**空白气泡**。
+        // 所以这里兜底：按 assistantMessageId 把云端残留收尾成「已中断」。
+        if (assistantMessageId) {
+          const stale = await findMessageById(userId, assistantMessageId);
+          if (stale && String(stale.status ?? "") === "generating") {
+            const keep = String(stale.content ?? "");
+            const settled = {
+              ...stale,
+              content: keep || "（这条回复已中断）",
+              status: "cancelled",
+              timestamp: new Date().toISOString(),
+            };
+            await upsertMessage(userId, settled);
+            io.to(`user_${userId}`).emit("chat_completed", {
+              messageId: assistantMessageId,
+              content: settled.content,
+              interrupted: true,
+              isAgentMode: settled.isAgentMode === true,
+              ...(settled.agentExecution ? { agentExecution: settled.agentExecution } : {}),
+            });
+            console.log(`[Chat] 收尾残留占位 ${assistantMessageId}（内存里已无这一轮）`);
+            return res.json({ success: true, cancelled: true, note: "已收尾残留的生成占位" });
+          }
+        }
         return res.json({ success: true, cancelled: false, note: "当前没有进行中的生成" });
       }
 
@@ -7164,6 +7233,9 @@ if %errorlevel% neq 0 (
 
   // Initialize model limits file on startup
   await ensureModelLimitsInitialized();
+
+  // 收尾上一轮进程留下的僵尸占位（否则客户端游标会永远卡在它前面 → 永久空白气泡）
+  await sweepStaleGeneratingPlaceholders();
 
   httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running at http://0.0.0.0:${PORT}`);
