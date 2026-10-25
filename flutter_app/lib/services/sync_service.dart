@@ -334,19 +334,11 @@ class SyncService {
 
   void _checkAndTriggerForceLogout(dynamic error) {
     if (error is! DioException) return;
-    // ⚠️ 只认 `401 + error == 'FORCE_LOGOUT'`，**不要**顺手把 403 也当成"下线"。
-    // 2026-10-06 曾在这里加过一条 403 分支（当时的判断是"服务端身份守卫回 403，
-    // 客户端只认 401 会静默失效"）—— 但那个判断是错的：真正的静默失效来自
-    // /api/check-session 的 `{valid:true}` 兜底，与服务端改用 FORCE_LOGOUT 表述之后，
-    // 这条 403 分支在运行时根本走不到，属于要重打包才生效的死代码，已撤掉。
-    //
-    // 真正要守的规矩在**服务端**那边：凡是"这个凭证服务端不认了"，一律用
-    // `401 + error:'FORCE_LOGOUT'`（形状与顶号一致、带 kickedSessionId 且
-    // canTakeover:false），因为客户端的轮询与推送通道都只认这一种。
-    // **别新造错误码** —— 旧版 App 遇到不认识的码会整条忽略、继续带着废弃凭证轮询，
-    // 而它的每个请求都会被身份守卫拦下，表现就是"界面一切正常、云端同步静默失效"。
-    if (error.response?.statusCode == 401) {
-      final data = error.response?.data;
+    final status = error.response?.statusCode;
+    final data = error.response?.data;
+
+    // ① `401 + error:'FORCE_LOGOUT'` —— 顶号 / 凭证被判定失效的标准形状。
+    if (status == 401) {
       if (data is Map && data['error'] == 'FORCE_LOGOUT') {
         final reason = data['reason']?.toString() ?? '您的账号已在另一台设备上登录，当前设备已被下线。';
         // canTakeover：服务端判定该设备槽位早已没人活跃（对方关掉了 / 本地与服务端
@@ -354,6 +346,30 @@ class SyncService {
         final canTakeover = data['canTakeover'] == true;
         stopSessionWatcher();
         onForceLogout?.call(reason, canTakeover);
+      }
+      return;
+    }
+
+    // ② `403 + code:'SESSION_ID_REQUIRED'` —— 服务端不认本机这个凭证。
+    //
+    // ⚠️ 2026-10-25 实测必须补这一条。背景：服务端的身份守卫一律回 403（避免把
+    //    "被拦截"误报成"账号在别处登录"），而 401 只在**主动推送** force_logout 时用。
+    //    于是"本机凭证已作废、但没收到推送"的设备只看到 403 —— 而这里以前只认 401，
+    //    403 被当普通错误吞掉，结果是：**每 10 秒请求一次、每次 403、本地一条不写，
+    //    界面却留着旧数据**，用户以为"消息不同步"（真实事故：2026-10-25 16:16，
+    //    中继日志 `[安全] 已拦截…（x-client-session-id=无，code=SESSION_ID_REQUIRED）`，
+    //    `messages_box.hive` 从 16:07 起再没写过）。
+    //
+    //    只认 `SESSION_ID_REQUIRED` 这一个码：403 也可能是越权/限流等其它守卫，
+    //    那些绝不能被当成"下线"，否则会把能用的设备踢出去。
+    if (status == 403) {
+      final code = data is Map ? (data['code']?.toString() ?? '') : '';
+      if (code == 'SESSION_ID_REQUIRED') {
+        stopSessionWatcher();
+        onForceLogout?.call(
+          '登录已失效（本机凭证服务端不再认可），请重新登录。',
+          false,
+        );
       }
     }
   }
