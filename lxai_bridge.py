@@ -1396,8 +1396,6 @@ async def fetch_pending_questions(harness_url: str):
     harness_base = harness_url.rstrip("/")
     loop = asyncio.get_running_loop()
     candidates = [f"{harness_base}/v1/user-questions/pending"]
-    if "3080" in harness_base:
-        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/user-questions/pending")
 
     def do_get(url: str):
         req = urllib.request.Request(url, headers=dsh_headers(url), method="GET")
@@ -1431,8 +1429,6 @@ async def answer_dsh_question(harness_url: str, question_id: str, answers, decli
     if not decline:
         body["answers"] = answers or []
     candidates = [f"{harness_base}/v1/user-questions/{suffix}"]
-    if "3080" in harness_base:
-        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/user-questions/{suffix}")
 
     last_error = None
     for url in candidates:
@@ -1539,8 +1535,6 @@ async def fetch_pending_approvals(harness_url: str):
     harness_base = harness_url.rstrip("/")
     loop = asyncio.get_running_loop()
     candidates = [f"{harness_base}/v1/agent/approvals/pending"]
-    if "3080" in harness_base:
-        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/agent/approvals/pending")
 
     def do_get(url: str):
         req = urllib.request.Request(url, headers=dsh_headers(url), method="GET")
@@ -1572,8 +1566,6 @@ async def approve_dsh_approval(harness_url: str, approval_id: str, action: str =
     loop = asyncio.get_running_loop()
     body = {"approvalId": approval_id, "action": action or "allow"}
     candidates = [f"{harness_base}/v1/agent/approve"]
-    if "3080" in harness_base:
-        candidates.append(f"{harness_base.replace('3080', '3081')}/v1/agent/approve")
 
     last_error = None
     for url in candidates:
