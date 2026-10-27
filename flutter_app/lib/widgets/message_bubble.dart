@@ -334,8 +334,6 @@ class MessageBubble extends StatelessWidget {
       return const SizedBox.shrink();
     }
 
-    final isDark = Theme.of(context).brightness == Brightness.dark;
-
     return GestureDetector(
       onTap: () {
         showDialog(
@@ -396,16 +394,16 @@ class MessageBubble extends StatelessWidget {
             // 这里必须是 0 —— 否则两层圆角叠加，交汇处会露出气泡底色（蓝边）。
             // 图文混排时气泡有 14px padding，图片自己带 10 的圆角是合适的。
             borderRadius: hasImagesOnly ? BorderRadius.zero : BorderRadius.circular(10),
-            child: Container(
-              color: isDark ? const Color(0xFF0F172A) : const Color(0xFFF1F5F9),
-              // 缩略图高度上限：以前是 `width: double.infinity` 且不限高，
-              // 竖图会顶满一屏（用户：「图片占用显示太大了」）。
-              // 220 大约是「一眼能认出是什么、又不抢整屏」的折中。
-              constraints: const BoxConstraints(maxHeight: 220),
+            // 缩略图尺寸按原图宽高比自适应（QQ/微信 那种）：
+            // 最大 240 x 220，比这更小的图保持原始尺寸、不放大。
+            // 不再用 `width: double.infinity` + `BoxFit.cover` —— 那会把横图裁成一条长条；
+            // 也不给容器底色 —— 留白处会露出气泡色、看着像一圈蓝边。
+            // RenderImage 在宽松约束下会自动保持宽高比并裁到上限内，所以这里不需要预先算尺寸。
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 240, maxHeight: 220),
               child: Image(
                 image: imgProvider,
-                width: double.infinity,
-                fit: BoxFit.cover,
+                fit: BoxFit.contain,
                 gaplessPlayback: true,
                 errorBuilder: (ctx, err, stack) => Container(
                   height: 120,
