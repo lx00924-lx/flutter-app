@@ -567,7 +567,33 @@ class MessageBubble extends StatelessWidget {
                 duration: const Duration(milliseconds: 220),
                 curve: Curves.easeOut,
                 alignment: Alignment.topLeft,
-                child: Container(
+                // ⚠️ 纯图片消息**不套气泡底**（2026-11-03 用户实测：图片底部露出一条
+                //    气泡蓝边，上/左/右都没有 —— 气泡比图片高了约 6dp，露的是 #0284C7）。
+                //    与其去追那 6dp 从哪算出来的，不如让纯图消息根本没有"底色"可露：
+                //    直接 ClipRRect 裁圆角、里面只放图片，圆角仍由这一层统一提供
+                //    （子级 _buildImageAttachmentWidget 在 hasImagesOnly 时圆角为 0）。
+                child: hasImagesOnly
+                    ? ClipRRect(
+                        borderRadius: BorderRadius.only(
+                          topLeft: const Radius.circular(16),
+                          topRight: const Radius.circular(16),
+                          bottomLeft: Radius.circular(isUser ? 16 : 4),
+                          bottomRight: Radius.circular(isUser ? 4 : 16),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: message.attachments!
+                              .map((att) => _buildImageAttachmentWidget(
+                                    context,
+                                    att,
+                                    hasImagesOnly,
+                                    isUser,
+                                  ))
+                              .toList(),
+                        ),
+                      )
+                    : Container(
                 constraints: BoxConstraints(
                   // 头像已经移到气泡上方单独一行，气泡可以用满宽度（用户要求"更宽"）：
                   // 以前是屏幕宽度的 78%，且还要让出头像那 46px。
