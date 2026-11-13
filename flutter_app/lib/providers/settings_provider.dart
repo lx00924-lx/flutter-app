@@ -12,6 +12,7 @@ import '../services/keep_alive_service.dart';
 import '../services/bridge_process_manager.dart';
 import '../utils/image_picker_helper.dart';
 import '../main.dart' show rootNavigatorKey;
+import '../screens/login_screen.dart';
 
 class SettingsProvider extends ChangeNotifier {
   late AppSettings _settings;
@@ -589,6 +590,20 @@ class SettingsProvider extends ChangeNotifier {
         ),
       ).then((_) {
         _isShowingKickDialog = false;
+        // ⚠️ 弹窗关掉后**必须主动回登录页**。
+        //
+        // 以前不需要：main.dart 的 home 是 `isLoggedIn ? ChatScreen : LoginScreen`，
+        // 这里把 `isLoggedIn` 置 false 后 MaterialApp 会重建 home、自动落回登录页。
+        // 2026-11-13 修 #19（启动页开关一点就跳走）时把 home 固定成了 SplashScreen，
+        // 那条隐式依赖就断了 —— 表现成「被顶下线后只弹个窗，点确认仍停在聊天页、
+        // 账号没退」（用户 2026-11-13 实测）。
+        final nav = rootNavigatorKey.currentState;
+        if (nav != null) {
+          nav.pushAndRemoveUntil(
+            MaterialPageRoute(builder: (_) => const LoginScreen()),
+            (route) => false,
+          );
+        }
       });
     } else {
       _isShowingKickDialog = false;
