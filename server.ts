@@ -165,7 +165,10 @@ const MASTER_KEY_FILE = path.join(SECRETS_DIR, "master.key");
 const SECRET_PREFIX = "enc:v1:";
 const STORE_API_KEYS = (process.env.STORE_API_KEYS ?? "1").trim() !== "0";
 /** 设置里需要加密的顶层字段。 */
-const SECRET_FIELDS = ["apiKey", "asrApiKey", "harnessToken"] as const;
+// 2026-11-13 补上 `ttsApiKey`：之前它在名单外，App 虽然会在推设置前清空它，
+// 但服务端没有兜底 —— 一旦哪天客户端没清（改代码漏了、或以后决定让 TTS key 也同步），
+// 它就会明文落盘。`asrApiKey`（语音转写）本来就在名单里，这次补的是语音合成那个。
+const SECRET_FIELDS = ["apiKey", "asrApiKey", "ttsApiKey", "harnessToken"] as const;
 
 let cachedMasterKey: Buffer | null = null;
 
