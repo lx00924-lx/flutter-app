@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -114,7 +115,7 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
           'userId': userId,
           'device': 'mobile',
         }),
-      ).timeout(const Duration(seconds: 8));
+      ).timeout(const Duration(seconds: 60));
 
       if (!mounted) return;
 
@@ -132,6 +133,16 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
         final err = data['error'] ?? '授权失败或已过期';
         _showErrorAndResume(err);
       }
+    } on TimeoutException {
+      // 服务端处理是**瞬时**的（校验账号 → 标记 confirmed → 立即返回，不等桥接上线），
+      // 所以超时只说明"响应没传回来"，不说明配对失败。实测公网隧道下同类请求
+      // 会卡到 30 秒以上（`/api/health` 都有 2.3s 和 30s 超时两种结果）。
+      // 报成"失败"会让人以为要重扫，实际下一次扫会撞"配对码已失效"。
+      if (!mounted) return;
+      _showErrorAndResume(
+        '配对请求超时（60 秒）。服务端可能已经完成配对，只是响应没传回来 —— '
+        '请回首页看电脑端是否已上线，先别重复扫码。',
+      );
     } catch (e) {
       if (!mounted) return;
       _showErrorAndResume('网络连接异常: $e');

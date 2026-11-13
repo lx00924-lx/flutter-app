@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -251,7 +250,7 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
                         SelectableText(
                           s.customDataPath.isNotEmpty
                               ? s.customDataPath
-                              : (_defaultPath.isNotEmpty ? _defaultPath : '/data/user/0/com.lx.app/cache'),
+                              : (_defaultPath.isNotEmpty ? _defaultPath : '（正在读取系统默认目录…）'),
                           style: TextStyle(
                             fontSize: 12.5,
                             fontFamily: 'monospace',

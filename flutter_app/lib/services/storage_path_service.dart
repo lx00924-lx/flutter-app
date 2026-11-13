@@ -30,14 +30,36 @@ class StoragePathService {
     _customPath = path.trim();
   }
 
+  /// 系统默认缓存根目录（**App 独占**）。
+  ///
+  /// 桌面端**不能**用 `getTemporaryDirectory()`：Windows 上那指向全用户共享的
+  /// `%TEMP%`（`C:\Users\<user>\AppData\Local\Temp`）。指到那里有两个实际后果：
+  ///   1. `calculateCacheSizeMb()` 会把整个 `%TEMP%` 的大小算成"App 缓存"；
+  ///   2. 迁移缓存时会把**别的程序**的临时文件一起搬到用户选的目录里。
+  /// 所以桌面端改用 `getApplicationSupportDirectory()/cache`，移动端仍用 App 私有 cache。
+  Future<Directory> _defaultCacheRoot() async {
+    if (!kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+      final support = await getApplicationSupportDirectory();
+      final dir = Directory('${support.path}/cache');
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
+      }
+      return dir;
+    }
+    return await getTemporaryDirectory();
+  }
+
   /// 获取系统默认的缓存物理绝对路径
   Future<String> getDefaultDirectoryPath() async {
     if (kIsWeb) return 'Web In-Memory Cache';
     try {
-      final dir = await getTemporaryDirectory();
+      final dir = await _defaultCacheRoot();
       return dir.path;
     } catch (e) {
-      return '/data/user/0/com.lx.app/cache';
+      // 拿不到就如实返回空串，让界面显示"正在读取"，**不要**回一个写死的
+      // Android 路径 —— 电脑端会照着它把手机目录显示成自己的默认值。
+      debugPrint('获取默认缓存路径失败: $e');
+      return '';
     }
   }
 
@@ -56,7 +78,7 @@ class StoragePathService {
         }
       }
     }
-    return await getTemporaryDirectory();
+    return await _defaultCacheRoot();
   }
 
   /// 获取本地原图专用存储目录
@@ -181,17 +203,27 @@ class StoragePathService {
         return const CacheMigrationResult(success: true, movedFilesCount: 0, movedBytes: 0);
       }
 
+      // 源目录是不是**共享的系统临时目录**（桌面端历史默认就是 %TEMP%，整个用户共用）：
+      // 是的话只能按白名单挑自己的文件，绝不能整份搬。
+      bool oldDirIsSharedTemp = false;
+      if (!kIsWeb && (Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
+        try {
+          final temp = await getTemporaryDirectory();
+          oldDirIsSharedTemp = oldDir.path == temp.path;
+        } catch (_) {}
+      }
+
       int movedCount = 0;
       double totalBytes = 0;
 
       await for (final entity in oldDir.list(recursive: true, followLinks: false)) {
         if (entity is File) {
-          // 仅迁移应用自身产生的多媒体与缓存原图，跳过第三方内部临时只读锁文件
-          if (!_isCacheFile(entity.path)) continue;
+          final relativePath = entity.path.substring(oldDir.path.length);
+          // 跳过第三方插件目录；共享临时目录下只搬自己的媒体文件
+          if (_shouldSkipInMigration(relativePath, oldDirIsSharedTemp)) continue;
 
           try {
-            final relativeSubPath = entity.path.substring(oldDir.path.length);
-            final targetFilePath = '${targetDir.path}$relativeSubPath';
+            final targetFilePath = '${targetDir.path}$relativePath';
             final targetParent = File(targetFilePath).parent;
             if (!await targetParent.exists()) {
               await targetParent.create(recursive: true);
@@ -246,5 +278,22 @@ class StoragePathService {
         lower.contains('audio_msg_') ||
         lower.contains('tts_output_') ||
         lower.contains('raw_img_');
+  }
+
+  /// 迁移时是否跳过这个文件（传**相对路径**即可）。
+  ///
+  /// 规则分两层：
+  /// 1. **永远跳过已知第三方插件的临时目录**（`file_picker` 等）—— 里面可能有别的
+  ///    进程正在持有的只读锁文件，搬走会让插件本身出错；
+  /// 2. 如果源目录是**共享的系统临时目录**（桌面端历史遗留的 `%TEMP%`），只搬我们自己
+  ///    产生的媒体文件（[_isCacheFile] 白名单），否则会把别人的临时文件一起搬走；
+  ///    其余情况（App 独占目录）**整份搬**。
+  bool _shouldSkipInMigration(String relativePath, bool oldDirIsSharedTemp) {
+    final lower = relativePath.toLowerCase().replaceAll('\\', '/');
+    for (final marker in const ['/file_picker/', '/flutter_', '/.trash/']) {
+      if (lower.contains(marker)) return true;
+    }
+    if (oldDirIsSharedTemp) return !_isCacheFile(lower);
+    return false;
   }
 }
