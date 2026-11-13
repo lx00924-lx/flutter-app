@@ -4311,7 +4311,14 @@ async function startServer() {
   });
 
   app.post("/api/change-password", async (req, res) => {
-    const { userId, oldPassword, newPassword } = req.body;
+    // 用户定位两种写法都收：
+    // - `userId`：数字 id（早期设计）
+    // - `username`：账号名（App 侧手里只有用户名，没有数字 id —— 2026-11-13 首次接上这个接口时补的）
+    // 授权凭证就是"知道旧密码"：旧密码错了下面会 401，不需要额外的会话头。
+    const { userId, username, oldPassword, newPassword } = req.body;
+    const matchUser = (u: any): boolean =>
+      (userId !== undefined && userId !== null && userId !== "" && u.id === userId) ||
+      (typeof username === "string" && username.trim() !== "" && u.username === username.trim());
     if (!newPassword || String(newPassword).length < 6) {
       return res.status(400).json({ error: "新密码长度至少 6 位" });
     }
@@ -4319,7 +4326,7 @@ async function startServer() {
       // bcrypt 比对是异步的，不能放进同步的文件锁回调里，
       // 因此先读取校验，再在锁内落盘（并在锁内复查用户仍存在）。
       const snapshot = await safeReadJSON<any[]>(USERS_FILE, []);
-      const snapshotUser = snapshot.find((u: any) => u.id === userId);
+      const snapshotUser = snapshot.find(matchUser);
       if (!snapshotUser) {
         return res.status(401).json({ error: "原密码错误" });
       }
@@ -4333,7 +4340,7 @@ async function startServer() {
       let success = false;
       await withFileLock(USERS_FILE, async () => {
         const users = await safeReadJSON<any[]>(USERS_FILE, []);
-        const userIndex = users.findIndex((u: any) => u.id === userId);
+        const userIndex = users.findIndex(matchUser);
         if (userIndex === -1) {
           return;
         }

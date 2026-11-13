@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../providers/chat_provider.dart';
 import '../providers/settings_provider.dart';
 import '../services/storage_service.dart';
+import '../services/sync_service.dart';
 import '../utils/image_picker_helper.dart';
 import '../widgets/app_avatar.dart';
 import 'chat_search_screen.dart';
@@ -95,38 +96,56 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     );
   }
 
-  void _changePassword() {
+  Future<void> _changePassword() async {
     final sp = context.read<SettingsProvider>();
     final s = sp.settings;
 
-    if (s.accountPassword.isNotEmpty && _oldPwdCtrl.text.trim() != s.accountPassword) {
-      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
-        const SnackBar(content: Text('原密码不正确')),
-      );
-      return;
-    }
+    final oldPwd = _oldPwdCtrl.text.trim();
+    final newPwd = _newPwdCtrl.text.trim();
+    final confirmPwd = _confirmPwdCtrl.text.trim();
 
-    if (_newPwdCtrl.text.trim().isEmpty) {
+    if (newPwd.isEmpty) {
       ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(content: Text('新密码不能为空')),
       );
       return;
     }
 
-    if (_newPwdCtrl.text.trim() != _confirmPwdCtrl.text.trim()) {
+    if (newPwd != confirmPwd) {
       ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(content: Text('两次输入的新密码不一致')),
       );
       return;
     }
 
-    s.accountPassword = _newPwdCtrl.text.trim();
-    sp.updateSettings(s);
+    if (newPwd.length < 6) {
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
+        const SnackBar(content: Text('新密码至少 6 位')),
+      );
+      return;
+    }
+
+    // ⚠️ 必须让服务端真的改。
+    // 2026-11-13 之前这里只写本地字段就提示"密码修改成功"，服务端密码纹丝不动 ——
+    // 属于假成功（用户以为改了、下次登录还是旧密码）。旧密码校验也交给服务端（bcrypt 比对）。
+    final res = await SyncService.instance.changePassword(
+      username: s.loginAccount,
+      oldPassword: oldPwd,
+      newPassword: newPwd,
+    );
+    if (!mounted) return;
+    if (res['success'] != true) {
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
+        SnackBar(content: Text(res['message']?.toString() ?? '密码修改失败')),
+      );
+      return;
+    }
+
     _oldPwdCtrl.clear();
     _newPwdCtrl.clear();
     _confirmPwdCtrl.clear();
     ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
-      const SnackBar(content: Text('密码修改成功')),
+      const SnackBar(content: Text('密码已修改，下次登录请用新密码')),
     );
   }
 

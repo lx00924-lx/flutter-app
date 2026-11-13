@@ -582,6 +582,49 @@ class SyncService {
     };
   }
 
+  /// 修改登录密码：走服务端 `/api/change-password`（bcrypt 校验旧密码 → 写新哈希）。
+  ///
+  /// ⚠️ 2026-11-13 之前 App 侧是「纯本地改字段 + 提示修改成功」，服务端密码纹丝不动 ——
+  /// 属于假成功：用户以为改好了，下次登录还是旧密码。现在改为真调用，失败如实上报。
+  ///
+  /// 授权凭证就是旧密码本身（旧密码错了服务端回 401），不额外要求会话头。
+  Future<Map<String, dynamic>> changePassword({
+    required String username,
+    required String oldPassword,
+    required String newPassword,
+  }) async {
+    try {
+      final response = await _dio.post(
+        '$serverBaseUrl/api/change-password',
+        data: {
+          'username': username.trim(),
+          'oldPassword': oldPassword,
+          'newPassword': newPassword,
+        },
+      );
+      if (response.statusCode == 200) return {'success': true};
+      return {
+        'success': false,
+        'message': '修改失败（HTTP ${response.statusCode}）',
+      };
+    } on DioException catch (e) {
+      final status = e.response?.statusCode;
+      final data = e.response?.data;
+      if (data is Map) {
+        final err = data['error']?.toString();
+        if (err != null && err.isNotEmpty) {
+          return {'success': false, 'message': err};
+        }
+      }
+      if (status != null) {
+        return {'success': false, 'message': '修改失败（HTTP $status）'};
+      }
+      return {'success': false, 'message': '连接不到服务器，密码未修改'};
+    } catch (e) {
+      return {'success': false, 'message': '修改失败：$e'};
+    }
+  }
+
   /// 客户端向服务端发起注册。
   ///
   /// ⚠️ **已废弃，且调用它必定失败**（2026-10-02 起）。

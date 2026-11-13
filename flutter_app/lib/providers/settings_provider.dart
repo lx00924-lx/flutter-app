@@ -40,6 +40,14 @@ class SettingsProvider extends ChangeNotifier {
     _updateImageCache();
     StoragePathService.instance.setCustomPath(_settings.customDataPath);
 
+    // 2026-11-13 起不再保存登录密码：老版本把明文密码写在 Hive 里，用来支撑
+    // 「中继不可达时离线登录」那条兜底；那条通道已删除（见 loginWithServer 的注释），
+    // 这里把历史数据里残留的密码清掉。
+    if (_settings.accountPassword.isNotEmpty) {
+      _settings.accountPassword = '';
+      _save(pushToCloud: false);
+    }
+
     // 确保有唯一的 clientSessionId
     if (_settings.clientSessionId.isEmpty) {
       _settings.clientSessionId = const Uuid().v4();
@@ -635,7 +643,9 @@ class SettingsProvider extends ChangeNotifier {
       final v = res['version'];
       if (v is int) _settings.sessionVersion = v;
       _settings.loginAccount = cleanAccount;
-      _settings.accountPassword = password;
+      // ⚠️ 不再保存密码（2026-11-13）：密码只用这一次，不落盘、不上云。
+      // 以前这里写 `_settings.accountPassword = password`，是为了「离线登录」兜底，
+      // 而那条兜底已删除 —— 它同时是本地明文密码的唯一理由。
       _settings.isLoggedIn = true;
       _save(pushToCloud: false);
 
@@ -649,19 +659,16 @@ class SettingsProvider extends ChangeNotifier {
 
       return {'success': true};
     } else {
-      // 若服务器不可达，且本地已保存过同账号密码，允许本地离线登录。
-      // 离线登录**沿用本地已有的 clientSessionId**（不换成服务端没见过的新 id），
-      // 否则一旦分叉，用户会反复看到假顶号。
-      if (_settings.loginAccount == cleanAccount && _settings.accountPassword == password) {
-        debugPrint('[Settings] 服务端不可达，走本地离线登录（沿用原 clientSessionId，避免与服务端记录分叉）');
-        _settings.isLoggedIn = true;
-        _save(pushToCloud: false);
-        _startSessionMonitoring();
-        return {'success': true};
-      }
+      // 服务端不可达 / 校验失败：如实返回失败，让用户看到"连接不到服务器"。
+      //
+      // ⚠️ 这里曾有一条「本地已存过同账号密码就放行」的离线登录兜底，2026-11-13 删除。
+      // 它是修「每次重启 App 都弹账号已下线」时塞进去的补丁（提交 6b15e3e，2026-09-27），
+      // 不是被设计的功能：中继一挂，"登录"能成功，但之后每轮同步全部失败，只能看本地旧消息
+      // —— 那正是用户说的「空壳」。而且它是「本地保存明文密码」的唯一理由，删掉它，
+      // 密码就真的只用一次。
       return {
         'success': false,
-        'message': res['message'] ?? '登录失败，请检查账号与密码',
+        'message': res['message'] ?? '连接不到服务器，请检查网络后重试',
       };
     }
   }
