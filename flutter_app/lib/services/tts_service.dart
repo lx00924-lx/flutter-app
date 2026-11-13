@@ -1,6 +1,4 @@
-import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
@@ -8,7 +6,6 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/app_settings.dart';
 import '../utils/http_client_helper.dart';
-import 'storage_path_service.dart';
 
 /// TTS 统一语音合成服务（支持手机系统原生离线 TTS 与云端大模型拟人 TTS 双轨降级）
 class TtsService {
@@ -19,6 +16,9 @@ class TtsService {
   AudioPlayer? _audioPlayer;
   bool _isPlaying = false;
   bool _isInitialized = false;
+
+  /// 当前云端 TTS 写入磁盘的临时 mp3（播放需要文件存在，stop() 时清掉）
+  File? _currentTtsFile;
 
   bool get isPlaying => _isPlaying;
 
@@ -143,12 +143,16 @@ class TtsService {
             : Uint8List.fromList(response.data as List<int>);
 
         if (audioBytes.isNotEmpty && _audioPlayer != null) {
-          final tempFilePath = await StoragePathService.instance.generateFilePath(
-            prefix: 'tts_output',
-            extension: 'mp3',
-          );
+          // 朗读输出固定写 App 私有临时目录，**不走 StoragePathService** ——
+          // 那条路的根目录用户能改成公共目录（如 /sdcard/Music），
+          // 文件就会出现在系统文件管理器/音乐库里（同待办 #23）。
+          // 播放期间文件必须存在，所以这里不立即删，交给 stop()。
+          final tempDir = await getTemporaryDirectory();
+          final tempFilePath =
+              '${tempDir.path}/tts_output_${DateTime.now().millisecondsSinceEpoch}.mp3';
           final tempFile = File(tempFilePath);
           await tempFile.writeAsBytes(audioBytes);
+          _currentTtsFile = tempFile;
 
           _isPlaying = true;
           await _audioPlayer?.play(DeviceFileSource(tempFile.path));
@@ -168,6 +172,11 @@ class TtsService {
       await _flutterTts?.stop();
       await _audioPlayer?.stop();
     } catch (_) {}
+    // 停了才删：云端 TTS 的 mp3 只是播放中转，留着会在缓存目录里堆垃圾。
+    try {
+      await _currentTtsFile?.delete();
+    } catch (_) {}
+    _currentTtsFile = null;
   }
 
   /// 过滤 Markdown 标记与代码块，生成自然口语朗读文本

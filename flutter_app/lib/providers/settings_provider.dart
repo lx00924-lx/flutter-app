@@ -575,12 +575,14 @@ class SettingsProvider extends ChangeNotifier {
               style: const TextStyle(fontSize: 14, height: 1.5),
             ),
             actions: [
+              // 按钮文案只关弹窗、不做登录（登录由用户在登录页自己发起）——
+              // 写成「重新登录」会让人以为点了就会自动重登（用户 2026-11-03 实测踩到）。
               FilledButton(
                 onPressed: () {
                   _isShowingKickDialog = false;
                   Navigator.of(dialogCtx).pop();
                 },
-                child: const Text('重新登录'),
+                child: const Text('确认'),
               ),
             ],
           ),

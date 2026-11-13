@@ -8,9 +8,7 @@ import 'dart:async';
 import 'dart:io' show Platform;
 import 'providers/chat_provider.dart';
 import 'providers/settings_provider.dart';
-import 'screens/chat_screen.dart';
 import 'screens/log_console_screen.dart';
-import 'screens/login_screen.dart';
 import 'screens/splash_screen.dart';
 import 'services/notification_service.dart';
 import 'services/tray_service.dart';
@@ -239,9 +237,11 @@ class LxaiApp extends StatelessWidget {
           ),
         ),
       ),
-      home: settings.enableSplash
-          ? const SplashScreen()
-          : (settings.isLoggedIn ? const ChatScreen() : const LoginScreen()),
+      // ⚠️ home 不能跟着设置走。`enableSplash` 是可变设置，一改就会重建 MaterialApp
+      //    的 home，把当前导航栈（正是那个设置页）顶掉 —— 用户看到的是「勾一下开关
+      //    就跳回聊天界面」（待办 #19）。统一先挂 SplashScreen：它在 initState 里
+      //    自己判断开关和登录态，关了才零延迟跳到 Chat/Login。
+      home: const SplashScreen(),
     );
   }
 }
