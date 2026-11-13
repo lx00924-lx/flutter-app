@@ -274,17 +274,15 @@ class SettingsProvider extends ChangeNotifier {
       userId: _settings.loginAccount,
       clientSessionId: _settings.clientSessionId,
       deviceType: AppSettings.currentDeviceType,
-      onKicked: (reason, canTakeover) {
-        // 服务端说这个设备槽位早已没人活跃 → 是本地与服务端 id 分叉造成的假顶号，
-        // 用本地账号密码静默重登一次即可自愈；接管失败再按真实顶号弹窗。
-        if (canTakeover) {
-          unawaited(_trySilentTakeover().then((ok) {
-            if (!ok) handleForceLogout(reason);
-          }));
-          return;
-        }
-        handleForceLogout(reason);
-      },
+      // ⚠️ 被顶下线**一律弹窗 + 退登录，不再静默接管**（2026-11-13 定）。
+      //
+      // 旧的 canTakeover 自愈逻辑：服务端判定「这个设备槽位 3 分钟没活跃」时，
+      // 拿本地存的账号密码自动重登把槽位抢回来。问题是**对方网络断掉时，槽位
+      // 看起来也没活跃** —— 于是两台手机互相顶，服务端 version 一路涨，
+      // 被顶那台还会拿已作废的 id 去请求拿到 401（2026-11-13 15:06~15:12
+      // 那一串 401 就是这么来的）。用户的原话：「对面网络坏的时候，
+      // 正是不该自动接管的时候。」接管这件事交给人：弹窗 → 确认 → 自己输密码。
+      onKicked: (reason, canTakeover) => handleForceLogout(reason),
       onTokenSynced: _applyServerAgentToken,
       onCommand: _handleBridgeCommand,
       onOnlineChanged: _applyAgentOnline,
@@ -394,7 +392,6 @@ class SettingsProvider extends ChangeNotifier {
       case 'force_logout':
         final targetDevice = data['deviceType']?.toString() ?? '';
         final kickedSession = data['kickedSessionId']?.toString() ?? '';
-        final canTakeover = data['canTakeover'] == true;
         // kickedSessionId 缺失时只能退化成按设备类型判断（服务端早期版本就没带这个字段，
         // 那会让同类型的每个实例都把自己当成被顶的那个）。现在服务端已带上，
         // 且推送目标也按设备类型过滤，不再误伤。
@@ -403,14 +400,8 @@ class SettingsProvider extends ChangeNotifier {
             : targetDevice == AppSettings.currentDeviceType;
         if (isMine) {
           final reason = data['reason']?.toString() ?? '您的账号已在另一台设备上登录，当前设备已被下线。';
-          if (canTakeover) {
-            // 对方槽位早已过期 → 静默重登接管，不打扰用户
-            unawaited(_trySilentTakeover().then((ok) {
-              if (!ok) handleForceLogout(reason);
-            }));
-          } else {
-            handleForceLogout(reason);
-          }
+          // 同 onKicked：不接管，直接弹窗退登录。
+          handleForceLogout(reason);
         }
         return;
       default:
@@ -675,31 +666,9 @@ class SettingsProvider extends ChangeNotifier {
     }
   }
 
-  /// 记录上一次静默接管的时间，避免与"真在用的另一台设备"来回抢号
-  DateTime? _lastTakeoverAt;
-
-  /// 被判定"已在另一台设备登录"时的自愈：服务端若带了 canTakeover（该设备槽位
-  /// 早已没人刷活跃），就用本地保存的账号密码静默重登一次，把服务端记录重新对齐到
-  /// 本机 id，然后照常继续，不弹「账号已下线」。
-  ///
-  /// 这是**认证过的接管**：真在用的另一台设备每 4~30 秒就会刷新槽位活跃时间，
-  /// 服务端不会给出 canTakeover，所以不会出现两台机器互相把对方顶下线。
-  /// 60 秒内最多尝试一次，防止异常情况下打转。
-  Future<bool> _trySilentTakeover() async {
-    final last = _lastTakeoverAt;
-    if (last != null && DateTime.now().difference(last) < const Duration(seconds: 60)) {
-      return false;
-    }
-    final account = _settings.loginAccount.trim();
-    final password = _settings.accountPassword;
-    if (account.isEmpty || password.isEmpty) return false;
-    _lastTakeoverAt = DateTime.now();
-    debugPrint('[Settings] 检测到本机会话与服务端记录分叉，尝试静默重登接管');
-    final res = await loginWithServer(account, password);
-    final ok = res['success'] == true;
-    debugPrint('[Settings] 静默接管${ok ? "成功，已恢复连接" : "失败，按真实顶号处理"}');
-    return ok;
-  }
+  // 2026-11-13 删除 `_trySilentTakeover()` 与 `_lastTakeoverAt`：
+  // 被顶下线不再自动重登接管（理由见 `_startSessionMonitoring` 里 onKicked 处的注释）。
+  // 现在的行为是：弹窗 → 确认 → 回登录页 → 由用户自己输密码。
 
   /// 远程服务端注册。
   ///
