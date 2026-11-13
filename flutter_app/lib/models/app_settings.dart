@@ -278,7 +278,9 @@ class AppSettings {
     this.splashSubtitle = 'Loading AI Experience',
     this.splashDurationMs = 1000,
     this.splashImage = '',
-    this.systemPrompt = '你是一个专业、诚实、乐于助人的 AI 助手。',
+    // 回复逻辑默认留空：用户没写就是没写，界面也显示空输入框。
+    // （曾经默认填「你是一个专业、诚实、乐于助人的 AI 助手。」，已按用户要求取消 —— 2026-11-13）
+    this.systemPrompt = '',
     this.sendOnEnter = true,
     // API 端点列表
     List<ApiModelEndpoint>? apiEndpoints,
@@ -506,16 +508,15 @@ class AppSettings {
       splashSubtitle: map['splashSubtitle']?.toString() ?? 'Loading AI Experience',
       splashDurationMs: (map['splashDurationMs'] as num?)?.toInt() ?? 1000,
       splashImage: map['splashImage']?.toString() ?? '',
-      // 空字符串**回落默认**，而不是保留空。
+      // 空字符串**原样保留**，绝不回落默认值。
       //
-      // 实测事故（2026-10-23）：云端 `systemPrompt` 是空串（某台设备推上去的），
-      // 而这里原来是 `?? 默认值` —— 空串不是 null，`??` 不触发，于是拿到空串；
-      // 接着 pullCloudSettings 整份覆盖，另一台的提示词被清空，
-      // 表现成「手机有提示词、电脑没有」。空提示词对模型也没有任何意义，
-      // 所以这里把「空」和「没填过」统一按默认值处理。
-      systemPrompt: (map['systemPrompt']?.toString() ?? '').trim().isEmpty
-          ? '你是一个专业、诚实、乐于助人的 AI 助手。'
-          : map['systemPrompt']!.toString(),
+      // 这里曾反过来：2026-10-23 把「空」当「没填过」，一律填回默认提示词，
+      // 起因是「某台设备推了空串、另一台提示词被清空」那次事故。但那条兜底
+      // 反着用户自己定的同步规则（云端更新时整份覆盖、**空值也覆盖**，
+      // 「我主动清空了」是合法改动），副作用更明显：**用户删掉回复逻辑、
+      // 强制停止重开，内容又回来了**（2026-11-13 实测报的正是这个）。
+      // 现在改为：有键就照实读（空串就是空），只有键缺失才用默认值。
+      systemPrompt: map['systemPrompt']?.toString() ?? '',
       sendOnEnter: map['sendOnEnter'] as bool? ?? true,
       apiEndpoints: endpoints,
       asrProvider: map['asrProvider']?.toString() ?? 'siliconflow',
