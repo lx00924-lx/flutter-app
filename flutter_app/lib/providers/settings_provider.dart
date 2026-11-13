@@ -39,6 +39,9 @@ class SettingsProvider extends ChangeNotifier {
     _settings = StorageService.instance.loadSettings();
     _updateImageCache();
     StoragePathService.instance.setCustomPath(_settings.customDataPath);
+    // 上次的缓存迁移可能没跑完（App 被强杀 / 电脑断电）→ 这里接手：
+    // 能前滚就前滚（补完并把设置切到新路径），否则回滚到原目录。
+    unawaited(_recoverInterruptedCacheMigration());
 
     // 2026-11-13 起不再保存登录密码：老版本把明文密码写在 Hive 里，用来支撑
     // 「中继不可达时离线登录」那条兜底；那条通道已删除（见 loginWithServer 的注释），
@@ -75,6 +78,27 @@ class SettingsProvider extends ChangeNotifier {
     if (_settings.isLoggedIn && _settings.loginAccount.trim().isNotEmpty) {
       _startSessionMonitoring();
       pullCloudSettings();
+    }
+  }
+
+  /// 启动时收拾上次没跑完的缓存迁移（App 被强杀、电脑断电都会落进这里）。
+  ///
+  /// 迁移是「先搬、最后才切路径」，所以中断时设置里仍是旧路径、文件却已被搬走一部分。
+  /// 服务层负责把剩下的搬完（前滚）或搬回去（回滚），这里只负责**把设置跟上**：
+  /// 前滚成功必须写成新路径，否则下次冷启动又会指回旧目录。
+  Future<void> _recoverInterruptedCacheMigration() async {
+    try {
+      final recovery = await StoragePathService.instance.recoverInterruptedMigration();
+      if (!recovery.hasAnything) return;
+
+      if (recovery.action == 'forward' && recovery.path.isNotEmpty) {
+        _settings.customDataPath = recovery.path;
+        _save(pushToCloud: false);
+        notifyListeners();
+      }
+      debugPrint('[Settings] 缓存迁移恢复: ${recovery.action} → ${recovery.path}');
+    } catch (e) {
+      debugPrint('[Settings] 缓存迁移恢复失败: $e');
     }
   }
 

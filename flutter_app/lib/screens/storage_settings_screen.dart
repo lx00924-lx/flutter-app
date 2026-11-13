@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -17,6 +18,14 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
   String _defaultPath = '';
   bool _isClearing = false;
   bool _isMigrating = false;
+  /// 迁移进度：[已搬, 总数]；总数 0 表示还在统计文件
+  final ValueNotifier<List<int>> _migrateProgress = ValueNotifier<List<int>>([0, 0]);
+
+  @override
+  void dispose() {
+    _migrateProgress.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
@@ -50,26 +59,96 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
     final oldPath = sp.settings.customDataPath;
     if (oldPath.isEmpty) return;
 
-    setState(() => _isMigrating = true);
     final targetPath = _defaultPath.isNotEmpty
         ? _defaultPath
         : await StoragePathService.instance.getDefaultDirectoryPath();
+    if (targetPath.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
+          const SnackBar(content: Text('取不到系统默认目录，请稍后重试')),
+        );
+      }
+      return;
+    }
 
-    final migration = await StoragePathService.instance.migrateCacheToNewDirectory(
-      oldPath: oldPath,
-      newPath: targetPath,
-    );
+    final migration = await _migrateWithProgress(oldPath: oldPath, newPath: targetPath);
+    if (!mounted || migration == null) return;
 
-    if (mounted) {
-      setState(() => _isMigrating = false);
-      sp.updateCustomDataPath('');
-      await _refreshCacheSize();
-      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
-        SnackBar(
-          content: Text('已恢复为默认存储路径 (${migration.movedFilesCount} 个文件已迁回)'),
-          backgroundColor: Colors.green,
+    sp.updateCustomDataPath('');
+    await _refreshCacheSize();
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
+      SnackBar(
+        content: Text(
+          migration.success
+              ? '已恢复为默认存储路径 (${migration.movedFilesCount} 个文件已迁回)'
+              : '已切回默认路径，但有文件没搬完: ${migration.error ?? "未知错误"}',
         ),
+        backgroundColor: migration.success ? Colors.green : Colors.orange,
+      ),
+    );
+  }
+
+  /// 迁移缓存，期间显示一个**关不掉的进度框**；返回 null 表示迁移直接抛异常。
+  ///
+  /// 为什么用模态对话框而不是只加一层遮罩：迁移那几十秒里，用户最容易手滑去点别的
+  /// （切会话、看原图、发语音），那些操作全都会往缓存目录写新文件。模态框 +
+  /// `PopScope(canPop:false)` 把返回键也一起挡住，才算真的"整个 App 被禁用"。
+  Future<CacheMigrationResult?> _migrateWithProgress({
+    required String oldPath,
+    required String newPath,
+  }) async {
+    _migrateProgress.value = [0, 0];
+    setState(() => _isMigrating = true);
+
+    unawaited(showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PopScope(
+        canPop: false,
+        child: ValueListenableBuilder<List<int>>(
+          valueListenable: _migrateProgress,
+          builder: (_, progress, __) {
+            final done = progress.isNotEmpty ? progress[0] : 0;
+            final total = progress.length > 1 ? progress[1] : 0;
+            return AlertDialog(
+              title: const Text('正在迁移缓存'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  LinearProgressIndicator(
+                    value: total > 0 ? (done / total).clamp(0.0, 1.0) : null,
+                  ),
+                  const SizedBox(height: 14),
+                  Text(
+                    total > 0 ? '已搬 $done / $total 个文件' : '正在统计文件…',
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    '迁移期间请勿关闭 App。中途断开也没关系 —— '
+                    '下次启动会自动接着搬完，或者退回原目录。',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                  ),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    ));
+
+    try {
+      return await StoragePathService.instance.migrateCacheToNewDirectory(
+        oldPath: oldPath,
+        newPath: newPath,
+        onProgress: (moved, total) => _migrateProgress.value = [moved, total],
       );
+    } finally {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      if (mounted) setState(() => _isMigrating = false);
     }
   }
 
@@ -81,54 +160,46 @@ class _StorageSettingsScreenState extends State<StorageSettingsScreen> {
         lockParentWindow: true,
       );
 
-      if (selectedDirectory != null && selectedDirectory.trim().isNotEmpty) {
-        final newPath = selectedDirectory.trim();
-        final sp = context.read<SettingsProvider>();
-        final oldPath = sp.settings.customDataPath;
+      if (selectedDirectory == null || selectedDirectory.trim().isEmpty) return;
 
-        if (newPath == oldPath.trim()) {
-          if (mounted) {
-            ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
-              const SnackBar(content: Text('已是当前目录，无需更改')),
-            );
-          }
-          return;
-        }
+      final newPath = selectedDirectory.trim();
+      final sp = context.read<SettingsProvider>();
+      final oldPath = sp.settings.customDataPath;
 
-        setState(() => _isMigrating = true);
-
-        // 执行文件整体自动平滑迁移
-        final migration = await StoragePathService.instance.migrateCacheToNewDirectory(
-          oldPath: oldPath,
-          newPath: newPath,
-        );
-
+      if (newPath == oldPath.trim()) {
         if (mounted) {
-          setState(() => _isMigrating = false);
-
-          if (migration.success) {
-            // 更新持久化设置
-            sp.updateCustomDataPath(newPath);
-            await _refreshCacheSize();
-
-            ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
-              SnackBar(
-                content: Text(
-                  '缓存目录已更新！已自动迁移 ${migration.movedFilesCount} 个文件 (${migration.movedMb.toStringAsFixed(2)} MB)',
-                ),
-                backgroundColor: Colors.green,
-                duration: const Duration(seconds: 3),
-              ),
-            );
-          } else {
-            ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
-              SnackBar(
-                content: Text('缓存目录迁移出现异常: ${migration.error ?? "未知错误"}'),
-                backgroundColor: Colors.orange,
-              ),
-            );
-          }
+          ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
+            const SnackBar(content: Text('已是当前目录，无需更改')),
+          );
         }
+        return;
+      }
+
+      final migration = await _migrateWithProgress(oldPath: oldPath, newPath: newPath);
+      if (!mounted || migration == null) return;
+
+      if (migration.success) {
+        // 更新持久化设置
+        sp.updateCustomDataPath(newPath);
+        await _refreshCacheSize();
+        if (!mounted) return;
+
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
+          SnackBar(
+            content: Text(
+              '缓存目录已更新！已自动迁移 ${migration.movedFilesCount} 个文件 (${migration.movedMb.toStringAsFixed(2)} MB)',
+            ),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      } else {
+        ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
+          SnackBar(
+            content: Text('缓存目录迁移出现异常: ${migration.error ?? "未知错误"}'),
+            backgroundColor: Colors.orange,
+          ),
+        );
       }
     } catch (e) {
       debugPrint('打开资源管理器选择目录异常: $e');
