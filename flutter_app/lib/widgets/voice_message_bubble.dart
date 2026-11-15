@@ -154,17 +154,20 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
   Widget build(BuildContext context) {
     final isPlaying = _playerState == PlayerState.playing;
     final totalSec = _duration.inSeconds > 0 ? _duration.inSeconds : (widget.fallbackDuration ?? 1);
-    // ⚠️ 不能按屏幕宽度算长度：Windows 上 1920 × 0.7 = 1344px，一条几秒的语音能横跨半个窗口。
-    //    改成按秒数线性增长、再夹进固定区间 —— 手机和桌面看起来差不多长。
-    final bubbleWidth = (180.0 + totalSec * 6.0).clamp(220.0, 420.0);
-    final isDark = Theme.of(context).brightness == Brightness.dark;
+    // ⚠️ 宽度**固定 200**，不再随秒数变（用户 2026-11-16 定：长度固定就好）。
+    //    之前是 `屏幕宽 × 百分比`，Windows 上能到 1344px；后来改成按秒数增长，还是「每条不一样长」。
+    //    固定之后 2 秒和 40 秒长得一样，列表看起来才是整齐的一列而不是参差。
+    const bubbleWidth = 200.0;
 
-    // 裸模式下没有底色了，白图标会消失在浅色背景上 —— 统一改用蓝色系。
+    // 裸模式（纯语音消息）：底色用「用户文字气泡」那个蓝 #0284C7，图标/声波/秒数全部走白。
+    // 这是用户 2026-11-16 亲自从八套里挑的（F），理由是「蓝底白字最醒目」。
+    // 混合消息（语音+转写文字）仍然留在气泡里、走原来的淡色小条 ——
+    // 那种情况外层已经有气泡底了，里面再来一块实蓝就成双层蓝。
     final primaryColor = widget.bare
-        ? const Color(0xFF0284C7)
+        ? Colors.white
         : (widget.isUser ? Colors.white : const Color(0xFF0284C7));
     final secColor = widget.bare
-        ? const Color(0xFF64748B)
+        ? Colors.white.withOpacity(0.85)
         : (widget.isUser ? Colors.white.withOpacity(0.8) : const Color(0xFF64748B));
 
     return InkWell(
@@ -173,13 +176,11 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
       child: Container(
         width: bubbleWidth,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        // ⚠️ 裸模式的底色**必须不透明**（用户 2026-11-16：半透明叠在背景上看着像没有底）。
-        //    值不是随手挑的，是「10% 的 #0284C7 叠在会话背景上」的等价实色：
-        //    浅色底（白）→ #E8F2F9，深色底（#0F172A）→ #14293A。
-        //    之所以按主题写两个实色而不是 alphaBlend，是因为这里拿不到父级背景色。
+        // 裸模式 = 用户文字气泡同款实蓝（#0284C7），白图标白声波（用户 2026-11-16 选的 F）。
+        // 深色主题下不另调：这个蓝在深底上更亮，反而更清楚，不需要两套。
         decoration: BoxDecoration(
           color: widget.bare
-              ? (isDark ? const Color(0xFF14293A) : const Color(0xFFE8F2F9))
+              ? const Color(0xFF0284C7)
               : (widget.isUser
                   ? Colors.white.withOpacity(0.18)
                   : const Color(0xFF0284C7).withOpacity(0.08)),
