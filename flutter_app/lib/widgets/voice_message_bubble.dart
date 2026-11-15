@@ -157,6 +157,7 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
     // ⚠️ 不能按屏幕宽度算长度：Windows 上 1920 × 0.7 = 1344px，一条几秒的语音能横跨半个窗口。
     //    改成按秒数线性增长、再夹进固定区间 —— 手机和桌面看起来差不多长。
     final bubbleWidth = (180.0 + totalSec * 6.0).clamp(220.0, 420.0);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
     // 裸模式下没有底色了，白图标会消失在浅色背景上 —— 统一改用蓝色系。
     final primaryColor = widget.bare
@@ -172,12 +173,13 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
       child: Container(
         width: bubbleWidth,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        // ⚠️ 裸模式**也要底色**：用户 2026-11-16 明确「去掉的是气泡框，语音条自己的底要留着」。
-        //    外层气泡没了，语音条就得自己有一块可见的底，否则图标和声波在浅色背景上像漂着。
-        //    但不能沿用「半透明白」—— 那个是给蓝气泡配的，脱离蓝底会完全看不见，裸模式改用淡蓝。
+        // ⚠️ 裸模式的底色**必须不透明**（用户 2026-11-16：半透明叠在背景上看着像没有底）。
+        //    值不是随手挑的，是「10% 的 #0284C7 叠在会话背景上」的等价实色：
+        //    浅色底（白）→ #E8F2F9，深色底（#0F172A）→ #14293A。
+        //    之所以按主题写两个实色而不是 alphaBlend，是因为这里拿不到父级背景色。
         decoration: BoxDecoration(
           color: widget.bare
-              ? const Color(0xFF0284C7).withOpacity(0.10)
+              ? (isDark ? const Color(0xFF14293A) : const Color(0xFFE8F2F9))
               : (widget.isUser
                   ? Colors.white.withOpacity(0.18)
                   : const Color(0xFF0284C7).withOpacity(0.08)),
