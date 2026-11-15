@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:audioplayers/audioplayers.dart';
-import 'package:path_provider/path_provider.dart';
+import '../screens/log_console_screen.dart';
 
 /// 聊天语音气泡组件：支持播放、暂停、进度与时长展示
 class VoiceMessageBubble extends StatefulWidget {
@@ -33,7 +33,8 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
   final AudioPlayer _audioPlayer = AudioPlayer();
   PlayerState _playerState = PlayerState.stopped;
   Duration _duration = Duration.zero;
-  Duration _position = Duration.zero;
+  // ⚠️ 这里原来还有个 `_position`，但从来没被读过 —— 只是让 onPositionChanged
+  //    每一帧都 setState 重建一次整个气泡。播放时白建一遍 UI，删掉。
   String? _tempFilePath;
 
   @override
@@ -72,12 +73,8 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
       }
     });
 
-    _audioPlayer.onPositionChanged.listen((p) {
-      if (mounted) {
-        setState(() => _position = p);
-      }
-    });
-
+    // ⚠️ 不再监听 onPositionChanged：位置没被任何地方用到，
+    //    监听它只是让播放期间每一帧都 setState 重建整条气泡。
     _audioPlayer.onPlayerComplete.listen((_) {
       if (mounted) {
         setState(() {
@@ -98,9 +95,18 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
       cleanBase64 = cleanBase64.replaceAll('\n', '').replaceAll('\r', '').replaceAll(' ', '');
       final bytes = base64Decode(cleanBase64);
 
-      final tempDir = await getTemporaryDirectory();
+      // ⚠️ 用 `Directory.systemTemp`（→ %TEMP%，路径无空格），不要用 getTemporaryDirectory()：
+      //    桌面端的缓存根是 `...\LxAI Team\LxAI\cache`，**路径里有空格**，
+      //    而 audioplayers 的 Windows 后端走 Media Foundation，含空格路径是已知雷区。
+      //    写到系统临时目录下的固定子目录，把这类干扰排除掉。
+      final voiceDir = Directory(
+        '${Directory.systemTemp.path}${Platform.pathSeparator}lxai_voice',
+      );
+      if (!await voiceDir.exists()) {
+        await voiceDir.create(recursive: true);
+      }
       final hash = bytes.lengthInBytes ^ widget.audioDataUri.hashCode;
-      final file = File('${tempDir.path}/play_voice_$hash.m4a');
+      final file = File('${voiceDir.path}${Platform.pathSeparator}play_voice_$hash.m4a');
       if (!await file.exists()) {
         await file.writeAsBytes(bytes);
       }
@@ -123,7 +129,19 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
         }
       }
     } catch (e) {
+      // ⚠️ 这里以前只有一句 debugPrint —— 播放失败时界面**毫无反应**，
+      //    用户点一下、没声音、也没提示，只能以为「点了没用」。
+      //    按「坏的链路不许假装自己是好的」：失败必须写进日志页 + 当场告诉用户。
       debugPrint('togglePlay error: $e');
+      AppLogger.instance.log('ERROR', 'Voice', '语音播放失败: $e');
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(
+            content: Text('语音播放失败：$e'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
     }
   }
 
