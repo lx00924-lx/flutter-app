@@ -20,6 +20,18 @@ import 'voice_message_bubble.dart';
 import '../utils/app_colors.dart';
 
 class MessageBubble extends StatelessWidget {
+  /// 语音气泡的 GlobalKey 表，按「消息id#第几条」索引。
+  ///
+  /// ⚠️ 为什么是静态表：`MessageBubble` 是 StatelessWidget，在 build 里 `GlobalKey()`
+  /// 每次重建都会生成新实例，State 会被整条丢掉。所以 key 必须跨 build 稳定 ——
+  /// 存到静态表里、按消息 id 复用。
+  /// ⚠️ 为什么不清理：语音消息数量有限，且一条消息的 key 反复用是它的用途本身；
+  /// 清早了反而会在长按重播时拿到一个已经失联的 key。
+  static final Map<String, GlobalKey<VoiceMessageBubbleState>> _voiceKeys = {};
+
+  static GlobalKey<VoiceMessageBubbleState> _voiceKeyFor(String id) =>
+      _voiceKeys.putIfAbsent(id, () => GlobalKey<VoiceMessageBubbleState>());
+
   final ChatMessage message;
   final bool isLatestAssistant;
 
@@ -95,6 +107,10 @@ class MessageBubble extends StatelessWidget {
     final settings = context.read<SettingsProvider>().settings;
     final isAgent = message.isAgentMode || settings.defaultAgentMode;
 
+    // 这条消息里有没有语音附件 —— 决定菜单要不要出「重新播放」。
+    final hasVoice =
+        message.attachments?.any((att) => isAudioAttachment(att)) ?? false;
+
     // 有没有过程可看：落库的那份，或本轮正在实时收集的那份 —— 跑着的时候
     // agentExecution 还是空的，不能只判断它，否则菜单项会时有时无
     final hasTrace = (message.agentExecution?.timeline.isNotEmpty ?? false) ||
@@ -122,6 +138,21 @@ class MessageBubble extends StatelessWidget {
             ],
           ),
         ),
+        // 语音消息才出「重新播放」（用户 2026-11-16 要的）。
+        // 它和「朗读」相反：朗读是把文字念出来，这个是把那条语音从头再放一遍。
+        if (hasVoice)
+          PopupMenuItem<String>(
+            value: 'replay',
+            height: 40,
+            child: Row(
+              children: [
+                Icon(Icons.replay_rounded, size: 18,
+                    color: isDark ? Colors.lightBlueAccent : const Color(0xFF0284C7)),
+                const SizedBox(width: 10),
+                const Text('重新播放', style: TextStyle(fontSize: 14)),
+              ],
+            ),
+          ),
         // 没有文字就没有可朗读的东西（纯语音、纯图片消息）——
         // 而且点了也不会有反应（TTS 拿不到文本），留着只会让人以为坏了。
         if (message.content.trim().isNotEmpty)
@@ -207,6 +238,22 @@ class MessageBubble extends StatelessWidget {
               duration: Duration(seconds: 1),
             ),
           );
+          break;
+        case 'replay':
+          // 长按菜单在 StatelessWidget 里，拿不到语音气泡的 State ——
+          // 所以走上面那张静态 GlobalKey 表（按「消息id#第几条」索引）去调公开的 replay()。
+          final voiceState =
+              MessageBubble._voiceKeys['${message.id}#0']?.currentState;
+          if (voiceState == null) {
+            ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
+              const SnackBar(
+                content: Text('这条语音还没加载出来，稍后再试'),
+                duration: Duration(seconds: 2),
+              ),
+            );
+          } else {
+            voiceState.replay();
+          }
           break;
         case 'read':
           context.read<SettingsProvider>().setAutoSpeakResponse(true);
@@ -621,8 +668,12 @@ class MessageBubble extends StatelessWidget {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: message.attachments!
                                   .where((att) => isAudioAttachment(att))
-                                  .map((att) => VoiceMessageBubble(
-                                        audioDataUri: att,
+                                  .toList()
+                                  .asMap()
+                                  .entries
+                                  .map((e) => VoiceMessageBubble(
+                                        key: _voiceKeyFor('${message.id}#${e.key}'),
+                                        audioDataUri: e.value,
                                         isUser: isUser,
                                         bare: true,
                                       ))
@@ -668,11 +719,17 @@ class MessageBubble extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           // 1. 语音附件
-                          ...message.attachments!.where((att) => isAudioAttachment(att)).map((att) {
+                          ...message.attachments!
+                              .where((att) => isAudioAttachment(att))
+                              .toList()
+                              .asMap()
+                              .entries
+                              .map((e) {
                             return Padding(
                               padding: const EdgeInsets.only(bottom: 8),
                               child: VoiceMessageBubble(
-                                audioDataUri: att,
+                                key: _voiceKeyFor('${message.id}#${e.key}'),
+                                audioDataUri: e.value,
                                 isUser: isUser,
                               ),
                             );

@@ -26,10 +26,10 @@ class VoiceMessageBubble extends StatefulWidget {
   });
 
   @override
-  State<VoiceMessageBubble> createState() => _VoiceMessageBubbleState();
+  State<VoiceMessageBubble> createState() => VoiceMessageBubbleState();
 }
 
-class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
+class VoiceMessageBubbleState extends State<VoiceMessageBubble> {
   final AudioPlayer _audioPlayer = AudioPlayer();
   PlayerState _playerState = PlayerState.stopped;
   Duration _duration = Duration.zero;
@@ -153,6 +153,39 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
         ScaffoldMessenger.maybeOf(context)?.showSnackBar(
           SnackBar(
             content: Text('语音播放失败：$e'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    }
+  }
+
+  /// 从头重播 —— 给长按菜单的「重新播放」用（用户 2026-11-16 要的）。
+  ///
+  /// 为此把 State 类从 `_VoiceMessageBubbleState` 改成了公开的 `VoiceMessageBubbleState`：
+  /// 长按菜单在 `message_bubble.dart` 里，只能通过 `GlobalKey<VoiceMessageBubbleState>`
+  /// 拿到它、调这个公开方法。私有类名外部根本引用不了。
+  Future<void> replay() async {
+    try {
+      await _audioPlayer.stop();
+      if (mounted) {
+        setState(() {
+          _position = Duration.zero;
+          _playerState = PlayerState.stopped;
+        });
+      }
+      // _prepareFile 有 _tempFilePath 缓存，重播直接复用已写好的文件，不重复落盘。
+      final path = await _prepareFile();
+      if (path != null) {
+        await _audioPlayer.play(DeviceFileSource(path));
+      }
+    } catch (e) {
+      debugPrint('replay error: $e');
+      AppLogger.instance.log('ERROR', 'Voice', '语音重新播放失败: $e');
+      if (mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(
+            content: Text('语音重新播放失败：$e'),
             duration: const Duration(seconds: 5),
           ),
         );
