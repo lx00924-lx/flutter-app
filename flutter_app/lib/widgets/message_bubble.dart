@@ -122,17 +122,20 @@ class MessageBubble extends StatelessWidget {
             ],
           ),
         ),
-        PopupMenuItem<String>(
-          value: 'read',
-          height: 40,
-          child: Row(
-            children: [
-              Icon(Icons.volume_up_outlined, size: 18, color: isDark ? Colors.amberAccent : Colors.orange),
-              const SizedBox(width: 10),
-              const Text('朗读', style: TextStyle(fontSize: 14)),
-            ],
+        // 没有文字就没有可朗读的东西（纯语音、纯图片消息）——
+        // 而且点了也不会有反应（TTS 拿不到文本），留着只会让人以为坏了。
+        if (message.content.trim().isNotEmpty)
+          PopupMenuItem<String>(
+            value: 'read',
+            height: 40,
+            child: Row(
+              children: [
+                Icon(Icons.volume_up_outlined, size: 18, color: isDark ? Colors.amberAccent : Colors.orange),
+                const SizedBox(width: 10),
+                const Text('朗读', style: TextStyle(fontSize: 14)),
+              ],
+            ),
           ),
-        ),
         if (hasTrace)
           PopupMenuItem<String>(
             value: 'trace',

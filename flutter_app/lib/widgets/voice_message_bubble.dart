@@ -137,8 +137,9 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
   Widget build(BuildContext context) {
     final isPlaying = _playerState == PlayerState.playing;
     final totalSec = _duration.inSeconds > 0 ? _duration.inSeconds : (widget.fallbackDuration ?? 1);
-    final widthFactor = (totalSec / 60).clamp(0.25, 0.7);
-    final bubbleWidth = MediaQuery.of(context).size.width * widthFactor + 80;
+    // ⚠️ 不能按屏幕宽度算长度：Windows 上 1920 × 0.7 = 1344px，一条几秒的语音能横跨半个窗口。
+    //    改成按秒数线性增长、再夹进固定区间 —— 手机和桌面看起来差不多长。
+    final bubbleWidth = (180.0 + totalSec * 6.0).clamp(220.0, 420.0);
 
     // 裸模式下没有底色了，白图标会消失在浅色背景上 —— 统一改用蓝色系。
     final primaryColor = widget.bare
@@ -154,16 +155,17 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
       child: Container(
         width: bubbleWidth,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        // 裸模式不画底色：纯语音消息外层已经没有气泡了，
-        // 这里再画一块半透明色只会让人觉得"有个来路不明的方块"。
-        decoration: widget.bare
-            ? null
-            : BoxDecoration(
-                color: widget.isUser
-                    ? Colors.white.withOpacity(0.18)
-                    : const Color(0xFF0284C7).withOpacity(0.08),
-                borderRadius: BorderRadius.circular(12),
-              ),
+        // ⚠️ 裸模式**也要底色**：用户 2026-11-16 明确「去掉的是气泡框，语音条自己的底要留着」。
+        //    外层气泡没了，语音条就得自己有一块可见的底，否则图标和声波在浅色背景上像漂着。
+        //    但不能沿用「半透明白」—— 那个是给蓝气泡配的，脱离蓝底会完全看不见，裸模式改用淡蓝。
+        decoration: BoxDecoration(
+          color: widget.bare
+              ? const Color(0xFF0284C7).withOpacity(0.10)
+              : (widget.isUser
+                  ? Colors.white.withOpacity(0.18)
+                  : const Color(0xFF0284C7).withOpacity(0.08)),
+          borderRadius: BorderRadius.circular(12),
+        ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
