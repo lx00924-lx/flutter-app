@@ -79,7 +79,6 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
       if (mounted) {
         setState(() {
           _playerState = PlayerState.stopped;
-          _position = Duration.zero;
         });
       }
     });
