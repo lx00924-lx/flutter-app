@@ -29,6 +29,16 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 否则用户自己那条会被 AI 的长回复顶出屏幕，读回复前得先往上滑一下。
   /// 这是 Gemini 的做法：用户消息钉在顶上，回答从下面长出来。
   final GlobalKey _lastUserMsgKey = GlobalKey();
+
+  /// 首屏进来有没有做过「初始滚到底」。只做一次，之后由用户自己的滚动决定位置。
+  ///
+  /// ⚠️ 用户 2026-11-16 反馈「启动应用停在中间，不是最上也不是最下」。两层原因：
+  ///   1. 走的是 `_scrollToBottom(animate:true)`，被 `distFromBottom > 30` 那个
+  ///      「别抢用户正在翻历史」的守卫挡住了 —— 启动时 offset=0、离底很远，误判成用户在上翻；
+  ///   2. 就算滚了也只滚到当时的 `maxScrollExtent`：列表懒加载，首帧算出来的高度偏小，
+  ///      数据排完实际更高，于是停在中间。
+  /// 所以要 force + 补一次延后校正。
+  bool _didInitialScroll = false;
   int _lastMessageCount = 0;
   String? _lastSessionId;
   bool _userScrolledUp = false;
@@ -301,6 +311,22 @@ class _ChatScreenState extends State<ChatScreen> {
         // 云端迟到的 / 另一端同步来的消息 → 尊重原有行为
         _scrollToBottom(animate: true);
       }
+    }
+
+    // 首屏：消息一到位就强制滚到底，再补一次延后校正。
+    //
+    // 为什么两次：列表懒加载，第一帧的 maxScrollExtent 是估算值（偏小），
+    // 跳到那里之后实际内容更高，人眼看到的就是「停在中间」。
+    // 第二跳等布局稳定（约 120ms）再走一次，用的才是真实高度。
+    // 只在首屏做，之后完全交给用户自己的滚动。
+    if (!_didInitialScroll && chat.messages.isNotEmpty) {
+      _didInitialScroll = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _scrollToBottom(animate: false, force: true);
+        Future.delayed(const Duration(milliseconds: 120), () {
+          if (mounted) _scrollToBottom(animate: false, force: true);
+        });
+      });
     }
 
     final displayName = settings.aiName.isNotEmpty

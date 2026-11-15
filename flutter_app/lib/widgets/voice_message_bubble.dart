@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:audioplayers/audioplayers.dart';
 import '../screens/log_console_screen.dart';
@@ -37,7 +37,8 @@ class VoiceMessageBubbleState extends State<VoiceMessageBubble> {
   /// 播放到哪完全看不出来（analyze 那条 unused_field 报的就是这个「设计上有、实际没用」）。
   /// 用户 2026-11-16 明确要「把进度条加回来」，现在按 _position / _duration 给柱子上色。
   Duration _position = Duration.zero;
-  String? _tempFilePath;
+  /// ⚠️ 播放不再落盘（见 `_decodeBytes`），所以这个"临时文件路径"字段已经没用了。
+  ///    保留一行注释是为了说明它为什么消失，避免以后有人又加回来。
 
   @override
   void initState() {
@@ -95,35 +96,30 @@ class VoiceMessageBubbleState extends State<VoiceMessageBubble> {
     });
   }
 
-  Future<String?> _prepareFile() async {
-    if (_tempFilePath != null) return _tempFilePath;
+  /// 解出音频字节，**不落盘**。
+  ///
+  /// 为什么不再写临时文件（用户 2026-11-16 要求「把缓存搬回来」）：
+  /// 桌面端的缓存根是 `...\LxAI Team\LxAI\cache`，**路径里带空格**，而 audioplayers
+  /// 的 Windows 后端走 Media Foundation，处理不了含空格的路径 —— 实测同一个 m4a
+  /// 放 %TEMP% 能播、放缓存目录就彻底无声（而且失败被 catch 吞掉，点了没反应）。
+  ///
+  /// 上一版的办法是把播放副本挪到 `%TEMP%\lxai_voice\` 绕开空格，能播了，但那是
+  /// **排查用的临时手段**：它跑到了用户的缓存目录之外、没人清理、统计也统计不到。
+  /// 现在改成把字节直接喂给播放器（BytesSource），压根不产生文件 ——
+  /// 空格问题不存在了，也不用再选"放哪儿"。
+  Uint8List? _decodeBytes() {
     try {
-      String cleanBase64 = widget.audioDataUri;
-      if (cleanBase64.contains(',')) {
-        cleanBase64 = cleanBase64.split(',').last;
+      var b64 = widget.audioDataUri;
+      if (b64.contains(',')) {
+        b64 = b64.split(',').last;
       }
-      cleanBase64 = cleanBase64.replaceAll('\n', '').replaceAll('\r', '').replaceAll(' ', '');
-      final bytes = base64Decode(cleanBase64);
-
-      // ⚠️ 用 `Directory.systemTemp`（→ %TEMP%，路径无空格），不要用 getTemporaryDirectory()：
-      //    桌面端的缓存根是 `...\LxAI Team\LxAI\cache`，**路径里有空格**，
-      //    而 audioplayers 的 Windows 后端走 Media Foundation，含空格路径是已知雷区。
-      //    写到系统临时目录下的固定子目录，把这类干扰排除掉。
-      final voiceDir = Directory(
-        '${Directory.systemTemp.path}${Platform.pathSeparator}lxai_voice',
-      );
-      if (!await voiceDir.exists()) {
-        await voiceDir.create(recursive: true);
-      }
-      final hash = bytes.lengthInBytes ^ widget.audioDataUri.hashCode;
-      final file = File('${voiceDir.path}${Platform.pathSeparator}play_voice_$hash.m4a');
-      if (!await file.exists()) {
-        await file.writeAsBytes(bytes);
-      }
-      _tempFilePath = file.path;
-      return _tempFilePath;
+      // base64 里可能混进换行/空格（过长时会被折行），先剔干净
+      b64 = b64.replaceAll(RegExp(r'\s'), '');
+      return base64Decode(b64);
     } catch (e) {
-      debugPrint('VoiceMessageBubble prepareFile failed: $e');
+      // 解不开就是数据坏了，必须说出来，不能静默
+      debugPrint('VoiceMessageBubble decode failed: $e');
+      AppLogger.instance.log('ERROR', 'Voice', '语音解码失败: $e');
       return null;
     }
   }
@@ -133,15 +129,24 @@ class VoiceMessageBubbleState extends State<VoiceMessageBubble> {
       if (_playerState == PlayerState.playing) {
         await _audioPlayer.pause();
       } else {
-        final path = await _prepareFile();
-        if (path != null) {
-          // 从「停止」状态开播时进度归零；从「暂停」恢复则保持原位置 ——
-          // 否则暂停一下再继续，进度条会跳回开头。
-          if (_playerState != PlayerState.paused) {
-            setState(() => _position = Duration.zero);
+        final bytes = _decodeBytes();
+        if (bytes == null) {
+          if (mounted) {
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+              const SnackBar(
+                content: Text('这条语音的数据坏了，播不了'),
+                duration: Duration(seconds: 4),
+              ),
+            );
           }
-          await _audioPlayer.play(DeviceFileSource(path));
+          return;
         }
+        // 从「停止」状态开播时进度归零；从「暂停」恢复则保持原位置 ——
+        // 否则暂停一下再继续，进度条会跳回开头。
+        if (_playerState != PlayerState.paused) {
+          setState(() => _position = Duration.zero);
+        }
+        await _audioPlayer.play(BytesSource(bytes));
       }
     } catch (e) {
       // ⚠️ 这里以前只有一句 debugPrint —— 播放失败时界面**毫无反应**，
@@ -174,10 +179,10 @@ class VoiceMessageBubbleState extends State<VoiceMessageBubble> {
           _playerState = PlayerState.stopped;
         });
       }
-      // _prepareFile 有 _tempFilePath 缓存，重播直接复用已写好的文件，不重复落盘。
-      final path = await _prepareFile();
-      if (path != null) {
-        await _audioPlayer.play(DeviceFileSource(path));
+      // 字节每次现解，不落盘也就没有缓存文件要复用
+      final bytes = _decodeBytes();
+      if (bytes != null) {
+        await _audioPlayer.play(BytesSource(bytes));
       }
     } catch (e) {
       debugPrint('replay error: $e');
@@ -248,29 +253,60 @@ class VoiceMessageBubbleState extends State<VoiceMessageBubble> {
               size: 26,
             ),
             const SizedBox(width: 8),
-            // 声波条：**按播放进度上色**。
-            // 原来的写法是 `index < 6 ? 0.9 : 0.5` —— 固定前半亮后半暗，
-            // 跟播放位置毫无关系，所以播到哪完全看不出来（用户要的「进度条」就是这个）。
+            // 声波条 + **跟随进度的竖线**（用户 2026-11-16 要的，之前确实有过这么一条）。
+            //
+            // ⚠️ 竖线的移动**必须走 Transform.translate**，不能改 Positioned.left / Container.width：
+            //    改 left/width 每次都要重新 layout 整条声波（这正是 2026-10-18 那次
+            //    「进度条一直闪、掉帧」的根因，当时换成 clip-path 才压到 60fps）。
+            //    Transform 只更新变换矩阵，走合成层，不重排、不重绘子树。
             Expanded(
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: List.generate(12, (index) {
-                  final h = ((index % 4) + 2) * 3.5;
-                  // 每根柱子看自己的中心点有没有被播过
-                  final playedHere = progress > 0 && (index + 0.5) / 12 <= progress;
-                  final opacity = progress <= 0
-                      ? 0.62                          // 没开始：整条压暗一档，看得出是声波
-                      : (playedHere ? 1.0 : 0.26);    // 播放中：已播亮、未播压暗
-                  return AnimatedContainer(
-                    duration: const Duration(milliseconds: 120),
-                    width: 3,
-                    height: isPlaying ? ((index % 3 + 1) * 5.0) : h,
-                    decoration: BoxDecoration(
-                      color: primaryColor.withOpacity(opacity),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final waveW = constraints.maxWidth;
+                  return Stack(
+                    alignment: Alignment.centerLeft,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: List.generate(12, (index) {
+                          final h = ((index % 4) + 2) * 3.5;
+                          return AnimatedContainer(
+                            duration: const Duration(milliseconds: 120),
+                            width: 3,
+                            height: isPlaying ? ((index % 3 + 1) * 5.0) : h,
+                            decoration: BoxDecoration(
+                              // 柱子不再按进度分色（有竖线了，两条信息打架会很花），
+                              // 统一 45% 白，只当背景纹理。
+                              color: primaryColor.withOpacity(0.45),
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          );
+                        }),
+                      ),
+                      // 播放位置竖线：没开始播时钉在最左边
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Transform.translate(
+                          offset: Offset((waveW * progress).clamp(0.0, waveW) - 1, 0),
+                          child: Container(
+                            width: 2,
+                            height: 20,
+                            decoration: BoxDecoration(
+                              color: primaryColor,
+                              borderRadius: BorderRadius.circular(1),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: primaryColor.withOpacity(0.45),
+                                  blurRadius: 4,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   );
-                }),
+                },
               ),
             ),
             const SizedBox(width: 8),
