@@ -33,8 +33,10 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
   final AudioPlayer _audioPlayer = AudioPlayer();
   PlayerState _playerState = PlayerState.stopped;
   Duration _duration = Duration.zero;
-  // ⚠️ 这里原来还有个 `_position`，但从来没被读过 —— 只是让 onPositionChanged
-  //    每一帧都 setState 重建一次整个气泡。播放时白建一遍 UI，删掉。
+  /// 播放进度。⚠️ 这个字段之前就存在，但**从来没被读过** —— 声波一直是 12 根静态柱子，
+  /// 播放到哪完全看不出来（analyze 那条 unused_field 报的就是这个「设计上有、实际没用」）。
+  /// 用户 2026-11-16 明确要「把进度条加回来」，现在按 _position / _duration 给柱子上色。
+  Duration _position = Duration.zero;
   String? _tempFilePath;
 
   @override
@@ -73,12 +75,21 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
       }
     });
 
-    // ⚠️ 不再监听 onPositionChanged：位置没被任何地方用到，
-    //    监听它只是让播放期间每一帧都 setState 重建整条气泡。
+    // 播放进度：驱动声波柱子的明暗，这就是「进度条」。
+    // 只在播放中重建（暂停/停止时位置不会变，没必要刷）。
+    _audioPlayer.onPositionChanged.listen((p) {
+      if (mounted && _playerState == PlayerState.playing) {
+        setState(() => _position = p);
+      }
+    });
+
     _audioPlayer.onPlayerComplete.listen((_) {
       if (mounted) {
         setState(() {
           _playerState = PlayerState.stopped;
+          // 播完把进度停在末尾（柱子保持全亮），下次点播放时才归零 ——
+          // 否则刚播完就整条暗回去，看起来像"没播成功"。
+          _position = _duration;
         });
       }
     });
@@ -124,6 +135,11 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
       } else {
         final path = await _prepareFile();
         if (path != null) {
+          // 从「停止」状态开播时进度归零；从「暂停」恢复则保持原位置 ——
+          // 否则暂停一下再继续，进度条会跳回开头。
+          if (_playerState != PlayerState.paused) {
+            setState(() => _position = Duration.zero);
+          }
           await _audioPlayer.play(DeviceFileSource(path));
         }
       }
@@ -154,6 +170,10 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
   Widget build(BuildContext context) {
     final isPlaying = _playerState == PlayerState.playing;
     final totalSec = _duration.inSeconds > 0 ? _duration.inSeconds : (widget.fallbackDuration ?? 1);
+    // 播放进度 0~1，驱动声波柱子的明暗 —— 这就是用户要的「进度条」。
+    final progress = _duration.inMilliseconds > 0
+        ? (_position.inMilliseconds / _duration.inMilliseconds).clamp(0.0, 1.0)
+        : 0.0;
     // ⚠️ 宽度**固定 200**，不再随秒数变（用户 2026-11-16 定：长度固定就好）。
     //    之前是 `屏幕宽 × 百分比`，Windows 上能到 1344px；后来改成按秒数增长，还是「每条不一样长」。
     //    固定之后 2 秒和 40 秒长得一样，列表看起来才是整齐的一列而不是参差。
@@ -195,18 +215,25 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
               size: 26,
             ),
             const SizedBox(width: 8),
-            // 声波条动画 / 静态指示
+            // 声波条：**按播放进度上色**。
+            // 原来的写法是 `index < 6 ? 0.9 : 0.5` —— 固定前半亮后半暗，
+            // 跟播放位置毫无关系，所以播到哪完全看不出来（用户要的「进度条」就是这个）。
             Expanded(
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: List.generate(12, (index) {
                   final h = ((index % 4) + 2) * 3.5;
+                  // 每根柱子看自己的中心点有没有被播过
+                  final playedHere = progress > 0 && (index + 0.5) / 12 <= progress;
+                  final opacity = progress <= 0
+                      ? 0.62                          // 没开始：整条压暗一档，看得出是声波
+                      : (playedHere ? 1.0 : 0.26);    // 播放中：已播亮、未播压暗
                   return AnimatedContainer(
-                    duration: const Duration(milliseconds: 150),
+                    duration: const Duration(milliseconds: 120),
                     width: 3,
                     height: isPlaying ? ((index % 3 + 1) * 5.0) : h,
                     decoration: BoxDecoration(
-                      color: primaryColor.withOpacity(index < 6 ? 0.9 : 0.5),
+                      color: primaryColor.withOpacity(opacity),
                       borderRadius: BorderRadius.circular(2),
                     ),
                   );
