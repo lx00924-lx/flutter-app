@@ -480,6 +480,18 @@ class MessageBubble extends StatelessWidget {
         message.content.isEmpty &&
         (message.reasoningContent == null || message.reasoningContent!.isEmpty));
 
+    // 纯语音消息（只有语音音频，没有文字/思考/其它附件）同样**不套气泡底**：
+    // 理由与纯图消息一致 —— 外面那层气泡只会让"媒体本身"再套一层色，
+    // 用户 2026-11-16 的要求是「语音的背景色和图片一样」。
+    // 注意：混合消息（语音 + 文字，如语音转写附带的文字）仍然走正常气泡，
+    // 因为那时候气泡的底色是给文字的，不是给媒体的。
+    final hasVoiceOnly = (message.attachments != null &&
+        message.attachments!.isNotEmpty &&
+        message.attachments!.every((att) => isAudioAttachment(att)) &&
+        message.content.isEmpty &&
+        (message.reasoningContent == null || message.reasoningContent!.isEmpty));
+
+
     Offset? tapPosition;
 
     return Padding(
@@ -593,7 +605,28 @@ class MessageBubble extends StatelessWidget {
                               .toList(),
                         ),
                       )
-                    : Container(
+                    : hasVoiceOnly
+                        ? ClipRRect(
+                            borderRadius: BorderRadius.only(
+                              topLeft: const Radius.circular(16),
+                              topRight: const Radius.circular(16),
+                              bottomLeft: Radius.circular(isUser ? 16 : 4),
+                              bottomRight: Radius.circular(isUser ? 4 : 16),
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: message.attachments!
+                                  .where((att) => isAudioAttachment(att))
+                                  .map((att) => VoiceMessageBubble(
+                                        audioDataUri: att,
+                                        isUser: isUser,
+                                        bare: true,
+                                      ))
+                                  .toList(),
+                            ),
+                          )
+                        : Container(
                 constraints: BoxConstraints(
                   // 头像已经移到气泡上方单独一行，气泡可以用满宽度（用户要求"更宽"）：
                   // 以前是屏幕宽度的 78%，且还要让出头像那 46px。

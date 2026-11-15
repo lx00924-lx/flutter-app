@@ -10,11 +10,19 @@ class VoiceMessageBubble extends StatefulWidget {
   final bool isUser;
   final int? fallbackDuration;
 
+  /// 裸模式：**不画自己的底色**，内容用蓝色系，供「纯语音消息」使用。
+  ///
+  /// 纯语音消息外层已经不套气泡了（见 `message_bubble.dart` 的 `hasVoiceOnly`），
+  /// 这一层再画一个半透明底就变成"没有气泡、却有一块莫名其妙的色块"。
+  /// 混合消息（语音 + 文字）仍然走正常模式 —— 那时底色是配给文字的。
+  final bool bare;
+
   const VoiceMessageBubble({
     super.key,
     required this.audioDataUri,
     required this.isUser,
     this.fallbackDuration,
+    this.bare = false,
   });
 
   @override
@@ -132,8 +140,13 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
     final widthFactor = (totalSec / 60).clamp(0.25, 0.7);
     final bubbleWidth = MediaQuery.of(context).size.width * widthFactor + 80;
 
-    final primaryColor = widget.isUser ? Colors.white : const Color(0xFF0284C7);
-    final secColor = widget.isUser ? Colors.white.withOpacity(0.8) : const Color(0xFF64748B);
+    // 裸模式下没有底色了，白图标会消失在浅色背景上 —— 统一改用蓝色系。
+    final primaryColor = widget.bare
+        ? const Color(0xFF0284C7)
+        : (widget.isUser ? Colors.white : const Color(0xFF0284C7));
+    final secColor = widget.bare
+        ? const Color(0xFF64748B)
+        : (widget.isUser ? Colors.white.withOpacity(0.8) : const Color(0xFF64748B));
 
     return InkWell(
       onTap: _togglePlay,
@@ -141,12 +154,16 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble> {
       child: Container(
         width: bubbleWidth,
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        decoration: BoxDecoration(
-          color: widget.isUser
-              ? Colors.white.withOpacity(0.18)
-              : const Color(0xFF0284C7).withOpacity(0.08),
-          borderRadius: BorderRadius.circular(12),
-        ),
+        // 裸模式不画底色：纯语音消息外层已经没有气泡了，
+        // 这里再画一块半透明色只会让人觉得"有个来路不明的方块"。
+        decoration: widget.bare
+            ? null
+            : BoxDecoration(
+                color: widget.isUser
+                    ? Colors.white.withOpacity(0.18)
+                    : const Color(0xFF0284C7).withOpacity(0.08),
+                borderRadius: BorderRadius.circular(12),
+              ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
