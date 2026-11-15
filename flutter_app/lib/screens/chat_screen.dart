@@ -313,19 +313,30 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
 
-    // 首屏：消息一到位就强制滚到底，再补一次延后校正。
+    // 首屏：消息一到位就强制滚到底，然后**反复校正直到真的到底**。
     //
-    // 为什么两次：列表懒加载，第一帧的 maxScrollExtent 是估算值（偏小），
-    // 跳到那里之后实际内容更高，人眼看到的就是「停在中间」。
-    // 第二跳等布局稳定（约 120ms）再走一次，用的才是真实高度。
-    // 只在首屏做，之后完全交给用户自己的滚动。
+    // 为什么不能只跳一次：列表懒加载，`maxScrollExtent` 一开始是估算值（偏小），
+    // 数据排完、图片量出高度之后实际更高 —— 跳一次就停在了「差一点点」的位置
+    // （用户 2026-11-16 实测：「不是最低，但差的很少」，正是这个）。
+    // 所以每次跳完等一帧再量差距，还差就再跳，最多 6 次；
+    // **一旦用户动手（触摸 / 上翻）立刻停手**，绝不跟用户抢位置。
     if (!_didInitialScroll && chat.messages.isNotEmpty) {
       _didInitialScroll = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        _scrollToBottom(animate: false, force: true);
-        Future.delayed(const Duration(milliseconds: 120), () {
-          if (mounted) _scrollToBottom(animate: false, force: true);
-        });
+        void settle(int attempt) {
+          if (!mounted || attempt > 6) return;
+          if (_isUserInteracting || _userScrolledUp) return;
+          _scrollToBottom(animate: false, force: true);
+          Future.delayed(const Duration(milliseconds: 140), () {
+            if (!mounted || !_scrollController.hasClients) return;
+            if (_isUserInteracting || _userScrolledUp) return;
+            final dist = _scrollController.position.maxScrollExtent -
+                _scrollController.offset;
+            if (dist > 4) settle(attempt + 1);
+          });
+        }
+
+        settle(0);
       });
     }
 

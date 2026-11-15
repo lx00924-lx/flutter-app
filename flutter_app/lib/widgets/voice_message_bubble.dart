@@ -128,6 +128,15 @@ class VoiceMessageBubbleState extends State<VoiceMessageBubble> {
     try {
       if (_playerState == PlayerState.playing) {
         await _audioPlayer.pause();
+      } else if (_playerState == PlayerState.paused) {
+        // 暂停 → 继续：必须走 resume() 接着播。
+        //
+        // ⚠️ 不能重新 `play(source)` —— 那等于给播放器换了一个新媒体，
+        //    它只会从头开始，进度条也跟着跳回零（用户 2026-11-16 实测：
+        //    「点击暂停后是重头播放，不是继续播放」）。
+        //    这个坑跟 BytesSource 无关，之前用 DeviceFileSource 时一样存在，
+        //    只是没人注意到。
+        await _audioPlayer.resume();
       } else {
         final bytes = _decodeBytes();
         if (bytes == null) {
@@ -141,11 +150,8 @@ class VoiceMessageBubbleState extends State<VoiceMessageBubble> {
           }
           return;
         }
-        // 从「停止」状态开播时进度归零；从「暂停」恢复则保持原位置 ——
-        // 否则暂停一下再继续，进度条会跳回开头。
-        if (_playerState != PlayerState.paused) {
-          setState(() => _position = Duration.zero);
-        }
+        // 从「停止」状态开播：进度归零，然后交给播放器
+        setState(() => _position = Duration.zero);
         await _audioPlayer.play(BytesSource(bytes));
       }
     } catch (e) {
