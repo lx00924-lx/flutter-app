@@ -268,17 +268,23 @@ class VoiceMessageBubbleState extends State<VoiceMessageBubble> {
                     children: [
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: List.generate(12, (index) {
-                          final h = ((index % 4) + 2) * 3.5;
+                        children: List.generate(20, (index) {
+                          // 20 根（原来是 12）—— 用户 2026-11-16：柱子多一点才跟竖线配得上。
+                          // 宽度 3→2px，20 根塞进约 114px 的声波区仍然有余量。
+                          final h = ((index % 5) + 2) * 2.8;
+                          // 这根柱子有没有被竖线走过：看它中心点在不在进度左侧
+                          final playedHere =
+                              progress > 0 && (index + 0.5) / 20 <= progress;
+                          final opacity = progress <= 0
+                              ? 0.55                          // 还没播：整条压暗
+                              : (playedHere ? 1.0 : 0.28);    // 已播亮、未播暗
                           return AnimatedContainer(
-                            duration: const Duration(milliseconds: 120),
-                            width: 3,
-                            height: isPlaying ? ((index % 3 + 1) * 5.0) : h,
+                            duration: const Duration(milliseconds: 110),
+                            width: 2,
+                            height: isPlaying ? ((index % 4 + 1) * 4.0) : h,
                             decoration: BoxDecoration(
-                              // 柱子不再按进度分色（有竖线了，两条信息打架会很花），
-                              // 统一 45% 白，只当背景纹理。
-                              color: primaryColor.withOpacity(0.45),
-                              borderRadius: BorderRadius.circular(2),
+                              color: primaryColor.withOpacity(opacity),
+                              borderRadius: BorderRadius.circular(1),
                             ),
                           );
                         }),
