@@ -111,11 +111,14 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
       return;
     }
 
-    // 新密码和原密码相同 → 弹框告知，点「确认」后关框并把三个输入框全部清空。
+    // 新密码和原密码相同 → 弹框告知。
     //
     // 为什么用弹框不用 SnackBar：SnackBar 飘在底部几秒就走，用户很可能正低头看键盘，
-    // 抬头时提示已经消失 —— 那就成了"按了确认却什么都没发生"。弹框必须点一下才能走，
-    // 而这次点击又正好是"我要重填"的确认动作，顺手把三个框清空，不用自己逐个删。
+    // 抬头时提示已经消失 —— 那就成了"按了确认却什么都没发生"。弹框必须点一下才能走。
+    //
+    // ⚠️ **刻意不清空输入框**（2026-11-17 用户定的）：清空是拿掉他已经敲进去的东西，
+    // 属于他没要求的副作用 —— 尤其"原密码"那栏本来是对的，一并清掉就得重敲。
+    // 弹框只负责说清"哪不对"，改哪个框由用户自己决定；点掉弹框后内容都还在。
     if (oldPwd.isNotEmpty && oldPwd == newPwd) {
       await showDialog<void>(
         context: context,
@@ -130,10 +133,6 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
           ],
         ),
       );
-      if (!mounted) return;
-      _oldPwdCtrl.clear();
-      _newPwdCtrl.clear();
-      _confirmPwdCtrl.clear();
       return;
     }
 
