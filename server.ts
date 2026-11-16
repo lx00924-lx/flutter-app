@@ -4391,15 +4391,60 @@ async function startServer() {
 
   app.post("/api/upload-chunk", upload.single("chunk"), async (req, res) => {
     try {
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ①）── 路径穿越
+       *
+       * 原实现直接 `path.join(UPLOADS_DIR, filename)`，而 `filename` 来自请求体、
+       * **一个字都没校验**。一次 `POST /api/upload-chunk` 带
+       * `filename=../../dist/server.cjs` 就能把中继自己的入口文件覆盖掉 ——
+       * 等于未认证接管服务端（这条是整份审计里最要命的一条）。
+       *
+       * `chunkIndex` 同样没校验，`path.join(chunkDir, chunkIndex)` 也能穿出去。
+       *
+       * 现在四道闸：
+       * ① 身份：必须带 `x-user-id` + `x-client-session-id`（走统一校验，失败 403）
+       * ② 文件名白名单：只允许 `[A-Za-z0-9._-]`，禁 `..`、禁以 `.` 开头
+       * ③ 分片序号：必须是非负整数
+       * ④ 落地路径 `path.resolve` 后必须仍在 `UPLOADS_DIR` 内（这一条是兜底，
+       *    就算将来 ② 的正则被改松了，这里也拦得住）
+       */
+      const uploadUserId =
+        ((req.body?.userId as string) || (req.headers["x-user-id"] as string) || "").toString().trim();
+      if (!(await verifyUserIdentity(req, res, uploadUserId, "分片上传"))) return;
+
       const { filename, chunkIndex, totalChunks } = req.body;
-      const chunkDir = path.join(UPLOADS_DIR, `temp_${filename}`);
+
+      const safeName = String(filename ?? "");
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(safeName) ||
+        safeName.includes("..") ||
+        safeName.includes("/") ||
+        safeName.includes("\\")
+      ) {
+        console.warn(`[安全] 分片上传：文件名不合法，已拒绝（${safeName.slice(0, 80)}）`);
+        return res.status(400).json({ error: "文件名不合法" });
+      }
+
+      const idx = Number.parseInt(String(chunkIndex ?? ""), 10);
+      if (!Number.isInteger(idx) || idx < 0 || idx > 100000) {
+        return res.status(400).json({ error: "分片序号不合法" });
+      }
+      const total = Number.parseInt(String(totalChunks ?? ""), 10);
+
+      const chunkDir = path.join(UPLOADS_DIR, `temp_${safeName}`);
+      const finalPath = path.resolve(UPLOADS_DIR, safeName);
+      const uploadsRoot = path.resolve(UPLOADS_DIR) + path.sep;
+      if (!finalPath.startsWith(uploadsRoot)) {
+        console.warn(`[安全] 分片上传：路径越界，已拒绝（${finalPath}）`);
+        return res.status(400).json({ error: "路径不合法" });
+      }
+
       await fs.mkdir(chunkDir, { recursive: true });
-      await fs.rename(req.file!.path, path.join(chunkDir, chunkIndex));
-      
+      await fs.rename(req.file!.path, path.join(chunkDir, idx.toString()));
+
       const files = await fs.readdir(chunkDir);
-      if (files.length === parseInt(totalChunks)) {
+      if (files.length === total) {
         // Assemble
-        const finalPath = path.join(UPLOADS_DIR, filename);
         const writeStream = require('fs').createWriteStream(finalPath);
         for (let i = 0; i < files.length; i++) {
           const chunkPath = path.join(chunkDir, i.toString());
@@ -4409,7 +4454,7 @@ async function startServer() {
         }
         writeStream.end();
         await fs.rmdir(chunkDir);
-        res.json({ url: `/uploads/${filename}`, completed: true });
+        res.json({ url: `/uploads/${safeName}`, completed: true });
       } else {
         res.json({ completed: false });
       }
@@ -6098,6 +6143,18 @@ if %errorlevel% neq 0 (
       if (!userId || userId === "guest") {
         return res.status(401).json({ error: "缺少 userId，无法换发配对凭证" });
       }
+
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ②）── 无身份校验
+       *
+       * 原实现只校验「这个账号在 users.json 里存在」，然后就给请求方换发一枚新 Token。
+       * 但「账号存在」是公开信息（用户名/数字 id 都可猜），于是任何人带上
+       * `{userId:"123"}` 就能把别人的桥接 Token 换掉、把对方桥接踢下线。
+       *
+       * 现在必须带 `x-client-session-id` 通过统一身份校验 —— 换发凭证属于
+       * 只有登录态才配做的动作。
+       */
+      if (!(await verifyUserIdentity(req, res, userId, "换发桥接凭证"))) return;
 
       // 校验账号真实存在，避免为任意字符串凭空造 token
       const allUsers = await safeReadJSON<any[]>(USERS_FILE, []);
