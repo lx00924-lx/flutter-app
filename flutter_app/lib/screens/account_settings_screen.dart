@@ -144,8 +144,35 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
     _oldPwdCtrl.clear();
     _newPwdCtrl.clear();
     _confirmPwdCtrl.clear();
-    ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
-      const SnackBar(content: Text('密码已修改，下次登录请用新密码')),
+
+    // 改密码之后**本机必须主动登出**，不能只弹一句「下次登录请用新密码」。
+    //
+    // 原因：服务端在改密码成功时已经把这个用户的所有设备槽位删掉了（那样另一端
+    // 的下一次请求才会被 401 + FORCE_LOGOUT 踢走）。本机如果不自己退，
+    // 它下一次请求会先撞上自己的 401 —— 弹出来的措辞会是「账号已下线」，
+    // 用户会以为"被别人顶了"，其实是自己刚改的密码。
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('密码已修改'),
+        content: const Text('所有设备（包括这一台）都需要用新密码重新登录。'),
+        actions: [
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              final sp = context.read<SettingsProvider>();
+              sp.logout();
+              Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(builder: (_) => const LoginScreen()),
+                (route) => false,
+              );
+            },
+            child: const Text('去登录'),
+          ),
+        ],
+      ),
     );
   }
 

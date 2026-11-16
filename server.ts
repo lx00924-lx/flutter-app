@@ -4356,6 +4356,33 @@ async function startServer() {
       if (!success) {
         return res.status(401).json({ error: "用户不存在" });
       }
+
+      // 改完密码 → 把这个用户的所有设备槽位整个删掉。
+      //
+      // 为什么：改密码的动机通常就是"把别人踢出去"。只换密码哈希的话，
+      // 另一台设备手里那条旧 clientSessionId 还能继续用（守卫只比对槽位里的 sid），
+      // 直到它自己撞上别的 401 —— 等于密码改了但那个人的会话没断。
+      // 删掉槽位之后，任何一台的下一次请求都会被 verifyUserIdentity 判成无槽位，
+      // 回 `401 + FORCE_LOGOUT`，走既有的顶号流程（见 AGENTS.md §12.2：必须是 401，不能用 403）。
+      //
+      // ⚠️ 槽位是按 **username** 索引的（`sessions[username][deviceType]`），不是 userId。
+      try {
+        const uname = String(snapshotUser.username ?? "").trim();
+        if (uname) {
+          await withFileLock(ACTIVE_SESSIONS_FILE, async () => {
+            const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
+            if (sessions && typeof sessions === "object" && sessions[uname]) {
+              delete sessions[uname];
+              await safeWriteJSON(ACTIVE_SESSIONS_FILE, sessions);
+            }
+          });
+        }
+      } catch (e) {
+        // 清槽位失败不该让"密码已改成功"变成失败（密码确实已经换掉了），
+        // 但必须留下痕迹 —— 否则用户会以为旧设备被踢了、其实没有。
+        console.error("[change-password] 清空设备槽位失败（密码已改，旧凭证可能仍有效）:", e);
+      }
+
       res.json({ success: true });
     } catch (e) {
       res.status(500).json({ error: "服务器错误" });
