@@ -163,6 +163,7 @@ M5 的原始定义在**同一层的研究目录** `lxai-installer-research`（�
 
 | # | 改了什么 | 提交 | 怎么验 | 备注 |
 | :--- | :--- | :--- | :--- | :--- |
+| 10 | **改密码表单：新密码==原密码只弹框、不清空** | `483c7d8` | 改密码时把原密码原样填进「新密码」→ 应弹「新密码和原密码相同」，**不应该**显示"密码已修改"并把两端踢下线（以前会） | 另补了「确认框为空」的单句提示，别让它被判成"两次不一致" |
 
 
 
@@ -224,20 +225,75 @@ M5 的原始定义在**同一层的研究目录** `lxai-installer-research`（�
 
 **DSH 升级的独立结论**（跟语音无关，留档）：本地 `0.2.1-rc.2` vs npm `0.2.2-rc.3`，依赖 86→91。新增 `dsh-cua-bundle`（Computer Use Agent）、`dsh-deepseek-chat-import`、`dsh-personalized-recommendations`、`dsh-experimental-liveshare`、`dsh-official-bundles`、`dsh-experimental-forge-bundle`；移除 `dsh-experimental-agent-team-profile`。**没有 changelog，只能从包名推断**，所以无法评估行为变化。**用户 2026-11-17 决定先不升。**
 
-## 9. 中继安全审计 4 条高危（**根本不是"没验"，是还没动手**）
+## 9. 中继安全审计 26 条（2026-11-17 用户明确「安全我不懂，你独立做完」）
 
-> 这条 2026-11-17 整理待办时被我误删过一次，恢复回来。
-> 完整清单（26 条，分层：立即 4 / 本周 5 / 随后 12 / 低危 4）在 `记忆/待办/42-安全审计.md`。
+> 完整清单（病根、行号、修法、危害）在 `记忆/待办/42-安全审计.md` ——**那份是权威，这里只排期**。
+> ⚠️ 行号基准 7323 行那版，现在已涨到 7350+，**认函数名不认行号**。
+> ⚠️ 报告里另有 **15 项「查过没问题」**（别再重查）和 **7 项「未确认」**（改到相关条目时顺带查）。
 
-| # | 漏洞 | 位置 | 后果 |
+### 已完成（2026-11-17）
+
+| # | 漏洞 | 提交 | 状态 |
 | :--- | :--- | :--- | :--- |
-| ① | `/api/upload-chunk` **路径穿越** | `server.ts` 约 L4365 | 一次 POST 可覆盖 `dist/server.cjs`，**最要命** |
-| ② | `rotate-token` **无身份校验** | 约 L6067 | 未认证就能换 token |
-| ③ | `auth-confirm` **只查"用户存在"、不查登录态** | 约 L6439 | 未登录也能确认配对 |
-| ④ | `io.emit` + `pushToAll` **把明文 token 广播给所有连接** | 约 L5454 / L6622 | token 外泄 |
+| ① | `/api/upload-chunk` 路径穿越（可覆盖 `dist/server.cjs`） | `ae4aaa0` | ✅ 已修 + **已实测拦截**（攻击请求返 403）+ 已部署 |
+| ② | `rotate-token` 无身份校验 | `ae4aaa0` | ✅ 已加 `verifyUserIdentity` + 已部署 |
 
-⚠️ **行号基准是 7323 行那版**（现在已改到 7350 行左右，行号会漂，认函数名）。**别用 `(Get-Content).Count` 数行**，它报的数不准。
+### 下一步：先查 7 项「未确认」（**都是本地命令，不改代码**）
 
+这几项决定后面几条是「高危」还是「只是代码异味」，**先查再修，别按报告原判动手**：
+
+| # | 要查什么 | 命令 |
+| :--- | :--- | :--- |
+| 1 | `.secrets/master.key` 有没有被 git 跟踪过 | `git log --all -- .secrets/master.key` + `git ls-files .secrets` |
+| 2 | 生产 `settings.json` 里还有没有账号在用 `kLegacyDefaultAgentToken` | 读生产 settings 搜这个串 |
+| 3 | `ttsApiKey` 实际有没有落盘 | 同上 |
+| 4 | multer 的 CVE 命中 | `npm audit` |
+| 5 | 生产有没有配 `GEMINI_API_KEY` | 看生产 `.env` |
+| 6 | 源站安全组是否只放行 Cloudflare | 决定 ⑱ 可利用性（**这条要看你的服务器控制台**） |
+| 7 | `resolveOrCreateUserAgentToken` 账号不存在时会不会写 settings | 读代码 |
+
+### 再下一步：按依赖分组
+
+**A. 我能独立改、无前置依赖**（改完一条验一条）
+
+| # | 一句话 | 风险 |
+| :--- | :--- | :--- |
+| ④ | token 经 `io.emit` 全局广播 → 改 `io.to(user_<owner>)` | **高**（这条不修等于 token 人人可见） |
+| ⑧ | 8 个 Agent 事件端点无归属校验 → 统一 `verifyAgentOwnership` | 高 |
+| ⑨ | `.bat` 生成接口命令注入 → token 加字符白名单、harnessUrl 走 `safeScriptUrl` | 高 |
+| ⑦ | `/api/funasr-ws` 无鉴权 + 无 SSRF 防护 + `rejectUnauthorized:false` | 中 |
+| ⑩ | `check-session` 消费早于校验 + catch fail-open 回 token | 中 |
+| ⑬ | `pending-decisions.json` 明文落盘 token → 落盘前删/哈希 | 中 |
+| ⑭ | 日志打印完整 Agent Token → maskToken | 中 |
+| ⑮ | `model-limits` POST 无鉴权 | 中 |
+| ⑯ | `change-password` 无限流、新密码只要 6 位（注册要 8 位） | 中 |
+| ⑳ | `auth-session` 用 `Math.random()` 生成配对码 → `crypto.randomBytes` | 中 |
+| ㉓㉔㉕ | `ttsApiKey` 未清 / 硬编码 token 未排除 / `chat/cancel` 无校验 | 低 |
+
+**B. 要 App 和服务端一起改**（不是单独改服务端就行）
+
+| # | 一件事 | 卡在哪 |
+| :--- | :--- | :--- |
+| ③ | `auth-confirm` 只查「用户存在」 | **App 扫码时不带 `x-client-session-id`**（`scanner_screen.dart:110`）。先给 App 补 header，服务端才能收紧 —— **反了会把扫码配对打回 403** |
+
+**C. 大改 / 要配套处理**（不能只改一处）
+
+| # | 一件事 | 为什么算大改 |
+| :--- | :--- | :--- |
+| ⑤ | socket.io 整段无鉴权 | App 已不用它，**最干净是整段删掉**；但 `io.emit` 有 57 处在用，得一起处理 |
+| ⑥ | `chat/generate` + `chat/stream` 无鉴权：SSRF + key 外带 | 要复用 ASR 那套 `ssrfViolation`，**并且禁止回退服务端 key** |
+| ⑪ | 任意 ≥16 字符 token 可注册假 Agent | 涉及 register/poll/heartbeat/ws 四条路 |
+| ⑫ | `bridge-transition` / `cancel` 无身份校验 | 低代价 DoS |
+| ⑰ | 注销不删 `device_tokens.json`，旧凭证可复活 | 要同步改注销流程 |
+| ⑱ | `listen(0.0.0.0)` + 无条件信任 `cf-connecting-ip` | **改完可能影响隧道**，要先确认源站暴露面 |
+| ⑲ | `.gitignore` 没有 `.secrets/` | 先自查历史，再补 ignore |
+| ㉑ | multer 已知 DoS CVE | 要 `npm audit` 确认后再决定升不升 |
+| ㉒ | `/api/upload` 无鉴权 + 扩展名不限 → 存储型 XSS | 加鉴权 + 扩展名白名单 |
+
+### 动手时的两条铁律（审计报告里写的）
+
+1. **别因为「报告说是高危」就直接改**：①②③④ 是我逐行核实过的，其余是报告原判。**改之前把那条代码重新读一遍**。
+2. **改完要走完整链路**：登录 → 收发消息 → 桥接上线 → 发任务。**加守卫把正常请求挡成 403 的事，这个项目历史上发生过**（见 `习惯.md`「改中继之后怎么部署」）。
 ## 记录格式（沿用即可）
 
 每条至少写清四件事，否则下次还得重新摸一遍代码：
