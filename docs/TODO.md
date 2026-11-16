@@ -183,6 +183,8 @@ M5 的原始定义在**同一层的研究目录** `lxai-installer-research`（�
 - **#36 扫码配对误报**（`57261c1`）✅ —— 用户原话：「之前是百分百报错，连上桥接了，报错也是必提示」；这次扫码**直接提示配对成功、零报错**。说明 8s→60s 的超时放宽确实盖住了隧道往返
 
 ⚠️ **同一晚补的一处**（`a82d09b`）：`_writeMarker` 加 `flush: true`。
+
+> **2026-11-17 用户决定按「已修」记档**：它的作用场景是突然断电，正常使用触发不了、没法实测；代码改动本身是确定的一行（`flush: true`），风险接受。
 理由见下 —— 强杀能恢复不代表断电也能，标记本身不落盘就白搭：
 
 > `writeAsString` 默认 flush=false，数据只进 OS 页缓存。强杀没事（OS 会刷），
@@ -244,6 +246,28 @@ M5 的原始定义在**同一层的研究目录** `lxai-installer-research`（�
 - 这和「坏的链路假装自己是好的比崩溃更糟」是同一条：**宁可当场说没配，别让它跑一趟再报个看不懂的错**。
 - 语音**附件本身是否传到了宿主**还没确认（截图里只有 start-failed，没有附件相关报错）。
 
+
+## 8. 语音输入的四条路（2026-11-17 摸清，**先不做**）
+
+**背景**：现在「没填转写 Key 就拦下不发」（`4947155`）是按「模型听不见音频」设计的。用户提出：
+如果填的是**支持语音输入的模型**（GPT-4o / Qwen-Omni 这类），转写就是多余的中间层。
+
+**2026-11-17 逐条查清的事实**：
+
+| 路 | 可行 | 判定依据 |
+| --- | --- | --- |
+| ① 模型原生听音频（走 DSH） | ❌ | `dsh-api-remotes` 里 `inputModalities` 只认 `text` / `image`，**没有 `audio`**。已把 `0.2.2-rc.3` 的包下下来搜过 `literal("audio")` —— **仍然没有**。升级 DSH 解决不了 |
+| ② DSH 内置 SenseVoice 转写 | ✅ 但只服务浏览器麦克风 | `dsh-experimental-voice-input-bundle` 本地已装（0.2.1 就有），描述是 `Experimental voice input with local SenseVoice`，**0.2.2 描述一字未改** |
+| ③ 音频发桥接 → DSH 转写 | ✅ 需要自己接一层 | 桥接/插件要加 `audio` 通道，把音频喂进 `speechToText` 服务 |
+| ④ 普通模式直发 `input_audio` | ✅ 但 App 没实现 | `api_service.dart` 的 `multiContent` 只处理 `text` / `image_url`，音频落进 `[文件附件]` 占位；`chat_provider.dart:1806` 在没转写时发的是`「语音消息」`四个字 |
+
+**⚠️ ④ 的前置条件没定**：用户 2026-11-17 说「普通 API 聊天我还再想要不要砍掉」——**如果砍掉普通模式，④ 这条也就不存在了**。所以这件事要等那个决定，别先做。
+
+**要的最终形态**是四层降级（按优先级）：填了 ASR Key → App 转写；没 Key + 模型支持音频 + 普通模式 → 直发 `input_audio`；没 Key + DSH 模式 → 发桥接让 DSH 转写；都不满足 → 拦下提示。
+
+**注意**：`input_audio` 不是所有端点都收（DeepSeek 就不收），发错会 400。所以必须配一个「该模型支持音频输入」的开关，不要做能力探测。
+
+**DSH 升级的独立结论**（跟语音无关，留档）：本地 `0.2.1-rc.2` vs npm `0.2.2-rc.3`，依赖 86→91。新增 `dsh-cua-bundle`（Computer Use Agent）、`dsh-deepseek-chat-import`、`dsh-personalized-recommendations`、`dsh-experimental-liveshare`、`dsh-official-bundles`、`dsh-experimental-forge-bundle`；移除 `dsh-experimental-agent-team-profile`。**没有 changelog，只能从包名推断**，所以无法评估行为变化。**用户 2026-11-17 决定先不升。**
 ## 记录格式（沿用即可）
 
 每条至少写清四件事，否则下次还得重新摸一遍代码：
