@@ -111,6 +111,41 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
       return;
     }
 
+    // 新密码和原密码相同 → 弹框告知，点「确认」后关框并把三个输入框全部清空。
+    //
+    // 为什么用弹框不用 SnackBar：SnackBar 飘在底部几秒就走，用户很可能正低头看键盘，
+    // 抬头时提示已经消失 —— 那就成了"按了确认却什么都没发生"。弹框必须点一下才能走，
+    // 而这次点击又正好是"我要重填"的确认动作，顺手把三个框清空，不用自己逐个删。
+    if (oldPwd.isNotEmpty && oldPwd == newPwd) {
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('新密码和原密码相同'),
+          content: const Text('新密码不能和当前密码一样，请换一个。'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('确认'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+      _oldPwdCtrl.clear();
+      _newPwdCtrl.clear();
+      _confirmPwdCtrl.clear();
+      return;
+    }
+
+    // 确认框空着时单独说一句 —— 否则它会被下面的 `!=` 判成"不一致"，
+    // 用户明明只填了两个框，却被告知"两次输入不一致"，措辞指错了地方。
+    if (confirmPwd.isEmpty) {
+      ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
+        const SnackBar(content: Text('请再输入一次新密码')),
+      );
+      return;
+    }
+
     if (newPwd != confirmPwd) {
       ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
         const SnackBar(content: Text('两次输入的新密码不一致')),
