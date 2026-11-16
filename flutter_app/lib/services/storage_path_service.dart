@@ -375,11 +375,21 @@ class StoragePathService {
   Future<void> _writeMarker(String oldPath, String newPath) async {
     try {
       final f = await _markerFile();
-      await f.writeAsString(jsonEncode({
-        'oldPath': oldPath,
-        'newPath': newPath,
-        'startedAt': DateTime.now().millisecondsSinceEpoch,
-      }));
+      // ⚠️ `flush: true` 不能省。
+      //
+      // 默认 flush=false 时，数据只落到操作系统的页缓存就返回了。进程被强杀没关系
+      // （OS 自己会刷），但**突然断电**时这份标记可能根本没落盘 —— 下次开机会读不到它，
+      // 于是「以为从没迁过」，而现场其实是「旧目录搬走一半 + 新目录一堆孤儿 + 设置还指旧目录」，
+      // 正是这套崩溃恢复要防的那种三不像。
+      // 加上 flush 之后，只要这一行返回了，断电再开也一定能走到 recoverInterruptedMigration。
+      await f.writeAsString(
+        jsonEncode({
+          'oldPath': oldPath,
+          'newPath': newPath,
+          'startedAt': DateTime.now().millisecondsSinceEpoch,
+        }),
+        flush: true,
+      );
     } catch (e) {
       // 写不了标记不该阻断迁移本身
       debugPrint('写迁移标记失败（本次迁移继续）: $e');
