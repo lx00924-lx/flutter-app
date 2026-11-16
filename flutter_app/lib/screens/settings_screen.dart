@@ -47,9 +47,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// 情况下才会跑，正常人完全碰不到。
   Timer? _lockWatchTimer;
 
+  /// ⚠️ 必须在这里抓住 provider：`_releaseSettingsLock()` 是在 `dispose()` 里调的，
+  ///    那时 `context` 已失效，现场 `context.read` 必然抛异常 → 锁永远交不回去 →
+  ///    另一台设备要傻等 90 秒 TTL 过期。和 `asr_settings_screen.dart` 是同一个形状的坑。
+  late final SettingsProvider _settingsProv;
+
   @override
   void initState() {
     super.initState();
+    _settingsProv = context.read<SettingsProvider>();
     _acquireSettingsLock();
   }
 
@@ -104,7 +110,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   void _releaseSettingsLock() {
-    final sp = context.read<SettingsProvider>();
+    // 不碰 context：本方法唯一调用点是 dispose()，见字段注释。
+    final sp = _settingsProv;
     unawaited(SyncService.instance.releaseSettingsLock(
       userId: sp.syncUserId,
       clientSessionId: sp.clientSessionId,
