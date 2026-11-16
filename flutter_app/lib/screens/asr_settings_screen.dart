@@ -36,11 +36,17 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
 
   bool _isTestingTts = false;
 
+  /// ⚠️ 必须在这里抓住 provider 引用：`_saveAllSilent()` 是在 `dispose()` 里调的，
+  ///    那时候 `context` 已经失效、`mounted` 恒为 false，现场 `context.read` 一定出错。
+  late final SettingsProvider _settingsProv;
+
   @override
   void initState() {
     super.initState();
+    // 先拿引用，后面 dispose 阶段才存得住（见 _saveAllSilent 的注释）
+    _settingsProv = context.read<SettingsProvider>();
     _tabController = TabController(length: 2, vsync: this);
-    final s = context.read<SettingsProvider>().settings;
+    final s = _settingsProv.settings;
 
     // ASR
     _httpCtrl = TextEditingController(text: s.asrHttpEndpoint);
@@ -55,9 +61,15 @@ class _AsrSettingsScreenState extends State<AsrSettingsScreen> with SingleTicker
     _ttsKeyCtrl = TextEditingController(text: s.ttsApiKey);
   }
 
+  /// 把当前输入框内容写回 settings。
+  ///
+  /// ⚠️ **不能检查 `mounted`**：这个方法的唯一调用点是 `dispose()`（用户改完直接返回），
+  ///    那一刻 `mounted` 恒为 false —— 原来第一行就是 `if (!mounted) return;`，
+  ///    于是「填了 key 再返回」永远存不进去，只有点预设（`mounted` 还是 true）才碰巧能存。
+  ///    这就是「语音转写 key 填完返回再进去变空」的真因。
+  ///    现在改用 initState 里抓住的 `_settingsProv`，不碰 context，dispose 阶段也安全。
   void _saveAllSilent() {
-    if (!mounted) return;
-    final sp = context.read<SettingsProvider>();
+    final sp = _settingsProv;
     final s = sp.settings;
     s.asrHttpEndpoint = _httpCtrl.text.trim();
     s.asrWsEndpoint = _wsCtrl.text.trim();
