@@ -701,11 +701,27 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                 ),
                 ChatInputBar(
-                  onSend: (text, {attachments, dshImages}) => chat.sendMessage(
-                    text,
-                    attachments: attachments,
-                    dshImages: dshImages,
-                  ),
+                  // ⚠️ 必须包 try/catch：`sendMessage` 会在"语音没转成文字"时抛 StateError
+                  //    主动中止发送（那样才拦得住空 prompt 打到宿主）。这里负责把它翻成
+                  //    用户看得懂的一句提示，否则异常只会进 console、界面上什么都不动。
+                  onSend: (text, {attachments, dshImages}) async {
+                    try {
+                      await chat.sendMessage(
+                        text,
+                        attachments: attachments,
+                        dshImages: dshImages,
+                      );
+                    } catch (e) {
+                      if (!mounted) return;
+                      final msg = e is StateError ? e.message : '发送失败：$e';
+                      ScaffoldMessenger.of(context)
+                        ..clearSnackBars()
+                        ..showSnackBar(SnackBar(
+                          content: Text(msg),
+                          duration: const Duration(seconds: 6),
+                        ));
+                    }
+                  },
                   onStop: () => chat.stopGeneration(),
                   isGenerating: chat.isGenerating,
                   // 生成中发送：输入栏弹出「插话 / 排队」选择后回调到这里

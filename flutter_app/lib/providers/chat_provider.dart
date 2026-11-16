@@ -1719,13 +1719,20 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
 
     final online = await isNetworkOnline();
 
-    // 语音消息智能识别：若无文字输入且包含语音条附件，静默调用 ASR 服务转写为文字喂给大模型
+    // 语音消息智能识别：若无文字输入且包含语音条附件，静默调用 ASR 服务转写为文字喂给大模型。
+    //
+    // ⚠️ 转写失败必须**在这里中止**，不能像以前那样让空文本继续往下走：
+    //    那条路会让空 prompt 一路打到宿主，插件 `startTurn` 用 "缺少 prompt" 拒收，
+    //    用户看到的是「[1/3] 已接收任务…用时 17 秒…宿主拒绝了本轮任务」——
+    //    看起来像 AI 炸了，实际只是"没配转写 Key"。2026-11-17 实测踩到。
+    //    与其让它跑一趟再报个看不懂的错，不如当场告诉用户缺什么。
     String resolvedText = cleanText;
     final audioAtt = attachments?.firstWhere(
       (att) => att.startsWith('data:audio/'),
       orElse: () => '',
     );
     if (resolvedText.isEmpty && audioAtt != null && audioAtt.isNotEmpty) {
+      String? asrError;
       try {
         final transcribed = await AsrService.instance.transcribeAudio(
           base64AudioData: audioAtt,
@@ -1733,10 +1740,16 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
         );
         if (transcribed != null && transcribed.trim().isNotEmpty) {
           resolvedText = transcribed.trim();
+        } else {
+          asrError = '这条语音没转成文字，所以没发出去。\n'
+              '先在「设置 → 语音识别」里填好转写 Key（或端点），再发一次。';
         }
       } catch (e) {
         debugPrint('ASR 自动转写异常: $e');
+        asrError = '语音转写失败：$e\n'
+            '检查「设置 → 语音识别」里的端点和 Key。';
       }
+      if (asrError != null) throw StateError(asrError);
     }
 
     // 分离图片附件与其他类型，支持图片+文字消息分两个消息框发送（先发图片，再发文字）
