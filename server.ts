@@ -7757,7 +7757,42 @@ if %errorlevel% neq 0 (
   });
 
   // Socket.io for Real-time Sync
+  /**
+   * ⚠️ 2026-11-17 安全加固（审计 #42 ⑤）── socket.io 整段无鉴权，**已停用**
+   *
+   * 下面那个 `io.on("connection")` 挂着 8 个处理器，**一个都不校验身份**：
+   *   `join_user_room` / `send_message` / `start_generation` /
+   *   `delete_message` / `delete_messages_range` / `update_settings` /
+   *   `check_agent_status` / `disconnect`
+   *
+   * 它们的 `userId` 全部取自 **payload 里自报的值**。也就是说：任何人用
+   * 一个 socket.io 客户端连上来，报上别人的 userId，就能
+   * **往对方会话里写消息、删对方的消息、改对方的设置、替对方起一轮生成**。
+   * 这不是"某个 handler 漏了校验"，是整条通道没有任何身份概念。
+   *
+   * 为什么可以直接停用：**Flutter App 从来没有 socket.io 客户端**
+   * （`flutter_app/lib` 里搜不到 `socket_io`；它用的是 `/ws/app` 那条自建通道）。
+   * 服务端这一堆 `io.emit(...)`（53 处）**镜像层早就改成走 pushToAll/pushToUser 了**
+   * （见 `io.emit` 的 monkey-patch），所以真正的推送不依赖 socket.io 连接。
+   *
+   * 做法：**用 `io.use()` 中间件把所有连接挡在握手阶段**。
+   * 不删那 8 个 handler，是为了让 53 处 `io.emit` 继续有个对象可调
+   * （没有连接时它们是空操作）；但**任何连接都进不来**，
+   * 于是那 8 个没有鉴权的处理器全部变成不可达的死代码。
+   *
+   * 彻底删掉整块（含 `new Server(...)`）要同时改 53 处调用点，收益不抵风险，
+   * 留到以后真需要清理 socket.io 时再做。
+   */
+  io.use((_socket, next) => {
+    next(new Error("socket.io 通道已停用，请使用 /ws/app"));
+  });
+
   io.on("connection", (socket) => {
+    // 理论上到不了这里（io.use 已经拒绝）；留着当第二道保险。
+    console.warn(`\x1b[33m[Security] 竟然有 socket.io 连接通过了中间件: ${socket.id}\x1b[0m`);
+    try { socket.disconnect(true); } catch {}
+    return;
+
     console.log("Client connected:", socket.id);
 
     // Join a room based on userId to keep data separate
