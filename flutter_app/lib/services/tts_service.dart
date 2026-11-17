@@ -185,14 +185,19 @@ class TtsService {
     // 去除代码块 ```...```
     t = t.replaceAll(RegExp(r'```[\s\S]*?```'), ' [代码块省略] ');
     // 去除行内代码 `...`
-    t = t.replaceAll(RegExp(r'`([^`]+)`'), r'$1');
+    t = t.replaceAllMapped(RegExp(r'`([^`]+)`'), (m) => m[1] ?? '');
     // 去除 Markdown 标题 #, ##, ###
     t = t.replaceAll(RegExp(r'#+\s*'), '');
     // 去除加粗/斜体 **text** or *text*
-    t = t.replaceAll(RegExp(r'\*\*([^*]+)\*\*'), r'$1');
-    t = t.replaceAll(RegExp(r'\*([^*]+)\*'), r'$1');
+    t = t.replaceAllMapped(RegExp(r'\*\*([^*]+)\*\*'), (m) => m[1] ?? '');
+    t = t.replaceAllMapped(RegExp(r'\*([^*]+)\*'), (m) => m[1] ?? '');
     // 去除链接 [text](url) -> text
-    t = t.replaceAll(RegExp(r'\[([^\]]+)\]\([^)]+\)'), r'$1');
+    t = t.replaceAllMapped(RegExp(r'\[([^\]]+)\]\([^)]+\)'), (m) => m[1] ?? '');
+    // 列表符号 / 引用符 / 分隔线 / 表格竖线 —— 这些也会被逐字朗读出来
+    t = t.replaceAll(RegExp(r'(?m)^\s{0,3}[-*+]\s+'), '');
+    t = t.replaceAll(RegExp(r'(?m)^\s{0,3}>\s?'), '');
+    t = t.replaceAll(RegExp(r'(?m)^\s*([-*_])\s*\1\s*\1[\s\-*_]*$'), '');
+    t = t.replaceAll('|', '，');
     // 去除多余空行
     t = t.replaceAll(RegExp(r'\n+'), '，');
     return t.trim();
