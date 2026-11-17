@@ -152,9 +152,12 @@ class _AccountSettingsScreenState extends State<AccountSettingsScreen> {
       return;
     }
 
-    if (newPwd.length < 6) {
+    // ⚠️ 2026-11-17（审计 #42 ⑯）：与服务端对齐成 8 位。
+    // 原来这里是 6 位，而注册要 8 位 —— 服务端已经改成 8~72，本地必须一致，
+    // 否则用户填 6 位时本地放行、发到服务端才被 400 打回，提示会晚一步。
+    if (newPwd.length < 8) {
       ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
-        const SnackBar(content: Text('新密码至少 6 位')),
+        const SnackBar(content: Text('新密码至少 8 位')),
       );
       return;
     }

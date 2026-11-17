@@ -4340,8 +4340,42 @@ async function startServer() {
   // 更新/维护服务端模型上下文上限列表 (支持在线直接修改或后台写入)
   app.post("/api/model-limits", async (req, res) => {
     try {
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ⑮）── 无鉴权可覆盖全局配置
+       *
+       * 原实现**没有任何校验**：任何人在公网 POST 一个 `{limits:{...}}`
+       * 就能把整张模型上下文上限表覆盖掉 —— 下一次请求所有用户的
+       * 上下文预算都按攻击者的值算（填 1 会让所有人的会话被疯狂压缩，
+       * 填 99999999 会让人一直撞 CONTEXT_WINDOW_EXCEEDED）。
+       *
+       * 已核实 **App 只调 GET**（`sync_service.fetchModelLimits`），
+       * 从不调 POST —— 这是个纯运维接口。
+       *
+       * 所以改成「运维密钥」：请求头 `x-admin-secret` 必须等于
+       * 环境变量 `ADMIN_SECRET`。**没配 ADMIN_SECRET 时一律 403** ——
+       * 安全默认是拒绝，不是放行。本机运维时临时 `set ADMIN_SECRET=...`
+       * 再重启中继即可（或者用修改文件的方式，不走这个接口）。
+       */
+      const configured = (process.env.ADMIN_SECRET || "").trim();
+      if (!configured) {
+        console.warn("[Security] /api/model-limits POST 被拒：未配置 ADMIN_SECRET");
+        return res.status(403).json({
+          error: "该接口需要管理员密钥，服务端未配置 ADMIN_SECRET",
+          code: "ADMIN_SECRET_NOT_CONFIGURED",
+        });
+      }
+      const provided = String(req.headers["x-admin-secret"] || "").trim();
+      // 定长比较，避免时序侧信道
+      const a = Buffer.from(provided);
+      const b = Buffer.from(configured);
+      const same = a.length === b.length && require("crypto").timingSafeEqual(a, b);
+      if (!same) {
+        console.warn("[Security] /api/model-limits POST 被拒：密钥不匹配");
+        return res.status(403).json({ error: "管理员密钥不正确" });
+      }
+
       const { limits } = req.body || {};
-      if (limits && typeof limits === 'object') {
+      if (limits && typeof limits === 'object' && !Array.isArray(limits)) {
         await withFileLock(MODEL_LIMITS_FILE, async () => {
           await safeWriteJSON(MODEL_LIMITS_FILE, limits);
         });
@@ -4363,8 +4397,18 @@ async function startServer() {
     const matchUser = (u: any): boolean =>
       (userId !== undefined && userId !== null && userId !== "" && u.id === userId) ||
       (typeof username === "string" && username.trim() !== "" && u.username === username.trim());
-    if (!newPassword || String(newPassword).length < 6) {
-      return res.status(400).json({ error: "新密码长度至少 6 位" });
+    /**
+     * ⚠️ 2026-11-17 安全加固（审计 #42 ⑯）── 新密码强度对齐注册
+     *
+     * 原来只要 6 位，而注册那边（L2602）要 8~72 位。**改密码可以绕过注册的强度要求**
+     * 把一个本来合规的账号降级成 6 位弱密码 —— 这是「宽进」的典型缺口。
+     *
+     * 现在与注册完全一致：8~72 位。上限 72 是 bcrypt 的输入截断长度，
+     * 超过会被静默截断，所以必须在入口就拒绝。
+     */
+    const newPwdStr = String(newPassword ?? "");
+    if (newPwdStr.length < 8 || newPwdStr.length > 72) {
+      return res.status(400).json({ error: "新密码长度需为 8~72 位" });
     }
     try {
       // bcrypt 比对是异步的，不能放进同步的文件锁回调里，
@@ -6630,11 +6674,30 @@ if %errorlevel% neq 0 (
   // 1. 电脑端申请一次性扫码临时配对码
   app.post("/api/bridge/auth-session", (req, res) => {
     try {
-      // 生成 8 位高强度随机大写临时码
-      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ⑳）── 配对码用密码学安全随机
+       *
+       * 原来写的是 `Math.floor(Math.random() * chars.length)`。`Math.random()`
+       * 是 **V8 的 xorshift128+，不是 CSPRNG**：观察若干个输出就能推内部状态、
+       * 预测后续值。而这个码是「把别人的桥接绑到你账号上」的凭据 ——
+       * 6 位 × 32 字符表约 30 bit 空间，再叠上可预测性，等于没有随机性。
+       *
+       * 现在：`randomBytes(6)` + **拒绝采样**（`b >= 224` 时重取，因为
+       * 224 = 32 × 7 是 256 以下最大的 32 的倍数；直接 `b % 32` 会让前 8 个
+       * 字符出现概率比后 24 个高 1/7，属于可测的偏差）。
+       *
+       * 码长保持 6 位不变 —— 它是 2 分钟有效、用一次就销毁的临时码，
+       * 且 auth-poll 还有一次性 deviceSecret 兜底（见该端点）。
+       */
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // 32 个字符
       let code = "AUTH_";
       for (let i = 0; i < 6; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length));
+        // 拒绝采样：只接受 < 224 的字节，保证 32 个字符等概率
+        let b: number;
+        do {
+          b = randomBytes(1)[0];
+        } while (b >= 224);
+        code += chars.charAt(b % 32);
       }
       const now = Date.now();
       const expiresAt = now + 120 * 1000; // 有效期 2 分钟
