@@ -2875,6 +2875,42 @@ async function startServer() {
         });
       }
 
+      /**
+       * 2.5) ⚠️ 2026-11-17 安全加固（审计 #42 ⑰）── 清掉设备凭证
+       *
+       * 上面那份 `targets` 清了 messages / chatSessions / settings / sessions，
+       * **但漏了 `device_tokens.json`**。
+       *
+       * 后果（凭证复活）：那个文件存的是 `deviceToken → { userId, agentToken }`，
+       * 而 `/api/agent/device-token`（该接口拿 deviceToken 换新 agentToken）**只看
+       * `record.userId` 是否存在**、不验证账号还在不在。于是：
+       *   ① 账号注销 → users.json 里没了；
+       *   ② 但设备凭证还留着，`userId` 指向一个已经不存在的账号；
+       *   ③ 拿那个 deviceToken 去换 → 服务端**给它签一个新的 Agent Token**
+       *      （`resolveOrCreateUserAgentToken` 会现建一份 settings 记录）。
+       * 等于「注销之后，旧设备还能把自己加回来」，注销没有真正生效。
+       *
+       * 用 `path.join(DATA_DIR, ...)` 而不是 `DEVICE_TOKENS_FILE` 常量：
+       * 那个 const 声明在本函数更靠后的位置，这里直接用会踩 TDZ。
+       */
+      await withFileLock(path.join(DATA_DIR, "device_tokens.json"), async () => {
+        const dtFile = path.join(DATA_DIR, "device_tokens.json");
+        const store = await safeReadJSON<Record<string, any>>(dtFile, {});
+        let n = 0;
+        // userId 可能是用户名（resolveTokenOwnerUserId 返回的就是它），
+        // 也兼容数字 id —— 两个都比一遍，宁可多删也不留活口。
+        for (const [dt, rec] of Object.entries(store)) {
+          if (rec && (rec.userId === username || String(rec.userId) === String(user.id))) {
+            delete store[dt];
+            n++;
+          }
+        }
+        if (n > 0) {
+          removed.deviceTokens = n;
+          await safeWriteJSON(dtFile, store);
+        }
+      });
+
       // 3) 内存里的注销验证码
       emailCodes.delete(codeKey);
 
@@ -6674,6 +6710,33 @@ if %errorlevel% neq 0 (
       const record = store[deviceToken];
       if (!record?.userId) {
         return res.status(401).json({ error: "设备凭证无效或已被撤销" });
+      }
+
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ⑰）── 纵深防御：账号必须还存在
+       *
+       * 上面那道「注销时清 device_tokens」是主修法，但这里必须再挡一道：
+       * 只要有一份僵尸凭证漏网（手工写、旧版本残留、清理时刚好并发），
+       * 下面 `resolveOrCreateUserAgentToken(record.userId)` 就会**给一个不存在的
+       * 账号现建一份 settings 并签发新 Agent Token** —— 注销等于白做。
+       *
+       * 所以换发之前先确认 `users.json` 里还有这个人；没有就当场把这份凭证也删掉
+       * （自愈，不留垃圾），并明确回 401。
+       */
+      const allUsersForCheck = await safeReadJSON<any[]>(USERS_FILE, []);
+      const accountStillExists = allUsersForCheck.some(
+        (u: any) => u?.username === record.userId || String(u?.id) === String(record.userId),
+      );
+      if (!accountStillExists) {
+        console.warn(`\x1b[33m[Security] 设备凭证指向已不存在的账号 ${record.userId}，拒绝换发并清理该凭证\x1b[0m`);
+        await withFileLock(DEVICE_TOKENS_FILE, async () => {
+          const latest = await safeReadJSON<Record<string, any>>(DEVICE_TOKENS_FILE, {});
+          if (latest[deviceToken]) {
+            delete latest[deviceToken];
+            await safeWriteJSON(DEVICE_TOKENS_FILE, latest);
+          }
+        });
+        return res.status(401).json({ error: "账号已注销，设备凭证已失效" });
       }
 
       const allSettings = await loadSettingsFile();
