@@ -5523,11 +5523,26 @@ if %errorlevel% neq 0 (
           agent.sessions = [result.session, ...(agent.sessions || []).filter(s => (s.sessionId || s.id) !== sid)];
         }
 
-        io.emit("agent_sessions_updated", {
-          token: targetToken,
-          workspaces: agent.workspaces || [],
-          sessions: agent.sessions || []
-        });
+        // ⚠️ 2026-11-17 安全加固（审计 #42 ④）── token 不再全局广播
+        //
+        // 原来这里是 `io.emit(...)`：`io.emit` 会被下面的包装镜像进 App 推送通道
+        // 的 `pushToAll`，而 `pushToAll` **不按 userId 过滤** —— 于是每一个连着
+        // /ws/app 的连接（包括别人手机上的 App）都会收到这条带**明文 token** 的
+        // `agent_sessions_updated`。拿到 token 就能调 /api/agent/* 控制他人电脑。
+        //
+        // 改成按 token 归属发 `user_<ownerId>` room（包装层会走 pushToUser 过滤）。
+        // 归属查不到时**宁可不推**：这条消息的价值是"刷新列表"，而泄漏 token
+        // 的代价是"别人的电脑被控制"，两者完全不对称。
+        const owner5526 = await resolveTokenOwnerUserId(targetToken);
+        if (owner5526) {
+          io.to(`user_${owner5526}`).emit("agent_sessions_updated", {
+            token: targetToken,
+            workspaces: agent.workspaces || [],
+            sessions: agent.sessions || []
+          });
+        } else {
+          console.warn(`[Security] agent_sessions_updated 归属未知，已跳过广播（token=${targetToken.slice(0, 7)}…）`);
+        }
 
         console.log(`[Agent Hub] 已为工作区 ${targetWs || "(默认)"} 新建会话 ${createdId}`);
         return res.json({
@@ -5557,7 +5572,8 @@ if %errorlevel% neq 0 (
   });
 
   // Sync sessions report from agent
-  app.post("/api/agent/sync-sessions", (req, res) => {
+  // ⚠️ 2026-11-17：handler 加了 `async` —— 下面要 await 查 token 归属（见 #42 ④）
+  app.post("/api/agent/sync-sessions", async (req, res) => {
     try {
       const { token, workspaces, sessions, models } = req.body;
       const targetToken = (token || "").trim() || "";
@@ -5570,12 +5586,18 @@ if %errorlevel% neq 0 (
         if (sessions) agent.sessions = sessions;
         if (models) agent.models = models;
         agent.lastPing = Date.now();
-        io.emit("agent_sessions_updated", {
-          token: targetToken,
-          workspaces: agent.workspaces || [],
-          sessions: agent.sessions || [],
-          models: agent.models || []
-        });
+        // 同 #42 ④：按 token 归属发，不再 io.emit 全局广播（见上一处的长注释）
+        const owner5573 = await resolveTokenOwnerUserId(targetToken);
+        if (owner5573) {
+          io.to(`user_${owner5573}`).emit("agent_sessions_updated", {
+            token: targetToken,
+            workspaces: agent.workspaces || [],
+            sessions: agent.sessions || [],
+            models: agent.models || []
+          });
+        } else {
+          console.warn(`[Security] agent_sessions_updated 归属未知，已跳过广播（token=${targetToken.slice(0, 7)}…）`);
+        }
       }
       res.json({ success: true });
     } catch (err: any) {
@@ -6919,7 +6941,9 @@ if %errorlevel% neq 0 (
       // 只通知拥有这枚 Token 的账号，不再全服广播
       emitAgentStatusChange(token, true, agentInfo.ownerUserId, clientName);
 
-      clientWs.on("message", (raw) => {
+      // ⚠️ 2026-11-17：回调加了 `async` —— 下面要 await 查 token 归属（见 #42 ④）。
+      // 整个回调原本零 await，且外层有 try/catch，加 async 不会改变任何时序。
+      clientWs.on("message", async (raw) => {
         try {
           const msg = JSON.parse(raw.toString());
           if (msg.type === "register") {
@@ -7039,12 +7063,18 @@ if %errorlevel% neq 0 (
             agentInfo.sessions = msg.sessions || [];
             if (msg.models) agentInfo.models = msg.models;
             console.log(`[Agent Hub] Synced ${agentInfo.sessions.length} sessions and ${agentInfo.models?.length || 0} models for agent [${token}]`);
-            io.emit("agent_sessions_updated", {
-              token,
-              workspaces: agentInfo.workspaces,
-              sessions: agentInfo.sessions,
-              models: agentInfo.models || []
-            });
+            // 同 #42 ④：按 token 归属发，不再 io.emit 全局广播（见 L5526 那处的长注释）
+            const ownerSync = await resolveTokenOwnerUserId(token);
+            if (ownerSync) {
+              io.to(`user_${ownerSync}`).emit("agent_sessions_updated", {
+                token,
+                workspaces: agentInfo.workspaces,
+                sessions: agentInfo.sessions,
+                models: agentInfo.models || []
+              });
+            } else {
+              console.warn(`[Security] agent_sessions_updated 归属未知，已跳过广播（token=${String(token).slice(0, 7)}…）`);
+            }
           } else if (msg.type === "pong" || msg.type === "app_pong") {
             agentInfo.lastPing = Date.now();
           }
