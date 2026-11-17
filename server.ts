@@ -3268,9 +3268,19 @@ async function startServer() {
           pendingBridgeCommands.delete(userId);
           console.log(`[Bridge Cmd] 指令 ${queued.command} 已过期作废（电脑端未在 2 分钟内取走）`);
         } else {
-          pendingBridgeCommands.delete(userId);
+          /**
+           * ⚠️ 2026-11-17 安全加固（审计 #42 ⑩）── 消费点后移
+           *
+           * 原实现在这里就 `pendingBridgeCommands.delete(userId)` 了 ——
+           * 也就是**在校验会话槽位之前**就把指令消费掉了。
+           * 后果：任何能带对 userId 的请求（凭证可以是作废的）都能把
+           * 「启动/停止桥接」这条指令抢走删掉，电脑端下一次轮询永远取不到，
+           * 用户只能跑到电脑前手动操作。**这是一个零成本的 DoS**。
+           *
+           * 现在只读取、不删除；真正的消费放到「校验通过之后的成功分支」，
+           * 那里才 `delete`（见下方 res.json 之前）。
+           */
           pendingCommand = queued.command;
-          console.log(`[Bridge Cmd] 指令 ${queued.command} 已下发给电脑端 App 执行`);
         }
       }
     }
@@ -3349,6 +3359,15 @@ async function startServer() {
           }
         }
       }
+      // ⚠️ 消费点（审计 #42 ⑩）：到这里会话校验已经**全部通过**
+      // （顶号 401 / 槽位不存在 401 都已经 return 走了），
+      // 现在才真正把指令从队列里删掉。伪造请求走到这之前就被 401 拦住，
+      // 消费不到它。
+      if (pendingCommand) {
+        pendingBridgeCommands.delete(userId);
+        console.log(`[Bridge Cmd] 指令 ${pendingCommand} 已下发给电脑端 App 执行`);
+      }
+
       res.json({
         valid: true,
         agentOnline,
@@ -3360,15 +3379,33 @@ async function startServer() {
           : {}),
       });
     } catch (e) {
-      res.json({
-        valid: true,
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ⑩）── 这里原先是 fail-open
+       *
+       * 原实现把**成功分支的响应原样复制了一份**：`valid: true` +
+       * 带上 `harnessToken`。于是「读 active_sessions.json 失败」
+       * （磁盘满 / JSON 被写坏 / 权限问题 / 锁超时）会变成：
+       *   ① 客户端以为**凭证有效** → 继续用可能已被顶掉的凭证
+       *   ② **把 Agent Token 吐给调用方** —— 而这份 token 本该是
+       *      「通过了身份校验才拿得到」的东西，异常路径反而漏了
+       *
+       * 这和本项目那条「坏的链路假装自己是好的比崩溃更糟」是同一个形状：
+       * 异常时最该收敛，原来却在异常时给出最敏感的东西。
+       *
+       * 现在改成 fail-closed：
+       *   - **500** + `valid: false` + 明确 code，**绝不回 harnessToken / pendingCommand**
+       *   - 保留 `agentOnline` 这类**非敏感**状态，避免界面全挂
+       *   - **不用 401**：客户端只在 `401 + FORCE_LOGOUT` 时才走登出流程，
+       *     用 401 会让「磁盘临时抽风」被误判成「账号被顶」→ 误踢用户。
+       *     500 只是这一轮没拿到状态，客户端下一轮（4 秒后）自动重试。
+       */
+      console.error("[Session] check-session 读盘失败，本轮按不可用返回:", e);
+      return res.status(500).json({
+        valid: false,
+        error: "SESSION_CHECK_UNAVAILABLE",
+        retry: true,
+        reason: "服务端暂时无法校验登录状态，请稍后自动重试。",
         agentOnline,
-        ...(currentAgentToken ? { harnessToken: currentAgentToken } : {}),
-        ...(pendingCommand ? { bridgeCommand: pendingCommand } : {}),
-        ...(bridgeTransition ? { bridgeTransition } : {}),
-        ...(revision
-          ? { settingsUpdatedAt: revision.at, settingsBySessionId: revision.bySessionId }
-          : {}),
       });
     }
   });
