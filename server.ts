@@ -7334,7 +7334,7 @@ if %errorlevel% neq 0 (
     }
   });
 
-  wss.on("connection", (clientWs, request) => {
+  wss.on("connection", async (clientWs, request) => {
     try {
       const requestUrl = new URL(request.url || "", `http://${request.headers.host || "localhost"}`);
       let targetEndpoint = requestUrl.searchParams.get("endpoint");
@@ -7358,6 +7358,35 @@ if %errorlevel% neq 0 (
         }
       }
 
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ⑦）── SSRF
+       *
+       * 上面那段「协议补全」里夹着一个**假白名单**：它只判断 url 字符串前缀
+       * （`!startsWith('127.')` 之类），而且**只在"没写协议"那个分支里生效** ——
+       * 显式写 `ws://169.254.169.254/…` 就直接跳过全部检查。
+       * 即使生效也拦不住：`http://2130706433`（十进制 IP）、`http://0x7f000001`
+       * （十六进制）、`http://[::1]`（IPv6 回环）、`http://169.254.169.254`
+       * （云元数据）、以及任何域名解析到内网的情况。
+       *
+       * 这里有现成的 `ssrfViolation()` —— 它做的是「字面 IP 直接判 + 域名先
+       * resolve 再逐个判内网」的完整版本，ASR 的 HTTP 代理端点一直在用它。
+       * 这个 WS 端点**漏掉了**，现在补上。
+       *
+       * 注意：`ssrfViolation` 只认 http/https 协议，所以先把 ws/wss 换成
+       * http/https 去校验（主机名部分完全一致），通过后仍用 ws/wss 连接。
+       *
+       * ⚠️ 本地 ASR（如 `ws://127.0.0.1:10096`）会被这条规则拒绝 —— 这是**故意的**：
+       * 服务端不该替任意调用方去连内网。需要连本机的部署，在 `.env` 里配
+       * `ASR_ALLOWED_HOSTS=127.0.0.1` 显式声明（`ssrfViolation` 里第一段就是它）。
+       */
+      const probeUrl = targetEndpoint.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
+      const ssrfReason = await ssrfViolation(probeUrl);
+      if (ssrfReason) {
+        console.error(`\x1b[31m[Security] FunASR WS 目标被 SSRF 规则拒绝: ${ssrfReason}（target=${targetEndpoint}）\x1b[0m`);
+        clientWs.close(1008, "Target endpoint not allowed");
+        return;
+      }
+
       console.log(`[FunASR WS Proxy] Proxying WebSocket connection to target: ${targetEndpoint}`);
 
       const rawSubprotocol = request.headers['sec-websocket-protocol'];
@@ -7371,8 +7400,25 @@ if %errorlevel% neq 0 (
 
       console.log(`[FunASR WS Proxy] Connecting to target WS: ${targetEndpoint} with protocols:`, protocols);
       
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ⑦）── TLS 证书校验
+       *
+       * 原来硬编码 `rejectUnauthorized: false`：**连上游 ASR 时完全不验证证书**。
+       * 而这条链路会带上语音内容（可能还有上游 key），等于在内网出口上开了一扇
+       * 「任何中间人都能冒充 ASR 服务端」的门 —— 尤其在公共 WiFi / 被劫持的路由器下。
+       *
+       * 现在默认 `true`。只有显式设置 `ASR_INSECURE_TLS=1` 时才放开（并打警告）——
+       * 与桥接脚本的 `--insecure` 是同一个模式：**要放开必须是显式、可见的动作**，
+       * 不能是代码里的默认值。
+       *
+       * 正常上游（siliconflow / groq / 自建带正式证书的）都不需要这个开关。
+       */
+      const insecureTls = process.env.ASR_INSECURE_TLS === "1";
+      if (insecureTls) {
+        console.warn(`\x1b[33m[Security] FunASR WS 正在跳过上游 TLS 证书校验（ASR_INSECURE_TLS=1）：${targetEndpoint}\x1b[0m`);
+      }
       const wsOptions: WSWebSocket.ClientOptions = {
-        rejectUnauthorized: false,
+        rejectUnauthorized: !insecureTls,
         headers: {
           'User-Agent': (request.headers['user-agent'] as string) || 'Mozilla/5.0',
         },
