@@ -3842,6 +3842,18 @@ async function startServer() {
       if (!userId || userId === "guest") {
         return res.status(401).json({ success: false, error: "缺少 userId" });
       }
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ㉕）── 越权打断
+       *
+       * 原来只校验「userId 非空、不是 guest」，**没有验证请求方是否真的登录着
+       * 这个账号**。于是知道别人的 userId（数字 id / 用户名都是公开可猜的）
+       * 就能把对方正在生成的那一轮掐掉 —— 一个零成本的 DoS，症状还是
+       * 「AI 突然不回了」，完全看不出是被人打断的。
+       *
+       * 加统一身份校验。App 侧这个请求走 ``sync_service`` 的 ``_dio``，
+       * 拦截器统一带 ``x-user-id`` + ``x-client-session-id``，所以正常路径不受影响。
+       */
+      if (!(await verifyUserIdentity(req, res, userId, "终止生成"))) return;
 
       let gen: ActiveGeneration | undefined;
       if (assistantMessageId) gen = activeGenerations.get(`${userId}_${assistantMessageId}`);
@@ -4177,6 +4189,11 @@ async function startServer() {
     const sanitized = { ...settings };
     if ("apiKey" in sanitized) sanitized.apiKey = "";
     if ("asrApiKey" in sanitized) sanitized.asrApiKey = "";
+    // ⚠️ 2026-11-17（审计 #42 ㉓）：ttsApiKey 漏了。
+    // 同一族的三兄弟（apiKey / asrApiKey / accountPassword）都在清，唯独 TTS 这条
+    // 会随 GET /api/settings 原样回给调用方。虽然 SECRET_FIELDS 会加密落盘，
+    // 但「加密存储」和「不该下发」是两件事 —— 这个接口的语义就是给客户端一份脱敏视图。
+    if ("ttsApiKey" in sanitized) sanitized.ttsApiKey = "";
     if ("accountPassword" in sanitized) sanitized.accountPassword = "";
     if ("password" in sanitized) sanitized.password = "";
     // isHarnessOnline 是**本机运行时事实**（这台设备此刻看不看得见桥接），不是用户设置。
