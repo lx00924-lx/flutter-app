@@ -5267,7 +5267,7 @@ async function startServer() {
   });
 
   // Long-polling endpoint for local Python bridge agent
-  app.get("/api/agent/poll", (req, res) => {
+  app.get("/api/agent/poll", async (req, res) => {
     try {
       const token = ((req.query.token as string) || "").trim() || "";
       if (!isPlausibleAgentToken(token)) {
@@ -5277,17 +5277,36 @@ async function startServer() {
 
       let agent = connectedAgents.get(token);
       if (!agent) {
+        /**
+         * ⚠️ 2026-11-17 安全加固（审计 #42 ⑪）── 假 Agent 注册
+         *
+         * 原实现**只校验 token 格式**（长度 ≥16 + 字符白名单），然后就把它登记进
+         * `connectedAgents` 并广播上线。于是任何人拿一个随机字符串
+         * （`zzzzzzzzzzzzzzzz` 即可）调一次 poll，就能在服务端登记一个"在线 Agent"，
+         * 让所有人看到假的桥接在线状态；更糟的是它会占据 `connectedAgents` 里
+         * 对应 token 的位置 —— 一旦与真 token 撞上，任务会被投递给假 Agent。
+         *
+         * 现在：**首次登记必须能归属到真实账号**（`resolveTokenOwnerUserId`）。
+         * 已登记的走内存里的 `ownerUserId`，不再读盘，所以正常桥接每 20~30 秒
+         * 一次轮询不会有额外开销。
+         */
+        const ownerUserId = await resolveTokenOwnerUserId(token);
+        if (!ownerUserId) {
+          console.warn(`\x1b[33m[Security] 拒绝登记未知归属的 Agent Token（poll）: ${maskToken(token)}\x1b[0m`);
+          return res.status(403).json({ error: "该 Agent Token 未绑定任何账号，请先在 App 中重新配对" });
+        }
         agent = {
           token,
+          ownerUserId,
           clientName: "LxAI-Bridge-Local",
           connectedAt: Date.now(),
           lastPing: Date.now(),
           mode: 'polling',
           pendingPollResolvers: [],
           queuedTasks: []
-        };
-        connectedAgents.set(token, agent);
-        emitAgentStatusChange(token, true, agent.ownerUserId, agent.clientName);
+        } as any;
+        connectedAgents.set(token, agent as any);
+        emitAgentStatusChange(token, true, ownerUserId, agent.clientName);
       } else {
         agent.lastPing = Date.now();
       }
@@ -5391,7 +5410,7 @@ async function startServer() {
   });
 
   // Agent heartbeat ping
-  app.post("/api/agent/heartbeat", (req, res) => {
+  app.post("/api/agent/heartbeat", async (req, res) => {
     const token = ((req.body?.token as string) || "").trim() || "";
     if (!isPlausibleAgentToken(token)) {
       return res.status(401).json({ error: "无效或缺失的 Agent Token" });
@@ -5400,17 +5419,24 @@ async function startServer() {
     if (agent) {
       agent.lastPing = Date.now();
     } else {
+      // 同 ⑪（见 poll 处的长注释）：首次登记必须能归属到真实账号
+      const ownerUserId = await resolveTokenOwnerUserId(token);
+      if (!ownerUserId) {
+        console.warn(`\x1b[33m[Security] 拒绝登记未知归属的 Agent Token（heartbeat）: ${maskToken(token)}\x1b[0m`);
+        return res.status(403).json({ error: "该 Agent Token 未绑定任何账号，请先在 App 中重新配对" });
+      }
       agent = {
         token,
+        ownerUserId,
         clientName: "LxAI-Bridge-Local",
         connectedAt: Date.now(),
         lastPing: Date.now(),
         mode: 'polling',
         pendingPollResolvers: [],
         queuedTasks: []
-      };
-      connectedAgents.set(token, agent);
-      emitAgentStatusChange(token, true, undefined, agent.clientName);
+      } as any;
+      connectedAgents.set(token, agent as any);
+      emitAgentStatusChange(token, true, ownerUserId, agent.clientName);
     }
     res.json({ success: true, timestamp: Date.now(), bootId: SERVER_BOOT_ID });
   });
