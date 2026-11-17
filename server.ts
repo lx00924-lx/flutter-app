@@ -7023,6 +7023,32 @@ if %errorlevel% neq 0 (
       if (!scannerUserId) {
         return res.status(401).json({ success: false, error: "请先登录后再扫码配对" });
       }
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ③）── 只查"账号存在"不查"登录态"
+       *
+       * 原来这里只确认 `scannerUserId` 在 users.json 里存在，**不验证请求方
+       * 是否真的登录着这个账号**。而 users.json 的用户名是公开可猜的
+       * （项目里就是顺序数字 / 手机号）。于是知道配对码的人可以：
+       *   1. 伪造 `userId` 为受害者的账号名；
+       *   2. 调 auth-confirm 把**那台电脑的 token 绑到受害者账号上**；
+       * 效果是受害者的账号"莫名其妙多了一台自己没配对的电脑"，
+       * 而攻击者拿到的是绑定关系的错位（后续能借这个错配做定位混淆）。
+       *
+       * 现在加统一身份校验。**兼容性说明**：旧版 App 的扫码请求只带
+       * `Content-Type`（`scanner_screen.dart` 里用的是 `package:http` 而不是
+       * 带拦截器的 dio），不带这两个头。所以这里**不能静默放行**，而是回一个
+       * 明确的「请更新 App」——让用户知道该升级，而不是把漏洞留着。
+       */
+      const hasIdentityHeaders = !!(req.headers["x-client-session-id"] || req.headers["x-user-id"]);
+      if (!hasIdentityHeaders) {
+        return res.status(426).json({
+          success: false,
+          error: "当前 App 版本过旧，扫码配对需要身份校验，请更新到最新版本后重试",
+          code: "CLIENT_TOO_OLD",
+        });
+      }
+      if (!(await verifyUserIdentity(req, res, scannerUserId, "扫码配对"))) return;
+
       // 校验账号真实存在，防止伪造 userId 把二维码绑到他人账号
       const allUsers = await safeReadJSON<any[]>(USERS_FILE, []);
       const scanner = allUsers.find((u: any) => u.username === scannerUserId || u.id === scannerUserId);

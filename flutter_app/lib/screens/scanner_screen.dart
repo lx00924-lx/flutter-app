@@ -92,7 +92,12 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
     }
 
     // 扫码者身份：服务端据此校验账号真实性并把 token 绑定到该账号
-    final userId = context.read<SettingsProvider>().syncUserId;
+    // ⚠️ 2026-11-17（审计 #42 ③）：同时要带 clientSessionId。
+    // 服务端 auth-confirm 现在要过 verifyUserIdentity，光有 userId 不够
+    // （userId 公开可猜，session id 才是真凭证）。
+    final settingsForScan = context.read<SettingsProvider>();
+    final userId = settingsForScan.syncUserId;
+    final scanSessionId = settingsForScan.clientSessionId;
     if (userId.isEmpty || userId == 'guest' || userId == 'default_user') {
       if (mounted) {
         setState(() => _isProcessing = false);
@@ -107,7 +112,12 @@ class _ScannerScreenState extends State<ScannerScreen> with SingleTickerProvider
       final uri = Uri.parse('$serverUrl/api/bridge/auth-confirm');
       final res = await http.post(
         uri,
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          // 身份校验用（见上方注释）
+          'x-user-id': userId,
+          'x-client-session-id': scanSessionId,
+        },
         body: jsonEncode({
           // 服务端字段名为 sessionCode（旧字段 authCode 服务端也兼容）
           'sessionCode': authCode,
