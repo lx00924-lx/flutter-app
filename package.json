@@ -31,7 +31,7 @@
     "form-data": "^4.0.6",
     "lucide-react": "^0.546.0",
     "multer": "^1.4.5-lts.1",
-    "nodemailer": "^10.0.13",
+    "nodemailer": "^10.6.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "rimraf": "^6.1.3",
