@@ -7398,7 +7398,7 @@ if %errorlevel% neq 0 (
   });
 
   // Handle Local Agent WebSocket Connections
-  agentWss.on("connection", (clientWs, request) => {    try {
+  agentWss.on("connection", async (clientWs, request) => {    try {
       const requestUrl = new URL(request.url || "", `http://${request.headers.host || "localhost"}`);
       let token = requestUrl.searchParams.get("token")?.trim() || "";
       let clientName = requestUrl.searchParams.get("clientName")?.trim() || "LxAI-Bridge-Local";
@@ -7413,13 +7413,41 @@ if %errorlevel% neq 0 (
         return;
       }
 
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ⑪）── 第四条路：WebSocket 握手
+       *
+       * register / poll / heartbeat 三条都已经要求「token 必须能归属到真实账号」，
+       * 但 **WS 握手这条漏了**：原来只判「非空、不是占位符」，然后就
+       * `connectedAgents.set(token, agentInfo)` 并打一行 `Local Agent connected`。
+       * 于是任意 16 字符以上的随机串拿 `?token=zzzz…` 连上来，就能：
+       *   · 在服务端登记一个"在线 Agent"（所有人看到假桥接上线）；
+       *   · 用假 token 占位 `connectedAgents`，与真 token 撞上时抢走任务投递；
+       *   · 把日志刷满 `Local Agent connected`，掩盖真实的上下线。
+       *
+       * 现在：**归属必须能查到**（优先继承 register 阶段已认定的 owner，避免重复读盘）。
+       * 查不到就按已有的 `auth_error` 协议回一条并断开 —— 桥接那边能看到原因，
+       * 而不是莫名其妙被踢。
+       */
+      const inheritedOwner = connectedAgents.get(token)?.ownerUserId;
+      const wsOwnerUserId = inheritedOwner || (await resolveTokenOwnerUserId(token));
+      if (!wsOwnerUserId) {
+        console.warn(`\x1b[33m[Security] 拒绝未知归属的 Agent WebSocket 握手: ${maskToken(token)}\x1b[0m`);
+        clientWs.send(JSON.stringify({
+          type: "auth_error",
+          message: "该 Token 未绑定任何账号，请在 App 中重新扫码配对"
+        }));
+        setTimeout(() => clientWs.close(4003, "Unknown token owner"), 500);
+        return;
+      }
+
       console.log(`\x1b[32m[Agent Hub] Local Agent connected with token [${maskToken(token)}] (${clientName})\x1b[0m`);
       const agentInfo: ConnectedAgent = {
         ws: clientWs,
         token,
-        // 归属要继承：注册接口（/api/agent/register）已经把 ownerUserId 认下来了，
-        // 这里直接覆盖建条目会把归属丢掉 —— 之后上下线通知就只能退回全服广播。
-        ownerUserId: connectedAgents.get(token)?.ownerUserId,
+        // 归属：优先继承注册接口（/api/agent/register）认下来的值，
+        // 没有就用上面刚查到的 wsOwnerUserId —— 保证这里绝不会是 undefined
+        // （否则后续上下线通知只能退回全服广播，就是 #42 ④ 那个问题）。
+        ownerUserId: inheritedOwner || wsOwnerUserId,
         clientName,
         connectedAt: Date.now(),
         lastPing: Date.now(),
