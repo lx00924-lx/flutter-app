@@ -476,6 +476,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       final reg = await SyncService.instance.beginBridgeTransition(
         userId: sp.syncUserId,
         command: target ? 'start' : 'stop',
+        clientSessionId: sp.clientSessionId,
       );
       if (!mounted) return;
       if (reg == BridgeCommandResult.busy) {
@@ -504,7 +505,10 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         // 本地都起不来（例如没装 Python），状态永远不会变成期望值，
         // 必须立刻撤销服务端标记，否则两端按钮要白等 20 秒兜底才恢复。
         _releaseBridgeSwitch();
-        unawaited(SyncService.instance.cancelBridgeTransition(userId: sp.syncUserId));
+        unawaited(SyncService.instance.cancelBridgeTransition(
+          userId: sp.syncUserId,
+          clientSessionId: sp.clientSessionId,
+        ));
       }
       final msg = manager.takeMessage();
       if (msg != null) {

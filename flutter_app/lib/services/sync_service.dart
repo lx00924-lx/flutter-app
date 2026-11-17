@@ -1800,6 +1800,11 @@ class SyncService {
   Future<BridgeCommandResult> beginBridgeTransition({
     required String userId,
     required String command,
+    /// ⚠️ 2026-11-18：服务端 `/api/agent/bridge-transition` 现在要过
+    /// `verifyUserIdentity`（安全审计 #42 ⑫）。这个方法原本 `_dio.post` 没带
+    /// `options`，也就是**不带身份头** —— 守卫上线后每次都 403，症状是
+    /// 「桥接启动/停止按钮点了没反应、或者一直灰着」。
+    required String clientSessionId,
   }) async {
     final cleanUserId = userId.trim();
     if (cleanUserId.isEmpty || cleanUserId == 'guest') return BridgeCommandResult.failed;
@@ -1811,6 +1816,7 @@ class SyncService {
           'command': command,
           'device': AppSettings.currentDeviceType,
         },
+        options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
       final ok = resp.statusCode == 200 && (resp.data is Map) && resp.data['success'] == true;
       return ok ? BridgeCommandResult.ok : BridgeCommandResult.failed;
@@ -1825,13 +1831,18 @@ class SyncService {
   }
 
   /// 撤销「状态切换中」标记（本地启停失败时用，避免两端按钮白等 20 秒兜底）。
-  Future<void> cancelBridgeTransition({required String userId}) async {
+  Future<void> cancelBridgeTransition({
+    required String userId,
+    /// 同 beginBridgeTransition：撤销路径也要过身份校验（⑫）。
+    required String clientSessionId,
+  }) async {
     final cleanUserId = userId.trim();
     if (cleanUserId.isEmpty || cleanUserId == 'guest') return;
     try {
       await _dio.post(
         '$serverBaseUrl/api/agent/bridge-transition/cancel',
         data: {'userId': cleanUserId, 'device': AppSettings.currentDeviceType},
+        options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
     } catch (e) {
       debugPrint('[SyncService] cancelBridgeTransition error: $e');
