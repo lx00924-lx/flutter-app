@@ -6006,11 +6006,35 @@ if %errorlevel% neq 0 (
   const writePendingDecisions = () => {
     try {
       fsSync.mkdirSync(DATA_DIR, { recursive: true });
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ⑬）── 落盘前剔除明文 token
+       *
+       * 原来是把内存里的对象**直接序列化**：
+       *   `questions: [...pendingQuestions.values()]`
+       * 而 `pendingQuestions` 的条目是 `{ ...payload, token: qToken, userId }` ——
+       * 于是每一轮「弹选择框 / 待审批」都会把 **Agent Token 明文**写进
+       * `messages_data/pending-decisions.json`，跟 `server-run.log` 一样是
+       * 「躺在数据目录里的第二份 token」。
+       *
+       * 现在落盘前把 `token` 摘掉，`userId` 保留（恢复后仍需按用户归属投递）。
+       *
+       * **恢复后这些待办还能用吗**：能。`answer-question` / `approve` 的取
+       * token 逻辑是 `pendingToken || bodyToken` —— 落盘文件里没有 token，
+       * `pendingToken` 就为空，App 请求里带的 token 顶上（见 #42 ⑧ 那段改动）。
+       * 而桥接重连后 token 不变，所以恢复的待办照样能被回应。
+       * 退一步说，就算某个待办因此回不了应，它的代价是「一个选择框需要重新弹」，
+       * 而泄漏 token 的代价是「别人的电脑被控制」—— 两者不对称。
+       */
+      const stripToken = (item: any) => {
+        if (!item || typeof item !== "object") return item;
+        const { token: _dropped, ...rest } = item as any;
+        return rest;
+      };
       fsSync.writeFileSync(PENDING_STORE_FILE, JSON.stringify({
         version: 1,
         savedAt: Date.now(),
-        questions: [...pendingQuestions.values()],
-        approvals: [...pendingApprovals.values()],
+        questions: [...pendingQuestions.values()].map(stripToken),
+        approvals: [...pendingApprovals.values()].map(stripToken),
       }), "utf-8");
     } catch (err: any) {
       console.error("[Pending] 待办落盘失败:", err?.message ?? err);
