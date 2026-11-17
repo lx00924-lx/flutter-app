@@ -1902,6 +1902,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
         // --- 走服务端中继调度 Agent 管道，确保本地 Harness 执行结果无缝回传并与 LLM 整合 ---
         final stream = SyncService.instance.streamServerAgentChat(
           userId: settingsProvider.syncUserId,
+          clientSessionId: settingsProvider.clientSessionId,
           assistantMessageId: assistantMsg.id,
           messages: _messages.where((m) => !m.isStreaming).toList(),
           settings: agentSettings,
@@ -2491,6 +2492,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       if (isAgentMode) {
         final stream = SyncService.instance.streamServerAgentChat(
           userId: settingsProvider.syncUserId,
+          clientSessionId: settingsProvider.clientSessionId,
           assistantMessageId: assistantMsg.id,
           messages: _messages.where((m) => !m.isStreaming).toList(),
           settings: agentSettings,

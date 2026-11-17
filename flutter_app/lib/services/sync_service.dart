@@ -2249,6 +2249,12 @@ class SyncService {
   /// 经由服务器中继管道直接流式监听 Agent 执行状态与最终模型回复 (SSE 管道)
   Stream<Map<String, dynamic>> streamServerAgentChat({
     required String userId,
+    /// ⚠️ 2026-11-18：服务端 `/api/chat/stream` 现在要过 `verifyUserIdentity`
+    /// （安全审计 #42 ⑥）。这个方法以前自己拼 `Options(...)`、**没带身份头**，
+    /// 守卫一上线就变成每次都 403 —— App 显示「无法连接到调度服务器:
+    /// DioException [bad response] ... status code of 403」，用户以为服务挂了。
+    /// 所以必须由调用方把 clientSessionId 传进来。
+    required String clientSessionId,
     required String assistantMessageId,
     required List<ChatMessage> messages,
     required Map<String, dynamic> settings,
@@ -2289,6 +2295,11 @@ class SyncService {
           receiveTimeout: const Duration(minutes: 20),
           headers: {
             'Accept': 'text/event-stream',
+            // ⚠️ 身份头：服务端 /api/chat/stream 要过 verifyUserIdentity（审计 #42 ⑥）。
+            // 漏了这两个头 → 403 SESSION_ID_REQUIRED → App 侧显示「无法连接到调度服务器」。
+            if (cleanUserId.isNotEmpty && cleanUserId != 'guest')
+              'x-user-id': cleanUserId,
+            if (clientSessionId.isNotEmpty) 'x-client-session-id': clientSessionId,
           },
         ),
         cancelToken: cancelToken,
