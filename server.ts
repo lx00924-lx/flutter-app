@@ -741,7 +741,27 @@ const isPlausibleAgentToken = (token: string): boolean => {
   if (lower === "default_agent_token") return false;
   if (lower === "agent_default") return false;
   if (lower.includes("your_token") || lower.includes("你的token")) return false;
-  return t.length >= 16;
+
+  /**
+   * ⚠️ 2026-11-17 安全加固（审计 #42 ⑨）── .bat 生成接口的命令注入
+   *
+   * 原来这里**只校验 `length >= 16`**。而 token 会被原样插进两处 `.bat` 的
+   * 命令行里（`--token "${token}"`），于是：
+   *   `token=xxxxxxxxxxxxxxxx" & calc & "`（16 位以上）
+   * 就能在那个 bat 被双击时**执行任意命令** —— 一个下载来的启动脚本
+   * 变成了一条远程命令执行通道。
+   *
+   * 合法 token 只会是 `generateServerAgentToken()` 产出的
+   * `lx-` + `[A-Za-z0-9_-]`（43 位随机字符）+ 历史 `sk-agent-` 前缀，
+   * **一个特殊字符都不需要**。所以这里直接上字符白名单：
+   * 只允许字母/数字/下划线/连字符，长度 16~128。
+   *
+   * 放在这里而不是只在 bat 生成处校验，是因为这个函数有 20+ 个调用点
+   * （Agent 注册、轮询、心跳、WS 握手……），一次性收口比逐个补漏更可靠。
+   * 守卫方向必须是「拒绝」：宁可让格式奇怪的旧 token 重新配对，
+   * 也不能让一个能做命令注入的字符串继续在系统里流通。
+   */
+  return /^[A-Za-z0-9_-]{16,128}$/.test(t);
 };
 
 /**
@@ -5167,7 +5187,35 @@ async function startServer() {
     if (!isPlausibleAgentToken(token)) {
       return res.status(401).json({ error: "无效或缺失的 Agent Token" });
     }
-    const harnessUrl = ((req.query.harnessUrl as string) || "http://127.0.0.1:3080").trim();
+    const harnessUrlRaw = ((req.query.harnessUrl as string) || "").trim();
+    /**
+     * ⚠️ 2026-11-17 安全加固（审计 #42 ⑨）
+     *
+     * 原来这里是 `((req.query.harnessUrl) || "http://127.0.0.1:3080").trim()` ——
+     * **完全没校验就直接用**，而它会被原样插进 bat 的两处：
+     *   `echo    本地 Harness: ${harnessUrl}`
+     *   `python lxai_bridge.py … --harness-url "${harnessUrl}"`
+     * 于是 `harnessUrl=http://x" & calc & "` 就能执行任意命令。
+     *
+     * 旁边 serverUrl 那条早就过了 safeScriptUrl、还写了注释说明威胁模型，
+     * **却漏了同一行代码里的 harnessUrl** —— 典型的「修了一半」。
+     *
+     * 现在：显式传了就必须是合法 http/https 地址（禁引号/反斜杠/空白），
+     * 不合法直接 400 拒绝，不静默回退到默认值（回退会让攻击者以为没生效）。
+     */
+    let harnessUrl: string;
+    if (harnessUrlRaw) {
+      const safe = safeScriptUrl(harnessUrlRaw);
+      if (!safe) {
+        return res.status(400).json({
+          error: "harnessUrl 参数不是合法的 http/https 地址",
+          code: "INVALID_HARNESS_URL",
+        });
+      }
+      harnessUrl = safe;
+    } else {
+      harnessUrl = "http://127.0.0.1:3080";
+    }
     
     // 【安全】这里原先用 `x-forwarded-proto` / `x-forwarded-host` 拼服务器地址 ——
     // 而这两个头**完全由请求方控制**，地址又会被原样插进 bat 的
