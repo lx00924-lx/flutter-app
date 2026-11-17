@@ -47,7 +47,18 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   String get _bridgeSwitchLabel {
     final provider = _settingsProvider;
     final remote = provider?.bridgeTransition;
-    final target = remote?.target ?? _bridgeSwitchTarget ?? true;
+    /**
+     * ⚠️ 2026-11-18：**本地刚点的方向优先**。
+     *
+     * 原来这里是 `remote?.target ?? _bridgeSwitchTarget ?? true` —— 服务端标记优先。
+     * 而服务端标记要挂满 20 秒 TTL，所以用户点「停止」时，**上一次 start 的标记
+     * 还在**（target=true）→ 界面显示「正在上线…」。用户看到的就是
+     * 「我点的是停止，它说正在上线」。
+     *
+     * 服务端标记代表「账号当前在切什么」，用于**告知另一端**；对本端来说，
+     * 自己刚按下的方向才是真的。所以调换优先级。
+     */
+    final target = _bridgeSwitchTarget ?? remote?.target ?? true;
     final action = target ? '上线' : '停止';
     if (remote != null && (provider?.isBridgeSwitchingByOtherDevice ?? false)) {
       final who = remote.by == 'mobile' ? '手机端' : '电脑端';
@@ -131,6 +142,24 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         _isRotatingToken = false;
         _bridgeSwitchTarget = null;
       });
+      /**
+       * ⚠️ 2026-11-18：状态收敛后**立刻撤掉服务端的「切换中」标记**。
+       *
+       * 服务端那个标记是固定 20 秒 TTL（`armBridgeTransition`），但状态通常
+       * 3~5 秒就到位了。不撤的后果：按钮已经变回可点，点下去却回 409
+       * 「另一台设备正在切换桥接状态」—— 而根本没有另一台设备，就是自己
+       * 上一次操作留下的标记。同时它还会把按钮文案带偏（见 `_bridgeSwitchLabel`）。
+       *
+       * `cancelBridgeTransition` 这个方法早就存在，但此前只在「本地启动失败」
+       * 的分支里调用过，成功路径一次都没撤过。
+       */
+      final sp = _settingsProvider;
+      if (sp != null) {
+        unawaited(SyncService.instance.cancelBridgeTransition(
+          userId: sp.syncUserId,
+          clientSessionId: sp.clientSessionId,
+        ));
+      }
       if (!converged) {
         ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           const SnackBar(
