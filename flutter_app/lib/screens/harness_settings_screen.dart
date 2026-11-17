@@ -60,7 +60,16 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
   bool? _bridgeSwitchTarget;
   Timer? _bridgeSwitchWatchdog;
   /// 切换看门狗的兜底时限：超过就解锁并提示，避免按钮永久卡住。
-  static const Duration _bridgeSwitchTimeout = Duration(seconds: 20);
+  /// ⚠️ 2026-11-18：原来 20 秒，实测会误报。
+  ///
+  /// 服务端设计是「电脑端下一次轮询（≤4 秒）取走指令」，正常几秒就好。
+  /// 但 2026-11-18 02:47 实测有一次 stop 排队后 **28 秒**才下发（电脑端刚启动、
+  /// 首轮同步慢，请求又走 Clash 出口），超过 20 秒就直接弹
+  /// 「状态切换超时未确认：请检查电脑端 LxAI 是否在运行」—— 而实际**几秒后
+  /// 就成功了**。用户看到的是「明明停掉了，却说电脑没在线」。
+  ///
+  /// 45 秒覆盖「轮询卡一轮 + 命令 TTL 前」的区间；正常 4 秒内完成的不会受影响。
+  static const Duration _bridgeSwitchTimeout = Duration(seconds: 45);
 
   /// 桥接进程与退出监控已统一交给全局 BridgeProcessManager 管理，
   // 本页面不再持有进程句柄（否则会与远端指令的执行路径产生两个进程）。
@@ -125,7 +134,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
       if (!converged) {
         ScaffoldMessenger.of(context)..clearSnackBars()..showSnackBar(
           const SnackBar(
-            content: Text('状态切换超时未确认：请检查电脑端 LxAI 是否在运行、是否已登录同一账号'),
+            content: Text('电脑端响应较慢，状态还没确认。若桥接实际已切换，本提示可忽略；否则请确认电脑端 LxAI 在运行且已登录同一账号。'),
             backgroundColor: Colors.orange,
             duration: Duration(seconds: 5),
           ),
