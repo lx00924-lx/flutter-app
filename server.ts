@@ -713,6 +713,27 @@ const verifyPassword = async (
 };
 
 /** 明显非法的 token（空值、历史默认值、占位符）一律不接受。 */
+/**
+ * 日志脱敏：只留「前 7 位 + 后 4 位」，中间打码。
+ *
+ * ⚠️ 2026-11-17 安全加固（审计 #42 ⑭）
+ *
+ * 原来有 6 处 `console.log` 直接把**完整的 Agent Token** 打进 `server-run.log`：
+ *   `[Agent Hub] Local Agent connected with token [lx-4LCaXU8qQk-...]`
+ * 这个日志就躺在 `F:\ai\flutter-app\` 下，谁读得到那个目录谁就拿得到 token；
+ * 它还不自动清理、会一直累积。分享日志排查问题时等于把 token 一起送出去。
+ *
+ * 为什么留前 7 + 后 4：足够在日志里认出「是哪一枚 token」（排查要靠这个），
+ * 但拼不回原文。**不要改成只留前几位** —— 那样两个 token 在前缀相同的情况下
+ * （`lx-` 开头是固定前缀）就分不出来了。
+ */
+const maskToken = (raw: string): string => {
+  const s = (raw || "").trim();
+  if (!s) return "(空)";
+  if (s.length <= 12) return `${s.slice(0, 3)}…`;
+  return `${s.slice(0, 7)}…${s.slice(-4)}`;
+};
+
 const isPlausibleAgentToken = (token: string): boolean => {
   const t = (token || "").trim();
   if (!t) return false;
@@ -1686,7 +1707,7 @@ async function runServerSideGeneration({
 
       // Agent is online -> dispatch task
       const taskId = `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      console.log(`[Agent Hub] Dispatching task ${taskId} to agent for token [${agentToken}] (mode: ${agent.mode || 'ws'})`);
+      console.log(`[Agent Hub] Dispatching task ${taskId} to agent for token [${maskToken(agentToken)}] (mode: ${agent.mode || 'ws'})`);
 
       io.to(`user_${userId}`).emit("agent_task_started", {
         messageId: assistantMessageId,
@@ -4909,7 +4930,7 @@ async function startServer() {
       const clientInfo = req.body?.clientInfo || {};
       const clientName = clientInfo.name || "LxAI-Bridge-Local";
 
-      console.log(`\x1b[32m[Agent Hub] Agent registered via HTTP [${token}] (${clientName}, mode: ${clientInfo.mode || 'polling'})\x1b[0m`);
+      console.log(`\x1b[32m[Agent Hub] Agent registered via HTTP [${maskToken(token)}] (${clientName}, mode: ${clientInfo.mode || 'polling'})\x1b[0m`);
 
       // 绑定归属；未能归属任何账号的 token 一律拒绝注册，
       // 避免"孤儿 bridge 显示已连接、但手机端永远查不到"的假在线。
@@ -5766,7 +5787,16 @@ if %errorlevel% neq 0 (
       const qid = (questionId || "").toString().trim();
       if (!qid) return res.status(400).json({ error: "缺少 questionId" });
       const pending = pendingQuestions.get(qid);
-      const targetToken = ((token || pending?.token || "") as string).trim();
+      // ⚠️ 2026-11-17（审计 #42 ⑧）：原写法是 `token || pending?.token` ——
+      // **body 的 token 优先**，于是攻击者拿自己的 token + 别人的 questionId 就能
+      // 替别人作答。改成 pending 优先，且 body 若也传了就必须一致。
+      const pendingToken = ((pending?.token || "") as string).trim();
+      const bodyToken = ((token || "") as string).trim();
+      const targetToken = pendingToken || bodyToken;
+      if (pendingToken && bodyToken && pendingToken !== bodyToken) {
+        console.warn(`\x1b[31m[Security] answer-question 越权被拒绝: body token ≠ pending token（qid=${qid}）\x1b[0m`);
+        return res.status(403).json({ error: "该问题不属于这个 Agent" });
+      }
       if (!isPlausibleAgentToken(targetToken)) {
         return res.status(401).json({ error: "无效或缺失的 Agent Token" });
       }
@@ -5982,7 +6012,14 @@ if %errorlevel% neq 0 (
     try {
       const { taskId, approvalId, action, token } = req.body;
       const pending = pendingAgentTasks.get(taskId);
-      const targetToken = (token || pending?.token || "").trim();
+      // 同 #42 ⑧：pending 的 token 优先，body 若也传了就必须一致（原写法是 body 优先，可越权审批）
+      const pendingToken = ((pending?.token || "") as string).trim();
+      const bodyToken = ((token || "") as string).trim();
+      const targetToken = pendingToken || bodyToken;
+      if (pendingToken && bodyToken && pendingToken !== bodyToken) {
+        console.warn(`\x1b[31m[Security] approve 越权被拒绝: body token ≠ pending token（taskId=${taskId}）\x1b[0m`);
+        return res.status(403).json({ error: "该任务不属于这个 Agent" });
+      }
       if (!isPlausibleAgentToken(targetToken)) {
         return res.status(401).json({ error: "无效或缺失的 Agent Token" });
       }
@@ -6092,7 +6129,14 @@ if %errorlevel% neq 0 (
         pendingAgentTasks.delete(taskId);
 
         // Notify local bridge to cancel execution
-        const targetToken = token || pending.token;
+        // 同 #42 ⑧：pending.token 优先；body 若也传了必须一致（原写法 body 优先，可越权打断）
+        const pendingToken = ((pending as any)?.token || "").toString().trim();
+        const bodyToken = ((token || "") as string).toString().trim();
+        if (pendingToken && bodyToken && pendingToken !== bodyToken) {
+          console.warn(`\x1b[31m[Security] cancel-task 越权被拒绝: body token ≠ pending token（taskId=${taskId}）\x1b[0m`);
+          return res.status(403).json({ error: "该任务不属于这个 Agent" });
+        }
+        const targetToken = pendingToken || bodyToken;
         if (!isPlausibleAgentToken(targetToken)) {
           return res.status(401).json({ error: "无效或缺失的 Agent Token" });
         }
@@ -6127,12 +6171,36 @@ if %errorlevel% neq 0 (
     }
   });
 
-  app.post("/api/agent/revoke-token", (req, res) => {
+  app.post("/api/agent/revoke-token", async (req, res) => {
     try {
-      const { oldToken } = req.body;
+      const { oldToken, userId } = req.body || {};
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ⑧ 里的 revoke-token）
+       *
+       * 原实现**没有任何身份校验**：只传一个 oldToken 就能把别人的桥接踢下线
+       * （connectedAgents.delete + 向那台电脑发 token_revoked 并 close）。
+       * 知道 token 就能 DoS 别人 —— 而 token 正是 #42 ④ 曾经全局广播的那个东西。
+       *
+       * 现在要求：① 带 x-client-session-id 通过统一身份校验；
+       * ② 该 token 的归属必须等于自称的 userId。
+       *
+       * ⚠️ 已核实没有任何调用方（App / 官网 / 桥接都不调此端点，
+       * 桥接只是「接收」token_revoked 事件）。所以收紧不会打断现有功能。
+       */
+      const claimedUserId = (userId || "").toString().trim();
+      if (!claimedUserId) {
+        return res.status(401).json({ error: "缺少 userId，无法校验归属" });
+      }
+      if (!(await verifyUserIdentity(req, res, claimedUserId, "吊销桥接凭证"))) return;
+
       if (oldToken && connectedAgents.has(oldToken)) {
         const agent = connectedAgents.get(oldToken);
         if (agent) {
+          const owner = agent.ownerUserId || (await resolveTokenOwnerUserId(oldToken));
+          if (owner && owner !== claimedUserId) {
+            console.warn(`\x1b[31m[Security] 越权吊销被拒绝: user=${claimedUserId} 试图吊销 owner=${owner} 的 Agent\x1b[0m`);
+            return res.status(403).json({ error: "该 Agent 不属于当前账号" });
+          }
           try {
             if (agent.ws && agent.ws.readyState === 1) {
               agent.ws.send(JSON.stringify({ type: "token_revoked", reason: "Token revoked by user in App settings" }));
@@ -6922,7 +6990,7 @@ if %errorlevel% neq 0 (
         return;
       }
 
-      console.log(`\x1b[32m[Agent Hub] Local Agent connected with token [${token}] (${clientName})\x1b[0m`);
+      console.log(`\x1b[32m[Agent Hub] Local Agent connected with token [${maskToken(token)}] (${clientName})\x1b[0m`);
       const agentInfo: ConnectedAgent = {
         ws: clientWs,
         token,
@@ -6951,7 +7019,7 @@ if %errorlevel% neq 0 (
             agentInfo.token = updatedToken;
             if (msg.clientInfo?.name) agentInfo.clientName = msg.clientInfo.name;
             connectedAgents.set(updatedToken, agentInfo);
-            console.log(`[Agent Hub] Agent registered with token [${updatedToken}]`);
+            console.log(`[Agent Hub] Agent registered with token [${maskToken(updatedToken)}]`);
             emitAgentStatusChange(updatedToken, true, agentInfo.ownerUserId, agentInfo.clientName);
           } else if (msg.type === "agent_step") {
             console.log(`[Agent Hub] Agent step for task ${msg.taskId}: ${msg.step}`);
@@ -7062,7 +7130,7 @@ if %errorlevel% neq 0 (
             agentInfo.workspaces = msg.workspaces || [];
             agentInfo.sessions = msg.sessions || [];
             if (msg.models) agentInfo.models = msg.models;
-            console.log(`[Agent Hub] Synced ${agentInfo.sessions.length} sessions and ${agentInfo.models?.length || 0} models for agent [${token}]`);
+            console.log(`[Agent Hub] Synced ${agentInfo.sessions.length} sessions and ${agentInfo.models?.length || 0} models for agent [${maskToken(token)}]`);
             // 同 #42 ④：按 token 归属发，不再 io.emit 全局广播（见 L5526 那处的长注释）
             const ownerSync = await resolveTokenOwnerUserId(token);
             if (ownerSync) {
@@ -7084,7 +7152,7 @@ if %errorlevel% neq 0 (
       });
 
       clientWs.on("close", () => {
-        console.log(`\x1b[33m[Agent Hub] Local Agent disconnected for token [${token}]\x1b[0m`);
+        console.log(`\x1b[33m[Agent Hub] Local Agent disconnected for token [${maskToken(token)}]\x1b[0m`);
         if (connectedAgents.get(token)?.ws === clientWs) {
           connectedAgents.delete(token);
           emitAgentStatusChange(token, false, agentInfo.ownerUserId);
