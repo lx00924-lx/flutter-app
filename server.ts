@@ -7732,7 +7732,25 @@ if %errorlevel% neq 0 (
   // 收尾上一轮进程留下的僵尸占位（否则客户端游标会永远卡在它前面 → 永久空白气泡）
   await sweepStaleGeneratingPlaceholders();
 
-  httpServer.listen(PORT, "0.0.0.0", () => {
+  /**
+   * ⚠️ 2026-11-17 安全加固（审计 #42 ⑱）── 只监听回环，不再对外网卡开放
+   *
+   * 原来 `listen(PORT, "0.0.0.0")`：**同一 WiFi 下任何设备都能直连 3000**，
+   * 完全绕过 Cloudflare。这带来两个后果：
+   *   ① 中继的全部接口在局域网里是裸奔的（包括所有需要鉴权的也起码能被探测）
+   *   ② `cf-connecting-ip` / `x-forwarded-for` 这类头**只有经真 Cloudflare 才可信**，
+   *      而直连的设备可以随便伪造 —— 按它做限流/审计的判据就失效了
+   *
+   * 依据（2026-11-18 用户提供的 Cloudflare 路由截图）：四个域名
+   * www / lm / ha / ws 全部指向 `localhost:<port>`，即 **cloudflared 与本服务同机**。
+   * 所以监听回环完全够用，公网流量照常经隧道进来。
+   *
+   * ⚠️ 风险与回滚：本机 `localhost` 同时解析到 `::1` 与 `127.0.0.1`（IPv6 优先）。
+   * 这里只听 IPv4 回环；若 cloudflared 不做 IPv4 回退，公网会立刻不可用。
+   * **判据**：改完 10 秒内 `https://www.lx00924ai.top/api/health` 必须仍返回 ok，
+   * 否则把这一行改回 `"0.0.0.0"` 重新构建重启即可（一行回滚）。
+   */
+  httpServer.listen(PORT, "127.0.0.1", () => {
     console.log(`Server running at http://0.0.0.0:${PORT}`);
   });
 }
