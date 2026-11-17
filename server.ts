@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import bcrypt from "bcryptjs";
 import nodemailer, { type Transporter } from "nodemailer";
-import { randomBytes, randomUUID, randomInt, createCipheriv, createDecipheriv } from "crypto";
+import { randomBytes, randomUUID, randomInt, createCipheriv, createDecipheriv, timingSafeEqual } from "crypto";
 import FormData from "form-data";
 import { createServer, request as httpRequest } from "http";
 import { request as httpsRequest } from "https";
@@ -3466,6 +3466,24 @@ async function startServer() {
       if (!userId || userId === "guest") {
         return res.status(401).json({ error: "缺少 userId，无法登记状态切换" });
       }
+      /**
+       * ⚠️ 2026-11-17 安全加固（审计 #42 ⑫）── 无身份校验的低代价 DoS
+       *
+       * 这个端点原来只校验「userId 非空、不是 guest」，**不验证请求方是否
+       * 真的登录着这个账号**。而它做的事是给该 userId 挂一个 20 秒的
+       * `bridgeTransitions` 标记，效果是**两端 App 的启停按钮全部置灰**，
+       * 并且 `bridge-command` 那边会因为 `activeBridgeTransition` 非空而
+       * 回 409「正在切换中」。
+       *
+       * 也就是说：知道别人的 userId（数字 id / 用户名都公开可猜）就能让
+       * 对方 20 秒内按不动桥接，还可以反复打、一直挂着。成本为零
+       * （一个 POST），症状是「按钮莫名其妙灰着、点不了」—— 用户根本想不到
+       * 是有人在远程挂着。
+       *
+       * 加统一身份校验。App 侧这个请求走 `sync_service` 的 `_dio`，
+       * 拦截器统一带 `x-user-id` + `x-client-session-id`，正常路径不受影响。
+       */
+      if (!(await verifyUserIdentity(req, res, userId, "登记桥接状态切换"))) return;
       if (!allowed.includes(command)) {
         return res.status(400).json({ error: `不支持的指令：${command}，可选 ${allowed.join(" / ")}` });
       }
@@ -4603,9 +4621,54 @@ async function startServer() {
     }
   });
   
-  app.post("/api/upload", upload.single("image"), (req, res) => {
-    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
-    res.json({ url: `/uploads/${req.file.filename}` });
+  /**
+   * ⚠️ 2026-11-17 安全加固（审计 #42 ㉒）── 无鉴权 + 扩展名不限
+   *
+   * 原实现只有两行：收文件、回 URL。于是：
+   *   ① **任何人**（含未登录）都能往 `uploads/` 写文件，单个上限 100 MB，
+   *      不需要任何凭据就能把磁盘塞满；
+   *   ② **扩展名完全不限**，而 `/uploads` 是 `express.static` 托管的 ——
+   *      传一个 `x.html` 上去，访问 `/uploads/x.html` 就是**同源 HTML**。
+   *      这不是"能跑 JS"这么简单：它和官网共用一个 origin，等于给了攻击者
+   *      一个在中继域名下发任意页面的位置（钓登录、伪造下载页）。
+   *
+   * 现在：必须带 `x-user-id` 且通过统一身份校验；multer 的 `fileFilter`
+   * 只放行图片扩展名；落盘文件名仍由 multer 随机生成（不信任 originalname）。
+   *
+   * ⚠️ 已核实 **App 端已无调用方**（`flutter_app/lib` 里搜不到 `/api/upload`），
+   * 收紧不会打断现有功能；保留端点只为兼容旧客户端。
+   */
+  const IMAGE_EXT_ALLOW = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic"]);
+  const imageOnlyUpload = multer({
+    storage,
+    limits: { fileSize: 100 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+      const ext = path.extname(String(file.originalname || "")).toLowerCase();
+      if (!IMAGE_EXT_ALLOW.has(ext)) {
+        const err: any = new Error(`不允许的文件类型：${ext || "(无扩展名)"}`);
+        err.code = "UNSUPPORTED_FILE_TYPE";
+        return cb(err);
+      }
+      return cb(null, true);
+    },
+  });
+
+  app.post("/api/upload", imageOnlyUpload.single("image"), async (req, res) => {
+    try {
+      const claimed = String(req.headers["x-user-id"] || req.body?.userId || "").trim();
+      if (!claimed) {
+        return res.status(401).json({ error: "缺少 x-user-id" });
+      }
+      if (!(await verifyUserIdentity(req, res, claimed, "上传文件"))) return;
+      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+      res.json({ url: `/uploads/${req.file.filename}` });
+    } catch (err: any) {
+      if (err?.code === "UNSUPPORTED_FILE_TYPE" || err?.code === "LIMIT_FILE_SIZE") {
+        return res.status(400).json({ error: err.message || "文件不被允许" });
+      }
+      console.error("[upload] 失败:", err?.message ?? err);
+      res.status(500).json({ error: "上传失败" });
+    }
   });
 
   /**
@@ -7705,6 +7768,327 @@ if %errorlevel% neq 0 (
     socket.on("disconnect", () => {
       console.log("Client disconnected:", socket.id);
     });
+  });
+
+  // ==========================================================================
+  // 运维面板（/admin）
+  //
+  // 为什么要有它（2026-11-17 用户提的需求）：
+  //   「给我看，运维和管理账号，算是主流那种部署无 ui 的 lumx 服务的服务器运维」
+  //   —— 他要的是 Proxmox / 1Panel 那种东西：给一个没有界面的后台服务配一个能
+  //   登进去看状态、看日志、做操作的面板。此前每次排查（桥接在不在线、隧道通不通、
+  //   有没有报错）都只能靠本机读日志文件 + 打 JSON 端点，在外面完全做不了。
+  //
+  // 设计取舍：
+  //   ① **不并入官网 Vite 构建** —— 单页 HTML 由中继直接返回，`npm run build`
+  //      产物里不新增任何东西，也不影响官网。代价是样式手写，没有组件库。
+  //   ② **必须挂在 `app.get("*")` 之前** —— 那个兜底会返回官网 index.html，
+  //      挂在后面的话 /admin 永远打不开（且不报错，只是显示官网首页）。
+  //   ③ **口令走环境变量 ADMIN_PASSWORD**，不落库、不进 git。没配就明确提示，
+  //      不静默降级成"谁都能进"。
+  //   ④ 只读优先：先能看（状态 / 日志），操作类接口等看过之后再单独加，
+  //      避免一上来就有一堆能点坏东西的按钮。
+  // ==========================================================================
+  const ADMIN_COOKIE = "lxai_admin";
+  const ADMIN_SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 小时
+  const adminSessions = new Map<string, { expiresAt: number }>();
+  const adminLoginFails = new Map<string, { count: number; lockedUntil: number }>();
+
+  /** 从 Cookie 头里取某个键（不引 cookie-parser，只要一行正则）。 */
+  const readCookie = (req: any, key: string): string => {
+    const raw = String(req.headers?.cookie || "");
+    const m = raw.match(new RegExp(`(?:^|;\\s*)${key}=([^;]*)`));
+    return m ? decodeURIComponent(m[1]) : "";
+  };
+
+  /** 取真实客户端 IP：生产经 Cloudflare，`socket.remoteAddress` 恒为 127.0.0.1。 */
+  const adminClientIp = (req: any): string => {
+    const cf = String(req.headers?.["cf-connecting-ip"] || "").trim();
+    if (cf) return cf;
+    const xff = String(req.headers?.["x-forwarded-for"] || "").split(",")[0].trim();
+    if (xff) return xff;
+    return String(req.socket?.remoteAddress || "unknown");
+  };
+
+  /** 口令比较：定长 + 常量时间，避免长度差异和逐字节比较泄露信息。 */
+  const safeEqual = (a: string, b: string): boolean => {
+    const ba = Buffer.from(a);
+    const bb = Buffer.from(b);
+    if (ba.length !== bb.length) {
+      // 长度不同也走一次等长比较，避免用耗时差异判断长度
+      timingSafeEqual(ba, ba);
+      return false;
+    }
+    return timingSafeEqual(ba, bb);
+  };
+
+  /** 鉴权：有效会话返回 true；否则直接写响应并返回 false。 */
+  const requireAdmin = (req: any, res: any): boolean => {
+    const configured = (process.env.ADMIN_PASSWORD || "").trim();
+    if (!configured) {
+      res.status(503).json({
+        error: "服务端未配置 ADMIN_PASSWORD，运维面板不可用",
+        code: "ADMIN_PASSWORD_NOT_CONFIGURED",
+      });
+      return false;
+    }
+    const token = readCookie(req, ADMIN_COOKIE);
+    if (!token) {
+      res.status(401).json({ error: "未登录" });
+      return false;
+    }
+    const sess = adminSessions.get(token);
+    if (!sess || sess.expiresAt < Date.now()) {
+      if (sess) adminSessions.delete(token);
+      res.status(401).json({ error: "登录已过期，请重新登录" });
+      return false;
+    }
+    return true;
+  };
+
+  /** 面板单页。纯静态 + 前端 fetch，样式手写（不依赖 Tailwind 构建产物）。 */
+  const ADMIN_PANEL_HTML = [
+    "<!doctype html><html lang=\"zh-CN\"><head>",
+    "<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+    "<title>LxAI 运维面板</title>",
+    "<style>",
+    ":root{--bg:#0b1220;--card:#131c2e;--line:#243149;--fg:#e6edf7;--dim:#8fa3c0;",
+    "--ok:#3ecf8e;--warn:#e8b84b;--err:#ef6b6b;--accent:#5aa9ff}",
+    "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);",
+    "font:14px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei',sans-serif}",
+    ".wrap{max-width:1100px;margin:0 auto;padding:24px 18px 60px}",
+    "h1{font-size:19px;margin:0 0 4px;font-weight:600}",
+    ".sub{color:var(--dim);font-size:12px;margin-bottom:20px}",
+    ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}",
+    ".card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}",
+    ".card h2{font-size:12px;color:var(--dim);margin:0 0 10px;font-weight:500;",
+    "text-transform:uppercase;letter-spacing:.06em}",
+    ".row{display:flex;justify-content:space-between;gap:12px;padding:3px 0;font-size:13px}",
+    ".row span:first-child{color:var(--dim)}.row span:last-child{text-align:right;word-break:break-all}",
+    ".ok{color:var(--ok)}.warn{color:var(--warn)}.err{color:var(--err)}",
+    ".dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}",
+    "pre{background:#0a0f1a;border:1px solid var(--line);border-radius:10px;padding:12px;",
+    "overflow:auto;max-height:420px;font:12px/1.55 ui-monospace,Consolas,monospace;margin:0;",
+    "white-space:pre-wrap;word-break:break-all}",
+    "button{background:var(--accent);color:#04121f;border:0;border-radius:8px;padding:9px 16px;",
+    "font-size:14px;font-weight:600;cursor:pointer}button:disabled{opacity:.5;cursor:default}",
+    "input{background:#0a0f1a;border:1px solid var(--line);border-radius:8px;color:var(--fg);",
+    "padding:10px 12px;font-size:14px;width:100%}",
+    ".login{max-width:340px;margin:14vh auto}.login .card{padding:22px}",
+    ".login h1{text-align:center;margin-bottom:6px}",
+    ".login .sub{text-align:center;margin-bottom:18px}",
+    ".field{margin-bottom:12px}.err-msg{color:var(--err);font-size:13px;min-height:20px;margin-top:10px}",
+    ".hidden{display:none}.bar{display:flex;gap:10px;align-items:center;margin:18px 0 8px}",
+    ".bar h2{font-size:13px;margin:0;color:var(--dim);font-weight:500;flex:1}",
+    ".tag{background:#1b2942;border:1px solid var(--line);border-radius:999px;padding:2px 9px;",
+    "font-size:11px;color:var(--dim)}",
+    "</style></head><body>",
+    "<div id=\"login\" class=\"login\"><div class=\"card\">",
+    "<h1>LxAI 运维面板</h1><div class=\"sub\">输入管理口令进入</div>",
+    "<div class=\"field\"><input id=\"pwd\" type=\"password\" placeholder=\"管理口令\" autocomplete=\"current-password\"></div>",
+    "<button id=\"loginBtn\" style=\"width:100%\">进入</button>",
+    "<div id=\"loginErr\" class=\"err-msg\"></div></div></div>",
+    "<div id=\"panel\" class=\"wrap hidden\">",
+    "<h1>LxAI 运维面板</h1><div class=\"sub\" id=\"meta\">加载中…</div>",
+    "<div class=\"grid\" id=\"cards\"></div>",
+    "<div class=\"bar\"><h2>最近日志</h2><span class=\"tag\" id=\"logTag\"></span>",
+    "<button id=\"refresh\" style=\"padding:5px 12px;font-size:12px\">刷新</button>",
+    "<button id=\"logout\" style=\"padding:5px 12px;font-size:12px;background:#243149;color:#8fa3c0\">退出</button></div>",
+    "<pre id=\"logs\">加载中…</pre></div>",
+    "<script>",
+    "var $=function(id){return document.getElementById(id)};",
+    "function fmtDur(s){var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);",
+    "return (d?d+' 天 ':'')+(h?h+' 小时 ':'')+m+' 分'}",
+    "function row(k,v,cls){return '<div class=\"row\"><span>'+k+'</span><span class=\"'+(cls||'')+'\">'+v+'</span></div>'}",
+    "function card(title,body){return '<div class=\"card\"><h2>'+title+'</h2>'+body+'</div>'}",
+    "function show(id){$(id).classList.remove('hidden')}function hide(id){$(id).classList.add('hidden')}",
+    "function render(st){",
+    "  $('meta').textContent='版本 '+st.relay.bootId+' · 已运行 '+fmtDur(st.relay.uptimeSec)+' · 生成于 '+new Date(st.now).toLocaleString();",
+    "  var h='';",
+    "  h+=card('中继',row('状态',(st.relay.alive?'<span class=\"dot\" style=\"background:var(--ok)\"></span>在线':'<span class=\"dot\" style=\"background:var(--err)\"></span>异常'))",
+    "    +row('监听',st.relay.listen)+row('Node',st.relay.node)+row('内存',st.relay.rssMb+' MB')+row('PID',st.relay.pid));",
+    "  var b=st.bridge;",
+    "  h+=card('桥接',b.online.length",
+    "    ? b.online.map(function(x){return row(x.token,x.sessions+' 会话 / '+x.models+' 模型','ok')}).join('')",
+    "    : row('状态','<span class=\"warn\">没有桥接在线</span>'));",
+    "  h+=card('推送通道',row('连接总数',st.push.total)+row('手机端',st.push.mobile)+row('电脑端',st.push.desktop)+row('个体会话',st.push.sessions));",
+    "  h+=card('账号与槽位',row('注册用户',st.account.users)+row('在线槽位',st.account.slots)+row('今日消息',st.account.messagesToday));",
+    "  h+=card('数据',row('消息总数',st.data.messages)+row('会话数',st.data.sessions)+row('磁盘占用',st.data.dirSizeMb+' MB'));",
+    "  $('cards').innerHTML=h;",
+    "}",
+    "function loadStatus(){",
+    "  fetch('/api/admin/status',{credentials:'same-origin'}).then(function(r){",
+    "    if(r.status===401){hide('panel');show('login');throw new Error('unauth')}",
+    "    if(!r.ok)throw new Error('HTTP '+r.status);",
+    "    return r.json()",
+    "  }).then(render).catch(function(e){if(e.message!=='unauth')$('meta').textContent='状态获取失败：'+e.message})",
+    "}",
+    "function loadLogs(){",
+    "  fetch('/api/admin/logs?lines=120',{credentials:'same-origin'}).then(function(r){",
+    "    if(!r.ok)throw new Error('HTTP '+r.status);return r.json()",
+    "  }).then(function(d){$('logs').textContent=d.text||'(空)';$('logTag').textContent=d.returned+' 行 / 共 '+d.fileLines+' 行'",
+    "  }).catch(function(e){$('logs').textContent='日志读取失败：'+e.message})",
+    "}",
+    "function enter(){hide('login');show('panel');loadStatus();loadLogs()}",
+    "$('loginBtn').onclick=function(){",
+    "  var p=$('pwd').value;if(!p){$('loginErr').textContent='请输入口令';return}",
+    "  $('loginBtn').disabled=true;$('loginErr').textContent='';",
+    "  fetch('/api/admin/login',{method:'POST',credentials:'same-origin',",
+    "    headers:{'Content-Type':'application/json'},body:JSON.stringify({password:p})})",
+    "  .then(function(r){return r.json().then(function(j){return {s:r.status,j:j}})})",
+    "  .then(function(x){$('loginBtn').disabled=false;",
+    "    if(x.s===200){$('pwd').value='';enter()}",
+    "    else $('loginErr').textContent=x.j.error||'登录失败'})",
+    "  .catch(function(e){$('loginBtn').disabled=false;$('loginErr').textContent='网络错误：'+e.message})",
+    "};",
+    "$('pwd').onkeydown=function(e){if(e.key==='Enter')$('loginBtn').click()};",
+    "$('refresh').onclick=function(){loadStatus();loadLogs()};",
+    "$('logout').onclick=function(){",
+    "  fetch('/api/admin/logout',{method:'POST',credentials:'same-origin'}).then(function(){hide('panel');show('login')})",
+    "};",
+    "fetch('/api/admin/status',{credentials:'same-origin'}).then(function(r){if(r.ok)enter()}).catch(function(){});",
+    "</script></body></html>",
+  ].join("\n");
+
+  app.get("/admin", (_req, res) => {
+    res.type("html").send(ADMIN_PANEL_HTML);
+  });
+
+  app.post("/api/admin/login", (req, res) => {
+    const configured = (process.env.ADMIN_PASSWORD || "").trim();
+    if (!configured) {
+      return res.status(503).json({
+        error: "服务端未配置 ADMIN_PASSWORD（在 .env 里加一行 ADMIN_PASSWORD=你的口令，然后重启中继）",
+        code: "ADMIN_PASSWORD_NOT_CONFIGURED",
+      });
+    }
+    const ip = adminClientIp(req);
+    const rec = adminLoginFails.get(ip);
+    if (rec && rec.lockedUntil > Date.now()) {
+      const mins = Math.ceil((rec.lockedUntil - Date.now()) / 60000);
+      return res.status(429).json({ error: `密码错误次数过多，请 ${mins} 分钟后重试` });
+    }
+    const given = String(req.body?.password ?? "");
+    if (!safeEqual(given, configured)) {
+      const cur = adminLoginFails.get(ip) || { count: 0, lockedUntil: 0 };
+      cur.count += 1;
+      // 5 次失败锁 15 分钟。按 IP 计数落内存即可：重启中继清零的代价远小于
+      // 把"管理口令被暴力尝试"无限放行的代价。
+      if (cur.count >= 5) cur.lockedUntil = Date.now() + 15 * 60 * 1000;
+      adminLoginFails.set(ip, cur);
+      console.warn(`\x1b[33m[Admin] 登录失败 ip=${ip}（累计 ${cur.count} 次）\x1b[0m`);
+      return res.status(401).json({ error: "口令不正确" });
+    }
+    adminLoginFails.delete(ip);
+    const token = randomBytes(32).toString("hex");
+    adminSessions.set(token, { expiresAt: Date.now() + ADMIN_SESSION_TTL_MS });
+    // Secure：生产走 https（Cloudflare）；开发是 http，带 Secure 浏览器会直接丢弃 cookie。
+    const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+    res.setHeader(
+      "Set-Cookie",
+      `${ADMIN_COOKIE}=${token}; HttpOnly; Path=/; SameSite=Strict; Max-Age=${Math.floor(ADMIN_SESSION_TTL_MS / 1000)}${secure}`
+    );
+    console.log(`\x1b[32m[Admin] 运维面板登录成功 ip=${ip}\x1b[0m`);
+    res.json({ success: true });
+  });
+
+  app.post("/api/admin/logout", (req, res) => {
+    const token = readCookie(req, ADMIN_COOKIE);
+    if (token) adminSessions.delete(token);
+    res.setHeader("Set-Cookie", `${ADMIN_COOKIE}=; HttpOnly; Path=/; SameSite=Strict; Max-Age=0`);
+    res.json({ success: true });
+  });
+
+  app.get("/api/admin/status", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const settingsAll = await loadSettingsFile().catch(() => ({}) as any);
+      const sessionsRaw = await safeReadJSON<any>(ACTIVE_SESSIONS_FILE, {}).catch(() => ({}) as any);
+      const msgs = await safeReadJSON<any>(MESSAGES_FILE, {}).catch(() => ({}) as any);
+
+
+      // 桥接：只报**脱敏后**的 token（与 ⑭ 的 maskToken 同一规矩）
+      const bridgeOnline: any[] = [];
+      for (const [tk, ag] of connectedAgents.entries()) {
+        bridgeOnline.push({
+          token: maskToken(tk),
+          sessions: Array.isArray((ag as any).sessions) ? (ag as any).sessions.length : 0,
+          models: Array.isArray((ag as any).models) ? (ag as any).models.length : 0,
+          clientName: (ag as any).clientName || "",
+        });
+      }
+
+      // 推送通道：按设备类型统计
+      let mobile = 0, desktop = 0;
+      for (const c of appSockets.values()) {
+        if (c.deviceType === "mobile") mobile += 1; else desktop += 1;
+      }
+
+      const slots = Object.keys(sessionsRaw || {}).length;
+      const msgCount = Array.isArray(msgs) ? msgs.length : Object.keys(msgs || {}).length;
+      // 会话数：messages_v2.json 里按 sessionId 去重。不依赖任何索引文件
+      // （原来想读 MESSAGES_INDEX_FILE，那份文件根本不存在，编译直接报错）。
+      const sessCount = Array.isArray(msgs)
+        ? new Set(msgs.map((m: any) => m?.sessionId).filter(Boolean)).size
+        : Object.keys(msgs || {}).length;
+      const dataDirSize = (() => {
+        try {
+          let total = 0;
+          for (const f of fsSync.readdirSync(DATA_DIR)) {
+            try { total += fsSync.statSync(path.join(DATA_DIR, f)).size; } catch {}
+          }
+          return Math.round((total / 1024 / 1024) * 10) / 10;
+        } catch { return 0; }
+      })();
+
+      const todayKey = new Date().toISOString().slice(0, 10);
+      let messagesToday = 0;
+      if (Array.isArray(msgs)) {
+        for (const m of msgs) {
+          const t = String(m?.createdAt || m?.timestamp || "");
+          if (t.startsWith(todayKey)) messagesToday += 1;
+        }
+      }
+
+      res.json({
+        now: Date.now(),
+        relay: {
+          alive: true,
+          bootId: SERVER_BOOT_ID,
+          uptimeSec: Math.floor(process.uptime()),
+          node: process.version,
+          pid: process.pid,
+          rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+          listen: `${PORT} (127.0.0.1)`,
+        },
+        bridge: { online: bridgeOnline, count: bridgeOnline.length },
+        push: { total: appSockets.size, mobile, desktop },
+        account: { users: Array.isArray(settingsAll) ? settingsAll.length : Object.keys(settingsAll || {}).length, slots, messagesToday },
+        data: { messages: msgCount, sessions: sessCount, dirSizeMb: dataDirSize },
+      });
+    } catch (err: any) {
+      console.error("[Admin] 状态读取失败:", err?.message ?? err);
+      res.status(500).json({ error: "状态读取失败：" + String(err?.message ?? err) });
+    }
+  });
+
+  app.get("/api/admin/logs", async (req, res) => {
+    if (!requireAdmin(req, res)) return;
+    try {
+      const want = Math.min(Math.max(Number(req.query.lines) || 120, 10), 2000);
+      const logPath = path.join(process.cwd(), "server-run.log");
+      if (!fsSync.existsSync(logPath)) {
+        return res.json({ text: "(日志文件还不存在)", returned: 0, fileLines: 0 });
+      }
+      const all = fsSync.readFileSync(logPath, "utf-8").split(/\r?\n/);
+      const tail = all.slice(Math.max(0, all.length - want));
+      // 再脱一次敏：日志里理论上已经没有完整 token（见 #42 ⑭），
+      // 但归档/轮转文件是历史遗留，这里作为最后一道保险。
+      const text = tail.join("\n").replace(/lx-[A-Za-z0-9_-]{35,}/g, (s) => `${s.slice(0, 7)}…${s.slice(-4)}`);
+      res.json({ text, returned: tail.length, fileLines: all.length });
+    } catch (err: any) {
+      res.status(500).json({ error: "日志读取失败：" + String(err?.message ?? err) });
+    }
   });
 
   // Vite integration
