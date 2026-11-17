@@ -5203,22 +5203,24 @@ async function startServer() {
       const clientInfo = req.body?.clientInfo || {};
       const clientName = clientInfo.name || "LxAI-Bridge-Local";
 
-      console.log(`\x1b[32m[Agent Hub] Agent registered via HTTP [${maskToken(token)}] (${clientName}, mode: ${clientInfo.mode || 'polling'})\x1b[0m`);
-
       // 绑定归属；未能归属任何账号的 token 一律拒绝注册，
       // 避免"孤儿 bridge 显示已连接、但手机端永远查不到"的假在线。
       //
-      // 但**中继刚启动的那几秒到几十秒**里，归属反查要读 messages_data/settings.json
-      // （本机 6.6MB）并等启动期的设置加载/密钥迁移做完，此前查不到 —— 直接 403 会让
-      // 桥接误判成"Token 已失效"（并打印"请重新扫码配对"，把用户引到错误方向）。
-      // 所以：① 重试窗口拉到约 12 秒（桥接这次注册的 HTTP 超时是 15 秒，必须留余量）；
-      //       ② 仍查不到时，若设置根本还没加载出来 → 返回 503（可重试），
-      //          只有"设置已加载、确实没有这个 token 的归属"才回 403。
+      // ⚠️ 2026-11-17 修（#42 ⑪ 收尾时发现的两个副作用）：
+      //
+      // ① **原来的 `console.log("Agent registered via HTTP")` 打在校验之前** ——
+      //    假 token 也会打这一行，日志看起来像"注册成功了"，排查时会严重误导。
+      //    移到真正登记成功之后再打。
+      //
+      // ② **原来无条件重试 12 次（每次 sleep 1 秒）** —— 那是为了熬过
+      //    「中继刚启动、settings.json（6.6MB）还没加载完」这个窗口期。
+      //    但它对**每一个查不到归属的 token** 都生效，于是未认证请求能让服务端
+      //    白挂 12 秒；并发几十个就能把中继拖住（实测：我自己用假 token 打这个
+      //    端点，10 秒超时了还没返回）。改成**先看设置加载好了没**：
+      //      · 没加载好（启动期）→ 才重试，最多 12 秒；
+      //      · 已加载好 → 立即 403，一秒都不等。
+      //    这样真桥接在启动期的体验不变，假 token 立刻被打回。
       let ownerUserId = await resolveTokenOwnerUserId(token);
-      for (let attempt = 0; !ownerUserId && attempt < 12; attempt++) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        ownerUserId = await resolveTokenOwnerUserId(token);
-      }
       if (!ownerUserId) {
         let settingsReady = false;
         try {
@@ -5228,18 +5230,30 @@ async function startServer() {
           settingsReady = false;
         }
         if (!settingsReady) {
-          console.warn("[Security] 注册暂缓：设置尚未加载完成（中继启动中），返回 503 让桥接稍后重试");
-          return res.status(503).json({
-            error: "中继正在启动中，账号归属尚未加载完成，请稍后重试",
-            transient: true,
-            retryAfterMs: 3000,
+          // 启动期：给 settings 加载留时间（桥接这次注册的 HTTP 超时是 15 秒，留 3 秒余量）
+          for (let attempt = 0; !ownerUserId && attempt < 12; attempt++) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            ownerUserId = await resolveTokenOwnerUserId(token);
+          }
+        }
+        if (!ownerUserId) {
+          if (!settingsReady) {
+            console.warn("[Security] 注册暂缓：设置尚未加载完成（中继启动中），返回 503 让桥接稍后重试");
+            return res.status(503).json({
+              error: "中继正在启动中，账号归属尚未加载完成，请稍后重试",
+              transient: true,
+              retryAfterMs: 3000,
+            });
+          }
+          console.warn(`\x1b[33m[Security] 拒绝注册：该 Token 未绑定任何账号（${maskToken(token)}）\x1b[0m`);
+          return res.status(403).json({
+            error: "该 Agent Token 未绑定任何账号，请在 App 中重新扫码配对或使用 App 显示的 Token",
           });
         }
-        console.warn("[Security] 拒绝注册：该 Token 未绑定任何账号");
-        return res.status(403).json({
-          error: "该 Agent Token 未绑定任何账号，请在 App 中重新扫码配对或使用 App 显示的 Token",
-        });
       }
+
+      // ⚠️ 日志移到归属确认之后：到这里说明这枚 token 是真的属于某个账号
+      console.log(`\x1b[32m[Agent Hub] Agent registered via HTTP [${maskToken(token)}] (${clientName}, mode: ${clientInfo.mode || 'polling'})\x1b[0m`);
       let agent = connectedAgents.get(token);
       if (!agent) {
         agent = {
