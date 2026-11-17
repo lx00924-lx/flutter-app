@@ -1766,6 +1766,12 @@ class SyncService {
   Future<BridgeCommandResult> sendBridgeCommand({
     required String userId,
     required String command,
+    /// ⚠️ 2026-11-18：`/api/agent/bridge-command` 要过 `verifyUserIdentity`。
+    /// 这个方法原本 `_dio.post` 不传 options —— **不带身份头** → 服务端 403
+    /// → 被 `catch` 兜成 `failed` → 界面显示
+    /// 「指令发送失败：请确认电脑端已安装并打开 LxAI 应用，且已登录同一账号」。
+    /// 那句文案把原因指错了方向，所以待办 #15 从 10-23 一直挂到现在都没查出真因。
+    required String clientSessionId,
   }) async {
     final cleanUserId = userId.trim();
     if (cleanUserId.isEmpty || cleanUserId == 'guest') return BridgeCommandResult.failed;
@@ -1777,6 +1783,7 @@ class SyncService {
           'command': command,
           'device': AppSettings.currentDeviceType,
         },
+        options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
       final ok = resp.statusCode == 200 && (resp.data is Map) && resp.data['success'] == true;
       return ok ? BridgeCommandResult.ok : BridgeCommandResult.failed;

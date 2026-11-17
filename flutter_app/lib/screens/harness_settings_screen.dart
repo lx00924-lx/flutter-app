@@ -382,6 +382,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         final result = await SyncService.instance.sendBridgeCommand(
           userId: sp.syncUserId,
           command: 'restart',
+          clientSessionId: sp.clientSessionId,
         );
         if (!mounted) return;
         if (result != BridgeCommandResult.ok) _releaseBridgeSwitch();
@@ -443,6 +444,7 @@ class _HarnessSettingsScreenState extends State<HarnessSettingsScreen> {
         final result = await SyncService.instance.sendBridgeCommand(
           userId: sp.syncUserId,
           command: command,
+          clientSessionId: sp.clientSessionId,
         );
         if (!mounted) return;
         // 指令只是"排上队"，要等电脑端执行 + 轮询回传，状态才算真的变。
