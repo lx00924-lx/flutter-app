@@ -36,6 +36,20 @@ class _TextSelectionModalState extends State<TextSelectionModal> {
     super.dispose();
   }
 
+  /// 只返回**真正选中的那段**；没选中时返回 null。
+  ///
+  /// ⚠️ 2026-11-18：和 `_getSelectedText` 分开是有意的 —— 那个方法在没选中时
+  /// 兜底返回**全文**（给工具栏的「朗读/引用」用，选了才点得到，兜底合理）。
+  /// 但底部那个按钮要区分「用户到底选没选」，用兜底值就分不出来了。
+  String? get _selectionOnly {
+    final sel = _currentSelection;
+    if (sel != null && sel.isValid && !sel.isCollapsed) {
+      final text = sel.textInside(widget.message.content);
+      if (text.trim().isNotEmpty) return text;
+    }
+    return null;
+  }
+
   String _getSelectedText([EditableTextState? editableTextState]) {
     // 优先从 EditableTextState 获取真实高亮选区
     if (editableTextState != null) {
@@ -112,7 +126,16 @@ class _TextSelectionModalState extends State<TextSelectionModal> {
                         color: isDark ? const Color(0xFFF1F5F9) : const Color(0xFF0F172A),
                       ),
                       onSelectionChanged: (selection, cause) {
+                        // ⚠️ 2026-11-18：这里原来只赋值、**没有 setState**，
+                        // 所以底部按钮的文案根本不会跟着选区变。
+                        // 只在「有选区 ⇄ 没选区」切换时才重建，拖动过程中
+                        // 光标每动一个字都 setState 会白白重建整个弹窗。
+                        final hadSelection = _currentSelection != null &&
+                            _currentSelection!.isValid &&
+                            !_currentSelection!.isCollapsed;
+                        final hasSelection = selection.isValid && !selection.isCollapsed;
                         _currentSelection = selection;
+                        if (hadSelection != hasSelection) setState(() {});
                       },
                       contextMenuBuilder: (context, editableTextState) {
                         final buttonItems = [
@@ -181,12 +204,18 @@ class _TextSelectionModalState extends State<TextSelectionModal> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.end,
                 children: [
+                  // ⚠️ 2026-11-18：**有选中就只读选中的**。
+                  // 原来不管选没选都读全文、文案也写死「全部朗读」——
+                  // 用户选了半句再点，读的还是整条，文案也没告诉他。
                   OutlinedButton.icon(
                     icon: const Icon(Icons.volume_up_outlined, size: 16),
-                    label: const Text('全部朗读'),
+                    label: Text(_selectionOnly != null ? '朗读所选' : '全部朗读'),
                     onPressed: () {
                       context.read<SettingsProvider>().setAutoSpeakResponse(true);
-                      TtsService.instance.speak(widget.message.content, settings);
+                      TtsService.instance.speak(
+                        _selectionOnly ?? widget.message.content,
+                        settings,
+                      );
                     },
                   ),
                   const SizedBox(width: 8),
