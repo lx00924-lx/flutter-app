@@ -181,6 +181,27 @@ class TtsService {
 
   /// 过滤 Markdown 标记与代码块，生成自然口语朗读文本
   String _cleanMarkdownForSpeech(String text) {
+    /**
+     * ⚠️ 2026-11-18：整体兜底 try/catch。
+     *
+     * 教训：上一版在这里用了 `(?m)` 内联标志写正则，而 **Dart 的 RegExp 不支持它**
+     * （只认 `multiLine: true` 命名参数）—— 于是每次朗读都抛
+     * `FormatException: Invalid group`。这个异常从 `speak()` 一路冒到调用方，
+     * 把 `await` 打断，UI 永久停在「正在播报试听」，两端都表现为「没声音、
+     * 也不报错」，查了很久才落到这里。
+     *
+     * 清理失败本身不该让整条朗读失败 —— 原文直接拿去念，最坏是念出几个符号，
+     * 也比彻底没声、界面卡死强。
+     */
+    try {
+      return _doCleanMarkdownForSpeech(text);
+    } catch (e) {
+      debugPrint('[Tts] 清理 Markdown 失败，退回原文: $e');
+      return text.trim();
+    }
+  }
+
+  String _doCleanMarkdownForSpeech(String text) {
     String t = text;
     // 去除代码块 ```...```
     t = t.replaceAll(RegExp(r'```[\s\S]*?```'), ' [代码块省略] ');
@@ -194,8 +215,8 @@ class TtsService {
     // 去除链接 [text](url) -> text
     t = t.replaceAllMapped(RegExp(r'\[([^\]]+)\]\([^)]+\)'), (m) => m[1] ?? '');
     // 列表符号 / 引用符 / 分隔线 / 表格竖线 —— 这些也会被逐字朗读出来
-    t = t.replaceAll(RegExp(r'(?m)^[ \t]{0,3}[-*+][ \t]+'), '');
-    t = t.replaceAll(RegExp(r'(?m)^[ \t]{0,3}>[ \t]?'), '');
+    t = t.replaceAll(RegExp(r'^[ \t]{0,3}[-*+][ \t]+', multiLine: true), '');
+    t = t.replaceAll(RegExp(r'^[ \t]{0,3}>[ \t]?', multiLine: true), '');
     // ⚠️ 2026-11-18：分隔线清理踩了两个坑，都记在这儿别再犯：
     //
     // ① 最初写成 `^\s*([-*_])\s*\1\s*\1[\s\-*_]*$` —— 三个 `\s*` 叠加，
@@ -205,7 +226,7 @@ class TtsService {
     //    然后失败回溯，每个行首重试一遍，复杂度 O(n²)。
     //
     // 现在一律用 `[ \t]`（**不含换行**），只在本行内匹配。
-    t = t.replaceAll(RegExp(r'(?m)^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$'), '');
+    t = t.replaceAll(RegExp(r'^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$', multiLine: true), '');
     t = t.replaceAll('|', '，');
     // 去除多余空行
     t = t.replaceAll(RegExp(r'\n+'), '，');
