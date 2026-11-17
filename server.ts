@@ -1942,7 +1942,16 @@ async function runServerSideGeneration({
     }
 
     const apiEndpoint = settings?.apiEndpoint?.trim();
-    const apiKey = settings?.apiKey || process.env.GEMINI_API_KEY || "";
+    /**
+     * ⚠️ 2026-11-17（审计 #42 ⑥）：**不再回退到服务端的 GEMINI_API_KEY**。
+     *
+     * 原写法 `settings?.apiKey || process.env.GEMINI_API_KEY || ""` 意味着：
+     * 只要请求方不传 key，服务端就用自己的 key 替他生成 —— 谁都能白嫖。
+     * 现在没有配置这个环境变量（生产 .env 里没有），所以影响为零；
+     * 但**一旦哪天为了别的功能配上它**，这条回退会立刻变成一个白嫖入口。
+     * 直接用空串：客户端不传 key 就走"未配置主模型 Key"的既有降级路径。
+     */
+    const apiKey = settings?.apiKey || "";
     const modelName = settings?.modelName;
     const systemInstruction = settings?.systemInstruction;
     let contextLength = settings?.contextLength || 30000;
@@ -3826,6 +3835,33 @@ async function startServer() {
     if (!assistantMessageId || !Array.isArray(messages)) {
       return res.status(400).json({ error: "Invalid parameters" });
     }
+    /**
+     * ⚠️ 2026-11-17 安全加固（审计 #42 ⑥）── 无鉴权 + SSRF
+     *
+     * 原来这里**不做任何身份校验**：`userId` 直接取自请求体、取不到就当 `guest`。
+     * 两个后果：
+     *   ① 未登录的任意人能让服务端起一轮"服务端生成"（白嫖算力与出口带宽）；
+     *   ② `settings.apiEndpoint` **完全由请求方指定**，服务端会照着它去
+     *      `fetch(<endpoint>/chat/completions)` —— 这是标准 SSRF，
+     *      可以打内网、打云元数据（`169.254.169.254`）。
+     *
+     * 这里做两层：身份必须真实（拒绝方向），地址必须过 `ssrfViolation`
+     * （与 ASR 代理同一套判据：只放行 http/https、内网/回环/链路本地一律拒、
+     * 私有地址只能用 `ASR_ALLOWED_HOSTS` 显式声明）。
+     */
+    const claimedUserId = String(userId || "").trim();
+    if (!claimedUserId || claimedUserId === "guest") {
+      return res.status(401).json({ error: "缺少 userId" });
+    }
+    if (!(await verifyUserIdentity(req, res, claimedUserId, "服务端生成"))) return;
+    const endpointToCheck = String(settings?.apiEndpoint || "").trim();
+    if (endpointToCheck) {
+      const ssrfReason = await ssrfViolation(endpointToCheck);
+      if (ssrfReason) {
+        console.warn(`\x1b[31m[Security] chat/generate 的 apiEndpoint 被 SSRF 规则拒绝: ${ssrfReason}（user=${claimedUserId}）\x1b[0m`);
+        return res.status(400).json({ error: `API 地址不被允许：${ssrfReason}`, code: "INVALID_API_ENDPOINT" });
+      }
+    }
     
     // Start asynchronous generation in the background
     runServerSideGeneration({
@@ -3946,6 +3982,20 @@ async function startServer() {
     const { userId = "guest", assistantMessageId, messages, settings, images } = req.body;
     if (!assistantMessageId || !Array.isArray(messages)) {
       return res.status(400).json({ error: "Invalid parameters" });
+    }
+    // 同 ⑥：身份 + 目标地址两道（见 chat/generate 处的长注释）
+    const claimedStreamUser = String(userId || "").trim();
+    if (!claimedStreamUser || claimedStreamUser === "guest") {
+      return res.status(401).json({ error: "缺少 userId" });
+    }
+    if (!(await verifyUserIdentity(req, res, claimedStreamUser, "流式生成"))) return;
+    const streamEndpoint = String(settings?.apiEndpoint || "").trim();
+    if (streamEndpoint) {
+      const ssrfReason = await ssrfViolation(streamEndpoint);
+      if (ssrfReason) {
+        console.warn(`\x1b[31m[Security] chat/stream 的 apiEndpoint 被 SSRF 规则拒绝: ${ssrfReason}（user=${claimedStreamUser}）\x1b[0m`);
+        return res.status(400).json({ error: `API 地址不被允许：${ssrfReason}`, code: "INVALID_API_ENDPOINT" });
+      }
     }
 
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -4644,11 +4694,12 @@ async function startServer() {
     limits: { fileSize: 100 * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
       const ext = path.extname(String(file.originalname || "")).toLowerCase();
-      if (!IMAGE_EXT_ALLOW.has(ext)) {
-        const err: any = new Error(`不允许的文件类型：${ext || "(无扩展名)"}`);
-        err.code = "UNSUPPORTED_FILE_TYPE";
-        return cb(err);
-      }
+      // ⚠️ 这里刻意 **不** 用 `cb(new Error(...))`：multer 的错误会绕过本路由的
+      // try/catch、落到 express 的默认错误处理器上，客户端拿到的是 500 + 一页 HTML。
+      // 用 `cb(null, false)` 表示"这个文件我不收"，让请求继续走到 handler，
+      // 由下面统一返回 400 + JSON —— 客户端能读懂，日志也不会被 500 污染。
+      // 安全效果完全一样：文件根本不会落盘。
+      if (!IMAGE_EXT_ALLOW.has(ext)) return cb(null, false);
       return cb(null, true);
     },
   });
@@ -4660,7 +4711,12 @@ async function startServer() {
         return res.status(401).json({ error: "缺少 x-user-id" });
       }
       if (!(await verifyUserIdentity(req, res, claimed, "上传文件"))) return;
-      if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+      if (!req.file) {
+        return res.status(400).json({
+          error: "未收到文件，或文件类型不在允许范围内（只收图片：png/jpg/jpeg/webp/gif/bmp/heic）",
+          code: "NO_VALID_FILE",
+        });
+      }
       res.json({ url: `/uploads/${req.file.filename}` });
     } catch (err: any) {
       if (err?.code === "UNSUPPORTED_FILE_TYPE" || err?.code === "LIMIT_FILE_SIZE") {
