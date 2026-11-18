@@ -64,10 +64,36 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
       _turnPhase = TurnPhase.idle;
       // 一轮结束 = Agent 回话了：托盘图标该提示"有新的 Agent 回复"
       _markAgentUnread();
+      _generatingMessageId = null;
       scheduleMicrotask(_dispatchNextQueued);
     } else if (!was && value) {
       _turnPhase = TurnPhase.polishing;
+      _generatingMessageId = _lastStreamingAssistantId();
     }
+  }
+
+  /// 这一轮正在生成的那条 assistant 消息 id。
+  ///
+  /// 开轮时由 [_isGenerating] 的 setter 自动记下（三处开轮的形状都是
+  /// 「先 `_messages.add(assistantMsg)` 再 `_isGenerating = true`，此刻列表末尾就是它），
+  /// 一轮结束时清空。
+  ///
+  /// 用途只有一个：App 回到前台时拿它去云端核对「这一轮到底跑完没有」。
+  ///
+  /// ⚠️ 为什么不能用计时判断：用户 2026-11-18 明确说过有计划任务会跑**几小时**，
+  /// 客户端计时定短了会把好任务判死。判据必须是服务端说了什么 —— 服务端开轮时
+  /// 就落盘一条 `status='generating'` 的空占位，跑完**原地覆盖**成最终答案
+  /// （见 `sync_service.dart` L941-952 的注释），所以「那条占位还是不是 generating」
+  /// 就是最准的答案。
+  String? _generatingMessageId;
+
+  /// 取"这一轮正在生成的那条 assistant 消息 id"（列表末尾往回找第一条流式中的）。
+  String? _lastStreamingAssistantId() {
+    for (var i = _messages.length - 1; i >= 0; i--) {
+      final m = _messages[i];
+      if (m.role == MessageRole.assistant && m.isStreaming) return m.id;
+    }
+    return null;
   }
   StreamSubscription? _streamSub;
   CancelToken? _cancelToken;
@@ -587,8 +613,60 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      if (!_isGenerating) _silentSyncFromServer();
+      if (_isGenerating) {
+        // 还停在「生成中」：先去云端核对这一轮到底跑完没有。
+        //
+        // 卡死的形状（用户 2026-10-24、2026-11-18 两次实测）：流断了
+        // （顶号 / 切后台被杀 / 网络断）但 `done` 没到 → 标志位永远是 true →
+        // 这里原本的 `if (!_isGenerating)` 过不去 → 界面永久停在
+        // 「正在深度思考中」，只有杀进程能救。
+        unawaited(_reconcileGeneratingTurn());
+      } else {
+        _silentSyncFromServer();
+      }
     }
+  }
+
+  /// 「生成中」回到前台时，核对这一轮是否已经在服务端跑完了。
+  ///
+  /// 判据完全来自服务端，**不是计时**：拉一轮之后，本地那条同 id 的占位会被
+  /// 「云端更长就覆盖」这条规则更新（`sync_service.dart` L890），于是
+  /// `status` 和 `content` 都会反映服务端的真实进度。
+  ///
+  /// · 还是 `generating` / 内容还是空 → **保持生成中**（几小时的长任务照等，不误杀）
+  /// · 已 `completed` 且有正文 → **收口**：清标志（setter 会顺带归阶段、推进排队队列），
+  ///   再用落盘后的消息刷一次列表
+  Future<void> _reconcileGeneratingTurn() async {
+    final targetId = _generatingMessageId;
+    if (targetId == null || targetId.isEmpty) {
+      // 拿不到 id（理论上不该发生）→ 退回普通同步，至少把界面推起来
+      _silentSyncFromServer();
+      return;
+    }
+    try {
+      await SyncService.instance.pullAndMergeMessages(
+        userId: settingsProvider.syncUserId,
+        clientSessionId: settingsProvider.clientSessionId,
+      );
+    } catch (_) {
+      return; // 拉不到就维持现状，下次回前台再试
+    }
+    final sid = _currentSession?.id;
+    if (sid == null) return;
+    // 直接读落盘结果：回调里的 `if (_isGenerating) return` 只挡界面刷新，不挡写盘
+    final matched = _storage
+        .getMessagesForSession(sid)
+        .where((m) => m.id == targetId)
+        .toList();
+    if (matched.isEmpty) return;
+    final m = matched.first;
+    final finished = m.status != 'generating' && m.content.trim().isNotEmpty;
+    if (!finished) return; // 服务端还在跑 → 什么都不动
+
+    _generatingMessageId = null;
+    _isGenerating = false; // setter 收口：阶段归 idle、标未读、推进排队队列
+    _messages = _storage.getMessagesForSession(sid);
+    notifyListeners();
   }
 
   /// 来自推送长连接的事件（消息 / 审批）
@@ -638,7 +716,8 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
             if (data['messageId'] != null) 'messageId': data['messageId'],
           });
         }
-        return;      case 'agent_approval_resolved':
+        return;
+      case 'agent_approval_resolved':
         dismissApproval();
         return;
       case 'agent_question':
