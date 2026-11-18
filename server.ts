@@ -386,6 +386,26 @@ const saveSettingsFile = async (allSettings: Record<string, any>): Promise<void>
   }
 };
 
+// ==================== 消息 / 会话的统一读写入口（第二期第一步） ====================
+//
+// 为什么先加这一层：`MESSAGES_FILE` 现在有 13 处读、12 处写，`SESSIONS_FILE` 有 3 读 2 写，
+// 全是各自直接摸文件。第二期要把它们换成 SQLite，就得先把这些口子收成 4 个函数 ——
+// 否则又是一次「改 15 处、错一处就丢聊天记录」。
+//
+// ⚠️ 这一步**行为完全不变**：内部仍然读写 JSON 文件，`safeReadJSON` / `safeWriteJSON`
+// 的默认值与原来一致。第二步才把内部换成 SQLite，那时这 15 个调用点一行都不用再动。
+const loadMessages = async (): Promise<Record<string, any[]>> =>
+  safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+
+const saveMessages = async (all: Record<string, any[]>): Promise<void> =>
+  safeWriteJSON(MESSAGES_FILE, all);
+
+const loadSessions = async (): Promise<Record<string, any[]>> =>
+  safeReadJSON<Record<string, any[]>>(SESSIONS_FILE, {});
+
+const saveSessions = async (all: Record<string, any[]>): Promise<void> =>
+  safeWriteJSON(SESSIONS_FILE, all);
+
 /**
  * 检查一条**未解密**的原始设置记录里，是否还有明文密钥字段。
  *
@@ -465,7 +485,7 @@ const retentionSweep = async (): Promise<void> => {
     let removed = 0;
     try {
       await withFileLock(MESSAGES_FILE, async () => {
-        const all = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+        const all = await loadMessages();
         for (const uid of Object.keys(all)) {
           const list = Array.isArray(all[uid]) ? all[uid] : [];
           const kept = list.filter((msg) => {
@@ -476,7 +496,7 @@ const retentionSweep = async (): Promise<void> => {
           removed += list.length - kept.length;
           all[uid] = kept;
         }
-        await safeWriteJSON(MESSAGES_FILE, all);
+        await saveMessages(all);
       });
       if (removed > 0) {
         console.log(`[Retention] 已清理 ${removed} 条超过 ${MESSAGE_RETENTION_DAYS} 天的消息`);
@@ -1608,14 +1628,14 @@ const pendingAgentTasks = new Map<string, {
 async function upsertMessage(userId: string, message: any) {
   if (!userId || userId === 'guest') return;
   await withFileLock(MESSAGES_FILE, async () => {
-    const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+    const allMessages = await loadMessages();
     if (!allMessages[userId]) allMessages[userId] = [];
     const list = allMessages[userId];
     const idx = list.findIndex((m: any) => m.id === message.id);
     if (idx === -1) {
       list.push(message);
       allMessages[userId] = list;
-      await safeWriteJSON(MESSAGES_FILE, allMessages);
+      await saveMessages(allMessages);
       return;
     }
 
@@ -1640,13 +1660,13 @@ async function upsertMessage(userId: string, message: any) {
       list.splice(idx, 1);
       list.push(merged);
       allMessages[userId] = list;
-      await safeWriteJSON(MESSAGES_FILE, allMessages);
+      await saveMessages(allMessages);
       return;
     }
 
     list[idx] = { ...prev, ...message };
     allMessages[userId] = list;
-    await safeWriteJSON(MESSAGES_FILE, allMessages);
+    await saveMessages(allMessages);
   });
 }
 
@@ -1663,7 +1683,7 @@ async function upsertMessage(userId: string, message: any) {
  */
 async function sweepStaleGeneratingPlaceholders() {
   try {
-    const all = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+    const all = await loadMessages();
     let fixed = 0;
     const fixedIds: string[] = [];
     for (const [userId, list] of Object.entries(all)) {
@@ -1681,7 +1701,7 @@ async function sweepStaleGeneratingPlaceholders() {
       }
     }
     if (fixed > 0) {
-      await safeWriteJSON(MESSAGES_FILE, all);
+      await saveMessages(all);
       console.log(`[Startup] 收尾 ${fixed} 条卡在 generating 的残留占位（例：${fixedIds.join(", ")}）`);
     }
   } catch (err: any) {
@@ -1693,7 +1713,7 @@ async function sweepStaleGeneratingPlaceholders() {
 async function findMessageById(userId: string, messageId: string): Promise<any | undefined> {
   if (!userId || userId === 'guest' || !messageId) return undefined;
   try {
-    const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+    const allMessages = await loadMessages();
     return (allMessages[userId] || []).find((m: any) => m?.id === messageId);
   } catch {
     return undefined;
@@ -2495,7 +2515,7 @@ async function ensureDirs() {
 
     // Clean any orphan messages (messages with empty or missing sessionId)
     await withFileLock(MESSAGES_FILE, async () => {
-      const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+      const allMessages = await loadMessages();
       let changed = false;
       for (const uid of Object.keys(allMessages)) {
         const msgs = allMessages[uid];
@@ -2508,7 +2528,7 @@ async function ensureDirs() {
         }
       }
       if (changed) {
-        await safeWriteJSON(MESSAGES_FILE, allMessages);
+        await saveMessages(allMessages);
         console.log(`[Data Sanitizer] Purged orphan messages without valid sessionId from server storage.`);
       }
     });
@@ -3761,7 +3781,7 @@ async function startServer() {
       `[MSG-PULL] user=${req.params.userId} afterSeq=${String((req.query.afterSeq as string | undefined) ?? "(full)")}`,
     );
     try {
-      const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+      const allMessages = await loadMessages();
       const userMsgs = (allMessages[req.params.userId] || []).filter(
         (m: any) => m && m.id && m.sessionId && m.sessionId.toString().trim() !== ''
       );
@@ -3809,7 +3829,7 @@ async function startServer() {
     if (!(await verifyUserIdentity(req, res, userId, "写入消息"))) return;
     try {
       await withFileLock(MESSAGES_FILE, async () => {
-        const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+        const allMessages = await loadMessages();
         if (!allMessages[userId]) allMessages[userId] = [];
         // Only accept messages with a valid sessionId
         const validIncoming = (messages || []).filter(
@@ -3819,7 +3839,7 @@ async function startServer() {
         const uniqueMessages = Array.from(new Map(newMessages.map(m => [m.id, m])).values())
           .filter((m: any) => m && m.id && m.sessionId && m.sessionId.toString().trim() !== '');
         allMessages[userId] = uniqueMessages;
-        await safeWriteJSON(MESSAGES_FILE, allMessages);
+        await saveMessages(allMessages);
       });
       res.json({ success: true });
     } catch (error) {
@@ -3837,7 +3857,7 @@ async function startServer() {
     // 会话表拉取诊断：和 [MSG-PULL] 配对看，才能分清"另一端没拉"还是"拉了但没采用"。
     console.log(`[SESS-PULL] user=${req.params.userId}`);
     try {
-      const allSessions = await safeReadJSON<Record<string, any[]>>(SESSIONS_FILE, {});
+      const allSessions = await loadSessions();
       const list = (allSessions[req.params.userId] || []).filter(
         (s: any) => s && typeof s.id === "string" && s.id.trim() !== ""
       );
@@ -3852,7 +3872,7 @@ async function startServer() {
     if (!(await verifyUserIdentity(req, res, userId, "写入会话列表"))) return;
     try {
       await withFileLock(SESSIONS_FILE, async () => {
-        const allSessions = await safeReadJSON<Record<string, any[]>>(SESSIONS_FILE, {});
+        const allSessions = await loadSessions();
         if (!allSessions[userId]) allSessions[userId] = [];
         const incoming = (sessions || []).filter(
           (s: any) => s && typeof s.id === "string" && s.id.trim() !== ""
@@ -3875,7 +3895,7 @@ async function startServer() {
           if (nextAt >= prevAt) byId.set(s.id, s);
         }
         allSessions[userId] = Array.from(byId.values());
-        await safeWriteJSON(SESSIONS_FILE, allSessions);
+        await saveSessions(allSessions);
       });
       // 通知这个账号的其它设备："会话表变了，来对一次账"。
       //
@@ -3902,10 +3922,10 @@ async function startServer() {
     if (!(await verifyUserIdentity(req, res, userId, "删除消息"))) return;
     try {
       await withFileLock(MESSAGES_FILE, async () => {
-        const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+        const allMessages = await loadMessages();
         if (allMessages[userId]) {
           allMessages[userId] = allMessages[userId].filter((m: any) => m.id !== messageId);
-          await safeWriteJSON(MESSAGES_FILE, allMessages);
+          await saveMessages(allMessages);
         }
       });
       io.to(`user_${userId}`).emit("message_deleted", messageId);
@@ -3927,23 +3947,23 @@ async function startServer() {
     if (!(await verifyUserIdentity(req, res, userId, "删除会话"))) return;
     try {
       await withFileLock(MESSAGES_FILE, async () => {
-        const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+        const allMessages = await loadMessages();
         if (allMessages[userId]) {
           allMessages[userId] = allMessages[userId].filter(
             (m: any) => m && m.sessionId && m.sessionId.toString().trim() !== cleanSessionId
           );
-          await safeWriteJSON(MESSAGES_FILE, allMessages);
+          await saveMessages(allMessages);
         }
       });
       // 会话元数据必须一起删：只删消息的话，另一台设备下次拉会话表还能看到它，
       // 于是"删掉的会话过一会儿又冒回来了"，且是个点进去空空如也的空壳。
       await withFileLock(SESSIONS_FILE, async () => {
-        const allSessions = await safeReadJSON<Record<string, any[]>>(SESSIONS_FILE, {});
+        const allSessions = await loadSessions();
         if (allSessions[userId]) {
           allSessions[userId] = allSessions[userId].filter(
             (s: any) => !(s && s.id && s.id.toString().trim() === cleanSessionId)
           );
-          await safeWriteJSON(SESSIONS_FILE, allSessions);
+          await saveSessions(allSessions);
         }
       });
       // Broadcast session deletion to all connected devices of this user
@@ -4001,7 +4021,7 @@ async function startServer() {
   // REST API for active session IDs of a user
   app.get("/api/active-sessions/:userId", async (req, res) => {    if (!(await verifyUserIdentity(req, res, req.params.userId, "读取会话编号"))) return;
     try {
-      const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+      const allMessages = await loadMessages();
       const userMessages = allMessages[req.params.userId] || [];
       const sessionIds = Array.from(new Set(userMessages.map((m: any) => m.sessionId).filter(Boolean)));
       res.json({ sessionIds });
@@ -8034,10 +8054,10 @@ if %errorlevel% neq 0 (
       try {
         if (userId !== "guest") { // Only store for non-guests
           await withFileLock(MESSAGES_FILE, async () => {
-            const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+            const allMessages = await loadMessages();
             if (!allMessages[userId]) allMessages[userId] = [];
             allMessages[userId].push(message);
-            await safeWriteJSON(MESSAGES_FILE, allMessages);
+            await saveMessages(allMessages);
           });
         }
         
@@ -8070,10 +8090,10 @@ if %errorlevel% neq 0 (
     socket.on("delete_message", async ({ userId, messageId }) => {
       try {
         await withFileLock(MESSAGES_FILE, async () => {
-          const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+          const allMessages = await loadMessages();
           if (allMessages[userId]) {
             allMessages[userId] = allMessages[userId].filter((m: any) => m.id !== messageId);
-            await safeWriteJSON(MESSAGES_FILE, allMessages);
+            await saveMessages(allMessages);
           }
         });
         io.to(`user_${userId}`).emit("message_deleted", messageId);
@@ -8087,7 +8107,7 @@ if %errorlevel% neq 0 (
       try {
         let updatedUserMessages: any[] = [];
         await withFileLock(MESSAGES_FILE, async () => {
-          const allMessages = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+          const allMessages = await loadMessages();
           if (!allMessages[userId]) {
             console.log(`[Socket] No messages found for user: ${userId}`);
             return;
@@ -8113,7 +8133,7 @@ if %errorlevel% neq 0 (
             });
           }
           
-          await safeWriteJSON(MESSAGES_FILE, allMessages);
+          await saveMessages(allMessages);
           updatedUserMessages = allMessages[userId];
         });
 
@@ -8397,7 +8417,7 @@ if %errorlevel% neq 0 (
     try {
       const settingsAll = await loadSettingsFile().catch(() => ({}) as any);
       const sessionsRaw = await safeReadJSON<any>(ACTIVE_SESSIONS_FILE, {}).catch(() => ({}) as any);
-      const msgs = await safeReadJSON<any>(MESSAGES_FILE, {}).catch(() => ({}) as any);
+      const msgs = await loadMessages().catch(() => ({}) as any);
 
 
       // 桥接：只报**脱敏后**的 token（与 ⑭ 的 maskToken 同一规矩）
