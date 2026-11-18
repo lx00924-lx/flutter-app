@@ -3498,22 +3498,107 @@ async function startServer() {
         await writeStore(USERS_FILE, kept);
       });
 
-      // 2) 以账号名为顶层键的数据文件
-      const targets: Array<[string, string]> = [
-        [MESSAGES_FILE, "messages"],
-        [SESSIONS_FILE, "chatSessions"],
-        [SETTINGS_FILE, "settings"],
-        [ACTIVE_SESSIONS_FILE, "sessions"],
-      ];
-      for (const [file, label] of targets) {
-        await withFileLock(file, async () => {
-          const obj = await safeReadJSON<Record<string, any>>(file, {});
-          if (obj && Object.prototype.hasOwnProperty.call(obj, username)) {
-            delete obj[username];
-            removed[label] = 1;
-            await safeWriteJSON(file, obj);
+      // 2) 以账号名为顶层键的数据
+      //
+      // ⚠️ 2026-11-18 修（真实 bug）：这一段原本是 `safeReadJSON` + `safeWriteJSON` ——
+      // **直接读写 JSON 文件**。但同一天存储已迁进 SQLite（settings / sessions /
+      // messages / kv 四张表），那些 JSON 原文件只作为迁移源保留、**不再被任何
+      // 读取路径使用**。后果是：注销改的是没人读的副本，**库里那几行一行没删** ——
+      // 账号提示"注销成功"，聊天记录、会话、设置却全都还在库里。
+      //
+      // 改法：三个独立表各走各自的专用入口。**不能一把梭用 `readStore`** ——
+      // messages.json / sessions.json / settings.json 不在 `KV_FILE_NAMES` 里，
+      // `readStore` 对它们仍然会去读文件（只有 active_sessions 在 kv 表里）。
+      //
+      // 顺序有讲究：**先从设置里抓下这个账号的图片引用，再删设置** ——
+      // 三张图已拆成 settings_media/ 下的独立文件，删完设置就再也查不到引用了。
+      const accountMediaRefs = new Set<string>();
+      try {
+        const before = (await loadSettingsFile())[username];
+        if (before && typeof before === "object") {
+          for (const field of MEDIA_FIELDS) {
+            const v = (before as any)[field];
+            if (typeof v === "string" && v.startsWith(MEDIA_REF_PREFIX)) {
+              accountMediaRefs.add(v.slice(MEDIA_REF_PREFIX.length));
+            }
           }
-        });
+        }
+      } catch (err: any) {
+        console.warn("[DeleteAccount] 读取设置图片引用失败（图片文件可能残留）:", err?.message ?? err);
+      }
+
+      // 2a) 消息
+      await withFileLock(MESSAGES_FILE, async () => {
+        const all = await loadMessages();
+        if (Object.prototype.hasOwnProperty.call(all, username)) {
+          delete all[username];
+          removed.messages = 1;
+          await saveMessages(all);
+        }
+      });
+
+      // 2b) 会话表
+      await withFileLock(SESSIONS_FILE, async () => {
+        const all = await loadSessions();
+        if (Object.prototype.hasOwnProperty.call(all, username)) {
+          delete all[username];
+          removed.chatSessions = 1;
+          await saveSessions(all);
+        }
+      });
+
+      // 2c) 设置（图片引用已在上面的 accountMediaRefs 里留了一份）
+      await withFileLock(SETTINGS_FILE, async () => {
+        const all = await loadSettingsFile();
+        if (Object.prototype.hasOwnProperty.call(all, username)) {
+          delete all[username];
+          removed.settings = 1;
+          await saveSettingsFile(all);
+        }
+      });
+
+      // 2d) 登录槽位（这份在 kv 表里，readStore / writeStore 会自动路由到库）
+      await withFileLock(ACTIVE_SESSIONS_FILE, async () => {
+        const all = await readStore<Record<string, any>>(ACTIVE_SESSIONS_FILE, {});
+        if (all && Object.prototype.hasOwnProperty.call(all, username)) {
+          delete all[username];
+          removed.sessions = 1;
+          await writeStore(ACTIVE_SESSIONS_FILE, all);
+        }
+      });
+
+      // 2e) 清掉这个账号设置里的图片文件
+      //
+      // 文件名是**内容哈希**（不含用户信息），所以不能扫到就删 ——
+      // 得先确认没有别的账号还在引用它。2c 已把这个账号的设置删掉，
+      // 因此现在读到的剩余设置就是"还有谁在用"。
+      if (accountMediaRefs.size > 0) {
+        try {
+          const rest = await loadSettingsFile();
+          const stillUsed = new Set<string>();
+          for (const rec of Object.values(rest)) {
+            if (!rec || typeof rec !== "object") continue;
+            for (const field of MEDIA_FIELDS) {
+              const v = (rec as any)[field];
+              if (typeof v === "string" && v.startsWith(MEDIA_REF_PREFIX)) {
+                stillUsed.add(v.slice(MEDIA_REF_PREFIX.length));
+              }
+            }
+          }
+          let deletedFiles = 0;
+          for (const fileName of accountMediaRefs) {
+            if (stillUsed.has(fileName)) continue;
+            // 防路径穿越：只认 <hex>.<ext>
+            if (!/^[a-f0-9]+\.[a-z0-9]+$/i.test(fileName)) continue;
+            try {
+              fsSync.unlinkSync(path.join(SETTINGS_MEDIA_DIR, fileName));
+              deletedFiles++;
+            } catch { /* 文件本来就不在，跳过 */ }
+          }
+          if (deletedFiles > 0) removed.settingsMedia = deletedFiles;
+        } catch (err: any) {
+          console.warn("[DeleteAccount] 清理设置图片失败:", err?.message ?? err);
+        }
       }
 
       /**
