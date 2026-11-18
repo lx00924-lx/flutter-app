@@ -311,7 +311,43 @@ const getDb = (): DatabaseSync => {
       user_id    TEXT PRIMARY KEY,
       data       TEXT NOT NULL,
       updated_at INTEGER NOT NULL
-    )
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      id                    TEXT PRIMARY KEY,
+      user_id               TEXT NOT NULL,
+      title                 TEXT,
+      created_at            TEXT,
+      updated_at            TEXT,
+      model                 TEXT,
+      workspace             TEXT,
+      summary               TEXT,
+      last_summarized_index INTEGER,
+      is_synced             INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id, updated_at);
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id                TEXT PRIMARY KEY,
+      session_id        TEXT NOT NULL,
+      user_id           TEXT NOT NULL,
+      seq               INTEGER NOT NULL,
+      role              TEXT,
+      sender            TEXT,
+      content           TEXT,
+      text              TEXT,
+      reasoning_content TEXT,
+      thought           TEXT,
+      created_at        TEXT,
+      timestamp         TEXT,
+      elapsed_seconds   REAL,
+      attachments       TEXT,
+      status            TEXT,
+      is_agent_mode     INTEGER,
+      agent_execution   TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_messages_user_session ON messages(user_id, session_id, seq);
+    CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(session_id, created_at);
   `);
   settingsDb = db;
   return db;
@@ -341,6 +377,77 @@ const migrateSettingsJsonToDb = async (): Promise<number> => {
     throw err;
   }
   return uids.length;
+};
+
+/**
+ * 一次性迁移：`messages_v2.json` + `sessions_v2.json` → `messages` / `sessions` 表。
+ *
+ * **两张必须一起迁** —— 消息靠 `sessionId` 关联会话，分开迁会出现「有消息没会话」。
+ * 只在目标表为空时执行；**JSON 原文件保留不动**（回滚依据）。
+ *
+ * `seq` 按数组顺序编号（从 1 开始），与现有「seq = 下标 + 1」的语义一致。
+ * 「占位 → 最终版本要换新 seq」靠把消息挪到数组末尾的做法，**这里原样保留** ——
+ * 真正的自增 seq 是另一件事（要改 12 处调用点）。
+ */
+const migrateMessagesJsonToDb = async (): Promise<{ sessions: number; messages: number }> => {
+  const db = getDb();
+  const sessCount = (db.prepare("SELECT COUNT(*) AS n FROM sessions").get() as { n: number } | undefined)?.n ?? 0;
+  const msgCount = (db.prepare("SELECT COUNT(*) AS n FROM messages").get() as { n: number } | undefined)?.n ?? 0;
+  if (sessCount > 0 || msgCount > 0) return { sessions: 0, messages: 0 };   // 已有数据，不重复迁
+
+  const sessionsJson = await safeReadJSON<Record<string, any[]>>(SESSIONS_FILE, {});
+  const messagesJson = await safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+
+  const insSess = db.prepare(`INSERT OR REPLACE INTO sessions
+    (id, user_id, title, created_at, updated_at, model, workspace, summary, last_summarized_index, is_synced)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`);
+  const insMsg = db.prepare(`INSERT OR REPLACE INTO messages
+    (id, session_id, user_id, seq, role, sender, content, text, reasoning_content, thought,
+     created_at, timestamp, elapsed_seconds, attachments, status, is_agent_mode, agent_execution)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+
+  let nSess = 0;
+  let nMsg = 0;
+  db.exec("BEGIN");
+  try {
+    for (const [uid, arr] of Object.entries(sessionsJson)) {
+      if (!Array.isArray(arr)) continue;
+      for (const s of arr) {
+        if (!s || !s.id) continue;
+        insSess.run(
+          String(s.id), uid, s.title ?? null, s.createdAt ?? null, s.updatedAt ?? null,
+          s.model ?? null,
+          s.workspace == null ? null : JSON.stringify(s.workspace),
+          s.summary ?? null,
+          typeof s.lastSummarizedIndex === "number" ? s.lastSummarizedIndex : null,
+          s.isSynced ? 1 : 0,
+        );
+        nSess++;
+      }
+    }
+    for (const [uid, arr] of Object.entries(messagesJson)) {
+      if (!Array.isArray(arr)) continue;
+      arr.forEach((m: any, i: number) => {
+        if (!m || !m.id) return;
+        insMsg.run(
+          String(m.id), String(m.sessionId ?? ""), uid, i + 1,
+          m.role ?? null, m.sender ?? null, m.content ?? null, m.text ?? null,
+          m.reasoningContent ?? null, m.thought ?? null,
+          m.createdAt ?? null, m.timestamp ?? null,
+          typeof m.elapsedSeconds === "number" ? m.elapsedSeconds : null,
+          m.attachments == null ? null : JSON.stringify(m.attachments),
+          m.status ?? null, m.isAgentMode ? 1 : 0,
+          m.agentExecution == null ? null : JSON.stringify(m.agentExecution),
+        );
+        nMsg++;
+      });
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* 已经回滚了 */ }
+    throw err;
+  }
+  return { sessions: nSess, messages: nMsg };
 };
 
 /** 读全量设置（自动解密密钥字段）。所有读设置的地方都应走这里。 */
@@ -386,25 +493,140 @@ const saveSettingsFile = async (allSettings: Record<string, any>): Promise<void>
   }
 };
 
-// ==================== 消息 / 会话的统一读写入口（第二期第一步） ====================
+// ==================== 消息 / 会话的统一读写入口（第二期） ====================
 //
-// 为什么先加这一层：`MESSAGES_FILE` 现在有 13 处读、12 处写，`SESSIONS_FILE` 有 3 读 2 写，
-// 全是各自直接摸文件。第二期要把它们换成 SQLite，就得先把这些口子收成 4 个函数 ——
-// 否则又是一次「改 15 处、错一处就丢聊天记录」。
+// 第一阶段先把 15 个各自摸文件的地方收成这 4 个函数（内部还是 JSON），
+// 第二阶段（2026-11-18 起）内部换成 SQLite，**调用点一行没动**。
 //
-// ⚠️ 这一步**行为完全不变**：内部仍然读写 JSON 文件，`safeReadJSON` / `safeWriteJSON`
-// 的默认值与原来一致。第二步才把内部换成 SQLite，那时这 15 个调用点一行都不用再动。
-const loadMessages = async (): Promise<Record<string, any[]>> =>
-  safeReadJSON<Record<string, any[]>>(MESSAGES_FILE, {});
+// 语义保持与 JSON 版一致：
+//   · 读 = 整份取出，按 user 分组、组内按 seq 升序（等价于原来的"数组顺序"）
+//   · 写 = 整份覆盖（先清空再插入）—— 原 JSON 版也是整份写回，行为等价
+//   · `seq` 仍按数组顺序编号，「占位→最终版本靠挪到末尾换 seq」的逻辑原样保留
+//
+// ⚠️ 「整份覆盖」在消息涨到几千条时会慢。这是**已知的、有意为之**的取舍：
+// 第一阶段的目标是"换存储不换行为"，等真到那个量级再改成增量写。
 
-const saveMessages = async (all: Record<string, any[]>): Promise<void> =>
-  safeWriteJSON(MESSAGES_FILE, all);
+/**
+ * 行 → 消息对象。
+ *
+ * ⚠️ 这里**不能**写 `r.xxx ?? undefined`：SQL 的 NULL 对应 JS 的 `null`，
+ * 而 `??` 会把 null 也转成 undefined，导致「字段从 null 变成不存在」——
+ * 发回客户端的 JSON 会少键（2026-11-18 实测踩到，逐字段比对时 15 条全差）。
+ * 直接取列值即可：数据库的 NULL 就是 JSON 里的 null。
+ */
+const rowToMessage = (r: any): any => ({
+  id: r.id,
+  sessionId: r.session_id,
+  role: r.role,
+  sender: r.sender,
+  content: r.content,
+  text: r.text,
+  reasoningContent: r.reasoning_content,
+  thought: r.thought,
+  createdAt: r.created_at,
+  timestamp: r.timestamp,
+  elapsedSeconds: r.elapsed_seconds,
+  attachments: r.attachments == null ? null : JSON.parse(r.attachments),
+  status: r.status,
+  isAgentMode: !!r.is_agent_mode,
+  agentExecution: r.agent_execution == null ? null : JSON.parse(r.agent_execution),
+});
 
-const loadSessions = async (): Promise<Record<string, any[]>> =>
-  safeReadJSON<Record<string, any[]>>(SESSIONS_FILE, {});
+/** 行 → 会话对象。同上，不要用 `?? undefined`。 */
+const rowToSession = (r: any): any => ({
+  id: r.id,
+  title: r.title,
+  createdAt: r.created_at,
+  updatedAt: r.updated_at,
+  model: r.model,
+  workspace: r.workspace == null ? null : JSON.parse(r.workspace),
+  summary: r.summary,
+  lastSummarizedIndex: r.last_summarized_index,
+  isSynced: !!r.is_synced,
+});
 
-const saveSessions = async (all: Record<string, any[]>): Promise<void> =>
-  safeWriteJSON(SESSIONS_FILE, all);
+const loadMessages = async (): Promise<Record<string, any[]>> => {
+  const db = getDb();
+  const rows = db.prepare("SELECT * FROM messages ORDER BY user_id, seq").all() as any[];
+  const out: Record<string, any[]> = {};
+  for (const r of rows) {
+    if (!out[r.user_id]) out[r.user_id] = [];
+    out[r.user_id].push(rowToMessage(r));
+  }
+  return out;
+};
+
+const saveMessages = async (all: Record<string, any[]>): Promise<void> => {
+  const db = getDb();
+  const stmt = db.prepare(`INSERT OR REPLACE INTO messages
+    (id, session_id, user_id, seq, role, sender, content, text, reasoning_content, thought,
+     created_at, timestamp, elapsed_seconds, attachments, status, is_agent_mode, agent_execution)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  db.exec("BEGIN");
+  try {
+    db.exec("DELETE FROM messages");            // 整份覆盖，与原 JSON 版等价
+    for (const [uid, arr] of Object.entries(all || {})) {
+      if (!Array.isArray(arr)) continue;
+      arr.forEach((m: any, i: number) => {
+        if (!m || !m.id) return;
+        stmt.run(
+          String(m.id), String(m.sessionId ?? ""), uid, i + 1,
+          m.role ?? null, m.sender ?? null, m.content ?? null, m.text ?? null,
+          m.reasoningContent ?? null, m.thought ?? null,
+          m.createdAt ?? null, m.timestamp ?? null,
+          typeof m.elapsedSeconds === "number" ? m.elapsedSeconds : null,
+          m.attachments == null ? null : JSON.stringify(m.attachments),
+          m.status ?? null, m.isAgentMode ? 1 : 0,
+          m.agentExecution == null ? null : JSON.stringify(m.agentExecution),
+        );
+      });
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* 已经回滚了 */ }
+    throw err;
+  }
+};
+
+const loadSessions = async (): Promise<Record<string, any[]>> => {
+  const db = getDb();
+  const rows = db.prepare("SELECT * FROM sessions ORDER BY user_id, updated_at").all() as any[];
+  const out: Record<string, any[]> = {};
+  for (const r of rows) {
+    if (!out[r.user_id]) out[r.user_id] = [];
+    out[r.user_id].push(rowToSession(r));
+  }
+  return out;
+};
+
+const saveSessions = async (all: Record<string, any[]>): Promise<void> => {
+  const db = getDb();
+  const stmt = db.prepare(`INSERT OR REPLACE INTO sessions
+    (id, user_id, title, created_at, updated_at, model, workspace, summary, last_summarized_index, is_synced)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`);
+  db.exec("BEGIN");
+  try {
+    db.exec("DELETE FROM sessions");
+    for (const [uid, arr] of Object.entries(all || {})) {
+      if (!Array.isArray(arr)) continue;
+      for (const s of arr) {
+        if (!s || !s.id) continue;
+        stmt.run(
+          String(s.id), uid, s.title ?? null, s.createdAt ?? null, s.updatedAt ?? null,
+          s.model ?? null,
+          s.workspace == null ? null : JSON.stringify(s.workspace),
+          s.summary ?? null,
+          typeof s.lastSummarizedIndex === "number" ? s.lastSummarizedIndex : null,
+          s.isSynced ? 1 : 0,
+        );
+      }
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* 已经回滚了 */ }
+    throw err;
+  }
+};
 
 /**
  * 检查一条**未解密**的原始设置记录里，是否还有明文密钥字段。
@@ -2502,6 +2724,10 @@ async function ensureDirs() {
       const migratedSettings = await migrateSettingsJsonToDb();
       if (migratedSettings > 0) {
         console.log(`[DB] 已把 ${migratedSettings} 个账号的设置从 settings.json 迁入 lxai.db`);
+      }
+      const migratedMsgs = await migrateMessagesJsonToDb();
+      if (migratedMsgs.sessions > 0 || migratedMsgs.messages > 0) {
+        console.log(`[DB] 已把 ${migratedMsgs.sessions} 个会话 / ${migratedMsgs.messages} 条消息从 JSON 迁入 lxai.db`);
       }
     } catch (err: any) {
       // ⚠️ 迁移失败不能静默吞掉：此时库里可能还是空的，用户会看到"设置全没了"。
