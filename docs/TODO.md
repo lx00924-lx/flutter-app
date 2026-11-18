@@ -310,7 +310,61 @@ M5 的原始定义在**同一层的研究目录** `lxai-installer-research`（�
 分键、`settings.json` 按 userId 分键），所以**最可能漏在客户端**：退出登录时没把 Hive 里的
 `sessions` / `messages` / `settings` 三个 box 清干净，或新账号登录后第一次拉取拿旧的本地缓存当底。
 
-⚠️ **还没定位到具体代码**，下次动手前先查这几处：
+### ✅ 根因已定位（2026-11-18 23:40，三条全部落到代码行）
+
+**1. Hive box 是全局单例，不带账号维度**（真正的根因）
+
+`flutter_app/lib/main.dart` L43-45：
+```dart
+Hive.openBox('sessions_box'),
+Hive.openBox('messages_box'),
+Hive.openBox('settings_box'),
+```
+三处（L56-58 还有一遍预热）都是**固定名字**。所有账号共用这三个 cell ——
+A 的数据在 box 里，B 登录后读的还是同一批 box，所以 B 看到的就是 A。
+
+**2. 清空函数写好了但没人调**
+
+`storage_service.dart` L254 `Future<void> clearAllData()` 会清 sessions/messages 两个 box，
+但**全项目零调用点**（只有定义）。也就是说"退出时清本地"这一步从来没接上。
+
+**3. `logout()` 完全没碰本地存储**
+
+`settings_provider.dart` L835 `void logout()` 只做三件事：
+`logoutServer(...)`（通知服务端）→ `stopSessionWatcher()` → `KeepAliveService.stop()` →
+把 `_settings.isLoggedIn = false` 存一下。**Hive 一个字没动。**
+
+**由此解释了 2026-11-18 注销实测里的现象**：用户注销账号 `1261600141` 时，
+服务端日志是 `删除: {"users":1,"sessions":1}` —— messages/settings 一行没提，
+因为该账号名下**从未产生过任何业务数据**（他在那个账号下看到的全是 `123` 的缓存）。
+详见 `docs/数据库迁移-2026-11-18复核.md` 末尾。
+
+### 修法：按 userId 分 box（**不要**用"登录时清空"）
+
+登出时清空会连带清掉**还没同步上云的离线消息**（§上文那条坑），所以走分箱：
+
+```
+登录成功 → 用 loginAccount 算出 scope → Hive.openBox('messages_box_$scope')
+退出     → 只 close，不 clear（数据留在该账号自己的箱里，下次登录还在）
+```
+
+⚠️ **`settings_box` 要拆成两个**：一个是"登录态"（存 `loginAccount`、`clientSessionId`，
+登录前就要能读，保持全局），另一个是"账号设置"（按 scope 分箱）。
+不拆的话登录前拿不到账号标识、分不了箱。
+
+⚠️ **改动清单**（明天动手时照这个走）：
+1. `main.dart`：去掉三个固定 `openBox`，改成登录后按 scope 打开
+2. `storage_service.dart`：`_sessionsBox`/`_messagesBox` 改成可重新指向（不是 `final` 单例）
+3. `settings_provider.dart`：`logout()` 里 `close` 当前 scope 的 box
+4. **老数据迁移**：已有用户的 `messages_box` 等要搬到 `messages_box_<当前登录账号>`，否则升级后一片空白
+5. 验证判据用上面那三条（A→B 看不到、B 改设置 A 不受影响、反序再来一遍）
+
+⚠️ **老数据迁移这一步最危险**：搬错了就是"升级后聊天记录全没了"。
+建议**先备份 Hive 目录**（桌面 App 在 `Documents`，手机在 App 私有目录），再动。
+
+---
+
+⚠️ ~~还没定位到具体代码~~（已定位，见上），当时列的排查清单保留备查：
 
 | 查哪 | 为什么 |
 | --- | --- |
