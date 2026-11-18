@@ -8,6 +8,7 @@ import '../models/app_settings.dart';
 import '../services/storage_service.dart';
 import '../services/storage_path_service.dart';
 import '../services/sync_service.dart';
+import '../services/settings_media_cache.dart';
 import '../services/keep_alive_service.dart';
 import '../services/bridge_process_manager.dart';
 import '../utils/image_picker_helper.dart';
@@ -121,23 +122,89 @@ class SettingsProvider extends ChangeNotifier {
   Uint8List? get splashImageBytes => _splashImageBytes;
 
   /// 重新解码各图像字段 —— **只在源串真的变了时才解**（原因见字段区注释）。
+  ///
+  /// ⚠️ 2026-11-18 起值有两种形态（服务端把三张图拆成了独立文件）：
+  ///   · `data:image/...;base64,...` —— 刚在本地选完图 / 老数据，同步解码
+  ///   · `media:v1:<hash>.<ext>`   —— 服务端存的是引用，要先找本地文件、没有再去取
+  /// 所以解码可能变成异步：同步解不出来时先置空（界面显示默认图），
+  /// 等 `_resolveMediaRef` 拿到字节再 notifyListeners 刷新。
   void _updateImageCache() {
     if (_settings.userAvatar != _decodedUserAvatarSrc) {
       _decodedUserAvatarSrc = _settings.userAvatar;
-      _userAvatarBytes = ImagePickerHelper.decodeBase64Image(_settings.userAvatar);
+      _userAvatarBytes = _decodeMediaValue(_settings.userAvatar);
+      if (_userAvatarBytes == null) unawaited(_resolveMediaRef('userAvatar', _settings.userAvatar));
     }
     if (_settings.aiAvatar != _decodedAiAvatarSrc) {
       _decodedAiAvatarSrc = _settings.aiAvatar;
-      _aiAvatarBytes = ImagePickerHelper.decodeBase64Image(_settings.aiAvatar);
+      _aiAvatarBytes = _decodeMediaValue(_settings.aiAvatar);
+      if (_aiAvatarBytes == null) unawaited(_resolveMediaRef('aiAvatar', _settings.aiAvatar));
     }
     if (_settings.customBackground != _decodedBackgroundSrc) {
       _decodedBackgroundSrc = _settings.customBackground;
-      _customBackgroundBytes = ImagePickerHelper.decodeBase64Image(_settings.customBackground);
+      _customBackgroundBytes = _decodeMediaValue(_settings.customBackground);
+      if (_customBackgroundBytes == null) unawaited(_resolveMediaRef('customBackground', _settings.customBackground));
     }
     if (_settings.splashImage != _decodedSplashSrc) {
       _decodedSplashSrc = _settings.splashImage;
-      _splashImageBytes = ImagePickerHelper.decodeBase64Image(_settings.splashImage);
+      _splashImageBytes = _decodeMediaValue(_settings.splashImage);
+      if (_splashImageBytes == null) unawaited(_resolveMediaRef('splashImage', _settings.splashImage));
     }
+  }
+
+  /// 值 → 字节。只有内嵌 base64 能同步解；引用返回 null（交给异步那一步）。
+  static Uint8List? _decodeMediaValue(String value) {
+    if (value.isEmpty) return null;
+    if (!value.startsWith('data:image/')) return null;
+    return ImagePickerHelper.decodeBase64Image(value);
+  }
+
+  /// 引用 → 字节：**本地文件优先，没有再去服务器取一次并存下来**。
+  ///
+  /// 取不到就什么都不做（界面显示默认图）。这里刻意不弹错、不重试 ——
+  /// 头像加载失败不该打断用户任何操作。
+  Future<void> _resolveMediaRef(String field, String value) async {
+    const prefix = 'media:v1:';
+    if (!value.startsWith(prefix)) return;
+    final fileName = value.substring(prefix.length);
+
+    // ① 本地
+    var bytes = await SettingsMediaCache.read(fileName);
+
+    // ② 本地没有 → 按 id 取一次（换机 / 清过数据时的路径）
+    if (bytes == null) {
+      bytes = await SyncService.instance.fetchSettingsMedia(
+        fileName,
+        userId: syncUserId,
+        clientSessionId: clientSessionId,
+      );
+      if (bytes != null) await SettingsMediaCache.write(fileName, bytes);
+    }
+
+    if (bytes == null) return;   // 取不到 → 保持默认图，下次进设置页还会再试
+
+    // ③ 只在"这个字段的值还是我这次取的那个引用"时才写回 ——
+    //    否则用户可能刚好换了新图，这里会把新值盖成旧的。
+    switch (field) {
+      case 'userAvatar':
+        if (_decodedUserAvatarSrc != value) return;
+        _userAvatarBytes = bytes;
+        break;
+      case 'aiAvatar':
+        if (_decodedAiAvatarSrc != value) return;
+        _aiAvatarBytes = bytes;
+        break;
+      case 'customBackground':
+        if (_decodedBackgroundSrc != value) return;
+        _customBackgroundBytes = bytes;
+        break;
+      case 'splashImage':
+        if (_decodedSplashSrc != value) return;
+        _splashImageBytes = bytes;
+        break;
+      default:
+        return;
+    }
+    notifyListeners();
   }
 
   /// 各图像字段的"上云预算"（与选择图片时的参数保持一致）。

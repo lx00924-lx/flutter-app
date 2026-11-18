@@ -484,7 +484,7 @@ const loadSettingsFile = async (): Promise<Record<string, any>> => {
   const out: Record<string, any> = {};
   for (const r of rows) {
     try {
-      out[r.user_id] = joinSettingsMedia(mapSettingsSecrets(JSON.parse(r.data || "{}"), "dec"));
+      out[r.user_id] = mapSettingsSecrets(JSON.parse(r.data || "{}"), "dec");
     } catch (err: any) {
       // 单条坏数据不该让所有人读不到设置
       console.error(`[DB] 账号 ${r.user_id} 的设置解不开（已跳过）:`, err?.message ?? err);
@@ -4971,6 +4971,34 @@ async function startServer() {
     } catch (error) {
       res.status(500).json({ error: "Failed to load settings" });
     }
+  });
+
+  /**
+   * 取一张设置里的图片（聊天背景 / 用户头像 / AI 头像）。
+   *
+   * 2026-11-18 起设置里存的是引用 `media:v1:<hash>.<ext>` 而不是 base64，
+   * 客户端拿到引用后**先查本地文件**，没有再走这个接口。
+   *
+   * ⚠️ 为什么按 userId 鉴权：文件名虽是内容哈希（猜不到），但「这个人的背景和头像
+   * 长什么样」本身就是隐私 —— 不能因为名字猜不到就默认公开。
+   *
+   * ⚠️ 内容寻址所以可以强缓存：同一个文件名内容永远不变，客户端存一年都行。
+   */
+  app.get("/api/settings/media/:userId/:fileName", async (req, res) => {
+    if (!(await verifyUserIdentity(req, res, req.params.userId, "读取设置图片"))) return;
+    const fileName = String(req.params.fileName || "").trim();
+    // 防路径穿越：只认 <hex>.<ext>
+    if (!/^[a-f0-9]+\.[a-z0-9]+$/i.test(fileName)) {
+      return res.status(400).json({ error: "invalid file name" });
+    }
+    const full = path.join(SETTINGS_MEDIA_DIR, fileName);
+    if (!fsSync.existsSync(full)) {
+      return res.status(404).json({ error: "not found" });
+    }
+    const ext = fileName.split(".").pop() ?? "bin";
+    res.set("Content-Type", `image/${mediaMimeOf(ext)}`);
+    res.set("Cache-Control", "private, max-age=31536000, immutable");
+    res.sendFile(full);
   });
 
   /**

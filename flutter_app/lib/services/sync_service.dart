@@ -332,6 +332,35 @@ class SyncService {
     );
   }
 
+  /// 按 id 取一张设置图片（聊天背景 / 用户头像 / AI 头像）。
+  ///
+  /// 服务端 2026-11-18 起把三张图从设置 JSON 拆成了独立文件，设置里只留
+  /// `media:v1:<hash>.<ext>` 引用。客户端拿引用来这里取一次，然后交给
+  /// `SettingsMediaCache` 存本地 —— 以后离线也能显示，不用再取。
+  ///
+  /// 取不到（404 / 网络失败 / 没登录）一律返回 null：调用方显示默认图，
+  /// **不转圈、不弹错**。头像加载失败不该打断任何操作。
+  Future<Uint8List?> fetchSettingsMedia(
+    String fileName, {
+    required String userId,
+    String? clientSessionId,
+  }) async {
+    try {
+      final url = '$serverBaseUrl/api/settings/media/$userId/$fileName';
+      final response = await _dio.get<List<int>>(
+        url,
+        options: _createOptions(userId: userId, clientSessionId: clientSessionId)
+            .copyWith(responseType: ResponseType.bytes),
+      );
+      if (response.statusCode != 200) return null;
+      final data = response.data;
+      if (data == null || data.isEmpty) return null;
+      return Uint8List.fromList(data);
+    } catch (_) {
+      return null;
+    }
+  }
+
   void _checkAndTriggerForceLogout(dynamic error) {
     if (error is! DioException) return;
     final status = error.response?.statusCode;
