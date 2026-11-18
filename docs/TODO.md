@@ -328,38 +328,33 @@ M5 的原始定义在**同一层的研究目录** `lxai-installer-research`（�
 ⚠️ **别再犯的坑**：修这个时容易顺手"登录时清空本地库" —— 那会连带清掉
 **还没同步上云的消息**（离线期间发的）。正确做法是**按 userId 分库/分键**，不是"登录时清空"。
 
-## 11. 数据库迁移第三期（2026-11-18，**等用户拍板才做**）
+## 11. 数据库迁移第三期（**11.2 已完成，11.1 等 App 端一起改**）
 
-第一、二期已上线并验证（提交 `499dc2f` / `cbab4c0` / `f57ef24`）：
-`settings` / `sessions` / `messages` 三张表已经在 `messages_data/lxai.db` 里。
-详细记录见 `docs/数据库迁移-2026-11-18复核.md` §7 与 §9。
+第一、二、三期（11.2 部分）已上线并验证（提交 `499dc2f` / `cbab4c0` / `f57ef24` / `d847047`）：
+`settings` / `sessions` / `messages` / `kv` 四张表已经在 `messages_data/lxai.db` 里。
+详细记录见 `docs/数据库迁移-2026-11-18复核.md` §7 / §9 / §10。
 
-**第三期剩两件事**（来自那份文档 §4）：
+**第三期剩一件事**（来自那份文档 §4）：
 
-### 11.1 图片从设置里拆成静态文件
+### 11.1 图片从设置里拆成静态文件 ⏸ 未做
 
 `customBackground` 416 KB / `userAvatar` 47 KB / `aiAvatar` 25 KB，
 现在整份 base64 存在 `settings.data` 这个 JSON 列里，占设置表体积的 99.5%。
 
 拆法：落盘成静态文件、设置里只存路径。
 ⚠️ **这会改到 App 端**（`settings` 字段从 base64 变路径）—— 不是纯服务端改动，
-属于跨端协议变更，得两端一起改、一起验。
+属于跨端协议变更，得两端一起改、一起验。所以它没有随 11.2 一起做。
 
-### 11.2 剩余 6 个小文件迁进库
+### 11.2 剩余 6 个小文件迁进库 ✅ 已完成（2026-11-18 18:00）
 
-| 文件 | 大小 | 注意 |
-| :--- | ---: | :--- |
-| `users.json` | 372 B | 用户表，注销流程依赖它 |
-| `active_sessions.json` | 659 B | ⚠️ **单点登录互斥的真相来源**：`version` 做 CAS、`lastActive` 60 秒节流落盘 —— 语义一个都不能丢 |
-| `deletion_signals.json` | 755 B | 删除信号，App 靠它收敛 |
-| `model_limits.json` | 1.5 KB | 全局配置，无用户数据，最好迁 |
-| `pending-decisions.json` | 67 B | 全是空结构 |
-| `login_attempts.json` | 51 B | 登录失败计数，必须落盘（重启清零就会被绕过） |
+`users` / `active_sessions` / `deletion_signals` / `model_limits` /
+`pending-decisions` / `login_attempts` 全部进 `kv` 表，**行为不变**（整份 JSON 存一格）。
 
-**建议顺序**：先迁 `model_limits` / `pending-decisions` / `login_attempts`（无用户数据、风险最低），
-再迁 `users` / `deletion_signals`，**`active_sessions` 放最后**（它是互斥的真相来源，要单独设计验证）。
+验收：kv 表 6 行；5 个文件与 JSON 逐字节一致；`active_sessions` 只有 `lastActive` 变新
+（这正是「每 60 秒节流落盘」在 DB 上正常工作的证据）；`check-session` 返回 `{"valid":true}`
+证明**请求路径**读得到；重启两次指纹不变。
 
-### 11.3 还有一条没实测
+### 11.3 还有一条没实测（仍然没测）
 
 **真实发消息的写入路径**：`saveMessages`（整份覆盖那套）从上线起还没被真实消息触发过 ——
 迁移用的是 `migrateMessagesJsonToDb()` 里另一段 INSERT。
