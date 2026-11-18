@@ -16,6 +16,9 @@ import fsSync from "node:fs";
 import multer from "multer";
 import { createServer as createViteServer } from "vite";
 import cors from "cors";
+// 内置 SQLite（Node 22.5+ 起可用，0 依赖）。`node:` 前缀是内置模块，
+// `npm run build` 走 `--packages=external` 时 esbuild 会原样保留引用。
+import { DatabaseSync } from "node:sqlite";
 
 // ==================== 控制台日志时间戳 ====================
 // 需求：排查「手机点了重置 Token 之后到底发生了什么」这类顺序问题时，
@@ -142,6 +145,16 @@ const MESSAGES_FILE = path.join(DATA_DIR, "messages_v2.json"); // Use v2 to avoi
 const SESSIONS_FILE = path.join(DATA_DIR, "sessions_v2.json");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
+/**
+ * 主数据库文件（2026-11-18 起，设置从 JSON 迁到这里）。
+ *
+ * 为什么先只迁设置：`settings.json` 现在 478 KB，其中图片占 99.5%，而
+ * `GET /api/check-session` 这类高频接口为了读一个 token 字段就要全量读盘 + 解 4 个密钥。
+ * 迁到 SQLite 后同样的读取变成一条主键查询。
+ *
+ * ⚠️ **迁移期间 JSON 仍然保留**：它是迁移源，也是回滚依据，不要删。
+ */
+const DB_FILE = path.join(DATA_DIR, "lxai.db");
 const ACTIVE_SESSIONS_FILE = path.join(DATA_DIR, "active_sessions.json");
 const MODEL_LIMITS_FILE = path.join(DATA_DIR, "model_limits.json");
 const MODEL_LIMITS_EXAMPLE = path.join(process.cwd(), "model_limits.example.json");
@@ -272,41 +285,160 @@ const mapSettingsSecrets = (record: any, mode: "enc" | "dec"): any => {
   return out;
 };
 
-/** 读全量设置（自动解密密钥字段）。所有读 SETTINGS_FILE 的地方都应走这里。 */
-const loadSettingsFile = async (): Promise<Record<string, any>> => {
+// ==================== 设置存储：SQLite（2026-11-18 起） ====================
+//
+// 背景与取舍见 `docs/数据库迁移-2026-11-18复核.md` 第一期。要点：
+//   · 只把「设置」这一张表迁进来，图片字段照样存在 data 这个 JSON 列里（先不拆）
+//   · 密钥保持 `enc:v1:` 密文原样进出（加密逻辑一行没动，仍走 mapSettingsSecrets）
+//   · JSON 原文件保留不删 —— 它是迁移源，也是回滚依据
+//
+// ⚠️ 函数名保持 `loadSettingsFile` / `saveSettingsFile` 不变：全仓 18 个调用点
+// 一行都不用改，出问题时也更容易一眼看出改的是哪一层。
+let settingsDb: DatabaseSync | null = null;
+
+/** 打开（并初始化）主库。首次调用建目录建表，之后复用同一个连接。 */
+const getDb = (): DatabaseSync => {
+  if (settingsDb) return settingsDb;
+  try {
+    fsSync.mkdirSync(DATA_DIR, { recursive: true });
+  } catch { /* 已存在 */ }
+  const db = new DatabaseSync(DB_FILE);
+  // WAL：读写不互相阻塞，进程被杀也能从日志恢复
+  try { db.exec("PRAGMA journal_mode = WAL"); } catch { /* 某些文件系统不支持 */ }
+  try { db.exec("PRAGMA synchronous = NORMAL"); } catch { /* 同上 */ }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS settings (
+      user_id    TEXT PRIMARY KEY,
+      data       TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `);
+  settingsDb = db;
+  return db;
+};
+
+/**
+ * 一次性迁移：settings.json → settings 表。
+ *
+ * 只在表为空时执行，所以重启多少次也只迁一次。**JSON 原文件保留不动**。
+ * 返回迁移的账号数，供启动日志显示；失败抛错，由调用方决定是否阻断启动。
+ */
+const migrateSettingsJsonToDb = async (): Promise<number> => {
+  const db = getDb();
+  const row = db.prepare("SELECT COUNT(*) AS n FROM settings").get() as { n: number } | undefined;
+  if ((row?.n ?? 0) > 0) return 0;                       // 库里已有数据，不重复迁
   const raw = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
+  const uids = Object.keys(raw || {});
+  if (uids.length === 0) return 0;                        // 源文件没有，没什么可迁
+  const stmt = db.prepare("INSERT OR REPLACE INTO settings (user_id, data, updated_at) VALUES (?, ?, ?)");
+  const now = Date.now();
+  db.exec("BEGIN");
+  try {
+    for (const uid of uids) stmt.run(uid, JSON.stringify(raw[uid] ?? {}), now);
+    db.exec("COMMIT");
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* 已经回滚了 */ }
+    throw err;
+  }
+  return uids.length;
+};
+
+/** 读全量设置（自动解密密钥字段）。所有读设置的地方都应走这里。 */
+const loadSettingsFile = async (): Promise<Record<string, any>> => {
+  const db = getDb();
+  const rows = db.prepare("SELECT user_id, data FROM settings").all() as Array<{ user_id: string; data: string }>;
   const out: Record<string, any> = {};
-  for (const [uid, record] of Object.entries(raw || {})) out[uid] = mapSettingsSecrets(record, "dec");
+  for (const r of rows) {
+    try {
+      out[r.user_id] = mapSettingsSecrets(JSON.parse(r.data || "{}"), "dec");
+    } catch (err: any) {
+      // 单条坏数据不该让所有人读不到设置
+      console.error(`[DB] 账号 ${r.user_id} 的设置解不开（已跳过）:`, err?.message ?? err);
+    }
+  }
   return out;
 };
 
-/** 写全量设置（自动加密密钥字段）。所有写 SETTINGS_FILE 的地方都应走这里。 */
+/** 写全量设置（自动加密密钥字段）。所有写设置的地方都应走这里。 */
 const saveSettingsFile = async (allSettings: Record<string, any>): Promise<void> => {
-  const out: Record<string, any> = {};
-  for (const [uid, record] of Object.entries(allSettings || {})) out[uid] = mapSettingsSecrets(record, "enc");
-  await safeWriteJSON(SETTINGS_FILE, out);
+  const db = getDb();
+  const entries = Object.entries(allSettings || {});
+  const stmt = db.prepare("INSERT OR REPLACE INTO settings (user_id, data, updated_at) VALUES (?, ?, ?)");
+  const now = Date.now();
+  db.exec("BEGIN");
+  try {
+    for (const [uid, record] of entries) {
+      stmt.run(uid, JSON.stringify(mapSettingsSecrets(record, "enc")), now);
+    }
+    // 保持原 JSON 版的"整份覆盖"语义：不在本次写入里的账号要删掉，
+    // 否则注销账号后它的设置会永远留在库里。
+    if (entries.length === 0) {
+      db.exec("DELETE FROM settings");
+    } else {
+      const keep = entries.map(([uid]) => uid);
+      const placeholders = keep.map(() => "?").join(",");
+      db.prepare(`DELETE FROM settings WHERE user_id NOT IN (${placeholders})`).run(...keep as any);
+    }
+    db.exec("COMMIT");
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* 已经回滚了 */ }
+    throw err;
+  }
+};
+
+/**
+ * 检查一条**未解密**的原始设置记录里，是否还有明文密钥字段。
+ *
+ * ⚠️ 必须拿原始密文比，不能拿"加密后的结果"比 —— AES-GCM 每次加密都用随机 IV，
+ * 同一明文加密两次永远不相等，那样判断会让本函数每次启动都误报"有明文"、
+ * 把整份设置重写一遍（2026-11-18 实测踩到：重启后 updated_at 每次都变）。
+ */
+const hasPlaintextSecret = (record: any): boolean => {
+  if (record === null || typeof record !== "object") return false;
+  for (const field of SECRET_FIELDS) {
+    const v = record[field];
+    if (typeof v === "string" && v.length > 0 && !v.startsWith(SECRET_PREFIX)) return true;
+  }
+  if (Array.isArray(record.apiEndpoints)) {
+    for (const ep of record.apiEndpoints) {
+      if (ep === null || typeof ep !== "object") continue;
+      const v = ep.apiKey;
+      if (typeof v === "string" && v.length > 0 && !v.startsWith(SECRET_PREFIX)) return true;
+    }
+  }
+  return false;
 };
 
 /**
  * 一次性迁移：把历史遗留的明文密钥原地加密。
  * 返回加密了几条，供启动日志显示；失败不影响启动。
+ *
+ * ⚠️ 2026-11-18：设置已迁进 SQLite，这里改成直接读库里的**原始 data**（不解密），
+ * 靠 `hasPlaintextSecret()` 判断有没有明文。逻辑幂等：全是 `enc:v1:` 时一次写都不会发生。
  */
 const migratePlaintextSecrets = async (): Promise<number> => {
   if (!STORE_API_KEYS) return 0;
   try {
-    const raw = await safeReadJSON<Record<string, any>>(SETTINGS_FILE, {});
-    let changed = 0;
-    const next: Record<string, any> = {};
-    for (const [uid, record] of Object.entries(raw || {})) {
-      const encrypted = mapSettingsSecrets(record, "enc");
-      if (JSON.stringify(encrypted) !== JSON.stringify(record)) changed++;
-      next[uid] = encrypted;
+    const db = getDb();
+    const rows = db.prepare("SELECT user_id, data FROM settings").all() as Array<{ user_id: string; data: string }>;
+    let plaintextUsers = 0;
+    const all: Record<string, any> = {};
+    for (const r of rows) {
+      let rec: any;
+      try {
+        rec = JSON.parse(r.data || "{}");
+      } catch {
+        continue;                                  // 坏数据留给 loadSettingsFile 报
+      }
+      all[r.user_id] = rec;
+      if (hasPlaintextSecret(rec)) plaintextUsers++;
     }
-    if (changed > 0) {
-      await safeWriteJSON(SETTINGS_FILE, next);
-      console.log(`[Secrets] 已把 ${changed} 个账号的明文密钥迁移为密文（AES-256-GCM）`);
+    if (plaintextUsers > 0) {
+      // 走 saveSettingsFile：它会 mapSettingsSecrets("enc") 加密后写回
+      await saveSettingsFile(all);
+      console.log(`[Secrets] 已把 ${plaintextUsers} 个账号的明文密钥迁移为密文（AES-256-GCM）`);
     }
-    return changed;
+    return plaintextUsers;
   } catch (err: any) {
     console.error("[Secrets] 明文密钥迁移失败:", err?.message ?? err);
     return 0;
@@ -2343,6 +2475,19 @@ async function ensureDirs() {
     await checkFile(MESSAGES_FILE, {}); // Map of userId -> messages[]
     await checkFile(USERS_FILE, []); // Simple user list
     await checkFile(SETTINGS_FILE, {}); // Map of userId -> settings
+
+    // 2026-11-18：设置从 JSON 迁进 SQLite。
+    // 只在表为空时执行一次；settings.json 原文件**保留不删**（回滚依据）。
+    try {
+      const migratedSettings = await migrateSettingsJsonToDb();
+      if (migratedSettings > 0) {
+        console.log(`[DB] 已把 ${migratedSettings} 个账号的设置从 settings.json 迁入 lxai.db`);
+      }
+    } catch (err: any) {
+      // ⚠️ 迁移失败不能静默吞掉：此时库里可能还是空的，用户会看到"设置全没了"。
+      // 让它显式报出来，人一眼就能判断该回滚还是重试。
+      console.error("[DB] 设置迁移失败（本次按空库继续，设置会读不到）:", err?.message ?? err);
+    }
 
     // 启动时把历史遗留的明文密钥迁移为密文（AES-256-GCM），并启动保留期巡检
     await migratePlaintextSecrets();
