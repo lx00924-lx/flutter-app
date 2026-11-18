@@ -155,6 +155,24 @@ const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
  * ⚠️ **迁移期间 JSON 仍然保留**：它是迁移源，也是回滚依据，不要删。
  */
 const DB_FILE = path.join(DATA_DIR, "lxai.db");
+
+// 轮询类诊断日志的节流（2026-11-18）
+//
+// MSG-PULL / SESS-PULL / DEL-SIG 三条是 App 每 12 秒各一次轮询打出来的，
+// 实测占日志 86%（5635 + 5637 + 5550 ≈ 16800 行 / 19471 行，1.5 MB）。
+//
+// 这三行在排查「App 到底有没有在发请求」时很有用（2026-10-23 就是靠 MSG-PULL
+// 先确认了「App 启动 6 分钟一次请求都没发」），所以**不能删** ——
+// 改成**同一来源每分钟最多一条**：仍然看得出它在拉，但不再刷屏。
+const pollLogAt = new Map<string, number>();
+const POLL_LOG_INTERVAL_MS = 60_000;
+const logPoll = (key: string, line: string): void => {
+  const now = Date.now();
+  const last = pollLogAt.get(key) ?? 0;
+  if (now - last < POLL_LOG_INTERVAL_MS) return;
+  pollLogAt.set(key, now);
+  console.log(line);
+};
 const ACTIVE_SESSIONS_FILE = path.join(DATA_DIR, "active_sessions.json");
 const MODEL_LIMITS_FILE = path.join(DATA_DIR, "model_limits.json");
 const MODEL_LIMITS_EXAMPLE = path.join(process.cwd(), "model_limits.example.json");
@@ -4109,8 +4127,13 @@ async function startServer() {
     //
     // 为什么值得留这一行：增量拉取到底有没有生效，**从服务端只能看这个参数**。
     // 2026-10-23 排查时正是靠它先确认了「App 启动 6 分钟一次请求都没发」，
-    // 否则只能对着客户端代码猜。一行约 60 字节，日志有 5MB 轮转，成本可忽略。
-    console.log(
+    // 否则只能对着客户端代码猜。
+    //
+    // ⚠️ 2026-11-18：改成 `logPoll` 节流。它和 SESS-PULL / DEL-SIG 一样是
+    // App 每 12 秒轮询一次打出来的，三条合计占日志 86%（1.5 MB / 19471 行）。
+    // 信息一点没少，只是同一来源每分钟最多一条 —— 排查时依然看得出「它在不在拉」。
+    logPoll(
+      `msg-pull:${req.params.userId}`,
       `[MSG-PULL] user=${req.params.userId} afterSeq=${String((req.query.afterSeq as string | undefined) ?? "(full)")}`,
     );
     try {
@@ -4188,7 +4211,7 @@ async function startServer() {
   app.get("/api/sessions/:userId", async (req, res) => {
     if (!(await verifyUserIdentity(req, res, req.params.userId, "读取会话列表"))) return;
     // 会话表拉取诊断：和 [MSG-PULL] 配对看，才能分清"另一端没拉"还是"拉了但没采用"。
-    console.log(`[SESS-PULL] user=${req.params.userId}`);
+    logPoll(`sess-pull:${req.params.userId}`, `[SESS-PULL] user=${req.params.userId}`);
     try {
       const allSessions = await loadSessions();
       const list = (allSessions[req.params.userId] || []).filter(
@@ -4344,7 +4367,7 @@ async function startServer() {
           s.deletedAt > since,
       );
       res.json(list);
-      console.log(`[DEL-SIG] user=${userId} 下发 ${list.length} 条删除信号（since=${since}）`);
+      logPoll(`del-sig:${userId}`, `[DEL-SIG] user=${userId} 下发 ${list.length} 条删除信号（since=${since}）`);
     } catch (error) {
       console.error("Load deletion signals error:", error);
       res.status(500).json({ error: "Failed to load deletion signals" });
