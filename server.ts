@@ -348,6 +348,15 @@ const getDb = (): DatabaseSync => {
     );
     CREATE INDEX IF NOT EXISTS idx_messages_user_session ON messages(user_id, session_id, seq);
     CREATE INDEX IF NOT EXISTS idx_messages_session_created ON messages(session_id, created_at);
+
+    -- 第三期：剩下 6 个「整份读写」的小文件。
+    -- 不拆字段、整份 JSON 存一格 —— 它们本来就是「读全量 → 改 → 写全量」，
+    -- 拆成列只会把语义改掉，而收益是 0（这些文件最大的才 1.5 KB）。
+    CREATE TABLE IF NOT EXISTS kv (
+      key        TEXT PRIMARY KEY,
+      data       TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `);
   settingsDb = db;
   return db;
@@ -626,6 +635,98 @@ const saveSessions = async (all: Record<string, any[]>): Promise<void> => {
     try { db.exec("ROLLBACK"); } catch { /* 已经回滚了 */ }
     throw err;
   }
+};
+
+// ==================== 剩下 6 个「整份读写」小文件的统一入口（第三期） ====================
+//
+// 这批文件有几个共同点，决定了迁法：
+//   · 全都是「读全量 → 改 → 写全量」，没有任何按字段查询的需求
+//   · 最大的 model_limits.json 才 1.5 KB
+//   · 其中 login_attempts / pending-decisions 用的是**同步** fs API
+//
+// 所以不拆表、整份 JSON 存进 kv 表的一格：语义完全不变，
+// 而 node:sqlite 本身是同步 API，那两处同步调用也能无缝换过来。
+//
+// ⚠️ 用**文件名**而不是常量做键：这些常量分散在文件各处（其中两个定义在 1400 行之后），
+// 用常量会碰到"还没初始化就被引用"（TDZ）。
+const KV_FILE_NAMES: Record<string, string> = {
+  "users.json": "users",
+  "active_sessions.json": "active_sessions",
+  "deletion_signals.json": "deletion_signals",
+  "model_limits.json": "model_limits",
+  "pending-decisions.json": "pending_decisions",
+  "login_attempts.json": "login_attempts",
+};
+
+/** 这个文件走数据库吗？走就返回 kv 表的键，否则 null。 */
+const kvKeyFor = (filePath: string): string | null =>
+  KV_FILE_NAMES[path.basename(filePath)] ?? null;
+
+/**
+ * 同步读一份「整份」存储。
+ *
+ * 没迁的文件仍然读文件、迁了的读 kv 表 —— 调用方不需要知道有没有迁。
+ */
+const readStoreSync = (filePath: string, fallback: any): any => {
+  const key = kvKeyFor(filePath);
+  if (key === null) {
+    try { return JSON.parse(fsSync.readFileSync(filePath, "utf-8")); } catch { return fallback; }
+  }
+  try {
+    const db = getDb();
+    const row = db.prepare("SELECT data FROM kv WHERE key = ?").get(key) as { data: string } | undefined;
+    if (!row) return fallback;
+    return JSON.parse(row.data);
+  } catch (err: any) {
+    console.error(`[DB] 读 kv(${key}) 失败，退回默认值:`, err?.message ?? err);
+    return fallback;
+  }
+};
+
+/** 同步写一份「整份」存储。 */
+const writeStoreSync = (filePath: string, value: any): void => {
+  const key = kvKeyFor(filePath);
+  if (key === null) {
+    fsSync.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf-8");
+    return;
+  }
+  const db = getDb();
+  db.prepare("INSERT OR REPLACE INTO kv (key, data, updated_at) VALUES (?, ?, ?)")
+    .run(key, JSON.stringify(value), Date.now());
+};
+
+/** 异步包装：给原本用 `await safeReadJSON(...)` 的地方用，调用点一个字不用改。 */
+const readStore = async <T>(filePath: string, fallback: T): Promise<T> =>
+  readStoreSync(filePath, fallback) as T;
+
+const writeStore = async (filePath: string, value: any): Promise<void> => {
+  writeStoreSync(filePath, value);
+};
+
+/**
+ * 一次性迁移：6 个 JSON 小文件 → kv 表。
+ *
+ * 逐个判断，某个键已经有了就跳过（所以可以反复调用、也可以分批）。
+ * **JSON 原文件保留不动**（回滚依据）。
+ */
+const migrateSmallFilesToDb = async (): Promise<string[]> => {
+  const db = getDb();
+  const migrated: string[] = [];
+  for (const [fileName, key] of Object.entries(KV_FILE_NAMES)) {
+    const exists = db.prepare("SELECT 1 AS x FROM kv WHERE key = ?").get(key);
+    if (exists) continue;                              // 已迁过
+    const filePath = path.join(DATA_DIR, fileName);
+    let raw: any;
+    try {
+      raw = JSON.parse(fsSync.readFileSync(filePath, "utf-8"));
+    } catch {
+      continue;                                       // 文件不存在或内容坏了，跳过
+    }
+    db.prepare("INSERT OR REPLACE INTO kv (key, data, updated_at) VALUES (?, ?, ?)")
+      .run(key, JSON.stringify(raw), Date.now());
+    migrated.push(fileName);
+  }
+  return migrated;
 };
 
 /**
@@ -1276,7 +1377,7 @@ async function verifyUserIdentity(
   }
 
   try {
-    const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
+    const sessions = await readStore(ACTIVE_SESSIONS_FILE, {});
     const slots = sessions[userId];
     // 设备类型识别不出来时，退化为「该用户的任一槽位匹配即可」：
     // 仍挡得住"光知道用户名"的陌生人，又不会因为头不规范而误伤正常用户。
@@ -1492,7 +1593,7 @@ async function appendDeletionSignal(
   if (!cleanUserId || !cleanId) return;
   try {
     await withFileLock(DELETION_SIGNALS_FILE, async () => {
-      const all = await safeReadJSON<Record<string, any[]>>(DELETION_SIGNALS_FILE, {});
+      const all = await readStore(DELETION_SIGNALS_FILE, {});
       const now = Date.now();
       const list = (all[cleanUserId] || []).filter(
         (s: any) => s && typeof s.deletedAt === "number" && now - s.deletedAt < DELETION_SIGNAL_TTL_MS,
@@ -1501,7 +1602,7 @@ async function appendDeletionSignal(
       const already = list.some((s: any) => s.id === cleanId && s.kind === kind);
       if (!already) list.push({ id: cleanId, kind, deletedAt: now });
       all[cleanUserId] = list;
-      await safeWriteJSON(DELETION_SIGNALS_FILE, all);
+      await writeStore(DELETION_SIGNALS_FILE, all);
     });
   } catch (err) {
     // 信号写失败不能影响删除本身（删除已经生效了，只是这次传播可能丢）
@@ -1684,7 +1785,7 @@ async function ensureModelLimitsInitialized(): Promise<void> {
           "qwen-max": 128000
         };
       }
-      await safeWriteJSON(MODEL_LIMITS_FILE, initialData);
+      await writeStore(MODEL_LIMITS_FILE, initialData);
       console.log(`[Model Limits] Initialized ${MODEL_LIMITS_FILE} from template.`);
     }
   } catch (err) {
@@ -1697,7 +1798,7 @@ async function getEffectiveModelContextLimit(modelName?: string): Promise<number
   if (!modelName || !modelName.trim()) return null;
   const rawModel = modelName.trim().toLowerCase();
   try {
-    const limits = await safeReadJSON<Record<string, number>>(MODEL_LIMITS_FILE, {});
+    const limits = await readStore(MODEL_LIMITS_FILE, {});
     // 1. Exact match
     if (typeof limits[rawModel] === 'number') {
       return limits[rawModel];
@@ -2729,6 +2830,12 @@ async function ensureDirs() {
       if (migratedMsgs.sessions > 0 || migratedMsgs.messages > 0) {
         console.log(`[DB] 已把 ${migratedMsgs.sessions} 个会话 / ${migratedMsgs.messages} 条消息从 JSON 迁入 lxai.db`);
       }
+      // 第三期：剩下 6 个「整份读写」的小文件（users / active_sessions /
+      // deletion_signals / model_limits / pending-decisions / login_attempts）。
+      const migratedSmall = await migrateSmallFilesToDb();
+      if (migratedSmall.length > 0) {
+        console.log(`[DB] 已把 ${migratedSmall.length} 个小文件迁入 kv 表：${migratedSmall.join(", ")}`);
+      }
     } catch (err: any) {
       // ⚠️ 迁移失败不能静默吞掉：此时库里可能还是空的，用户会看到"设置全没了"。
       // 让它显式报出来，人一眼就能判断该回滚还是重试。
@@ -2917,7 +3024,7 @@ async function startServer() {
     }
 
     // 2) 一邮一号
-    const users = await safeReadJSON<any[]>(USERS_FILE, []);
+    const users = await readStore(USERS_FILE, []);
     if (users.some((u: any) => normalizeEmail(u.email) === email)) {
       return res.status(409).json({ error: "该邮箱已注册，请直接登录" });
     }
@@ -3050,7 +3157,7 @@ async function startServer() {
       const passwordHash = await hashPassword(password);
 
       await withFileLock(USERS_FILE, async () => {
-        const users = await safeReadJSON<any[]>(USERS_FILE, []);
+        const users = await readStore(USERS_FILE, []);
         if (users.find((u: any) => u.username === username)) {
           errorMsg = "该账号名已被占用";
           return;
@@ -3069,7 +3176,7 @@ async function startServer() {
           createdAt: new Date().toISOString(),
         };
         users.push(newUser);
-        await safeWriteJSON(USERS_FILE, users);
+        await writeStore(USERS_FILE, users);
         registeredUser = newUser;
       });
 
@@ -3124,7 +3231,7 @@ async function startServer() {
       return res.status(403).json({ error: ts.reason || "人机验证未通过" });
     }
 
-    const users = await safeReadJSON<any[]>(USERS_FILE, []);
+    const users = await readStore(USERS_FILE, []);
     const user = users.find((u: any) => u.username === username);
     if (!user) {
       return res.status(404).json({ error: "账号不存在" });
@@ -3204,7 +3311,7 @@ async function startServer() {
       return res.status(429).json({ error: "操作过于频繁，请稍后再试", retryAfterSec: probe.retryAfterSec });
     }
 
-    const users = await safeReadJSON<any[]>(USERS_FILE, []);
+    const users = await readStore(USERS_FILE, []);
     const user = users.find((u: any) => u.username === username);
     if (!user) {
       return res.status(404).json({ error: "账号不存在" });
@@ -3242,10 +3349,10 @@ async function startServer() {
     try {
       // 1) 账号本体
       await withFileLock(USERS_FILE, async () => {
-        const all = await safeReadJSON<any[]>(USERS_FILE, []);
+        const all = await readStore(USERS_FILE, []);
         const kept = all.filter((u: any) => u.username !== username);
         removed.users = all.length - kept.length;
-        await safeWriteJSON(USERS_FILE, kept);
+        await writeStore(USERS_FILE, kept);
       });
 
       // 2) 以账号名为顶层键的数据文件
@@ -3372,8 +3479,8 @@ async function startServer() {
 
   const loadLoginFailures = () => {
     try {
-      if (!fsSync.existsSync(LOGIN_ATTEMPTS_FILE)) return;
-      const raw = JSON.parse(fsSync.readFileSync(LOGIN_ATTEMPTS_FILE, "utf-8"));
+      const raw = readStoreSync(LOGIN_ATTEMPTS_FILE, null);
+      if (!raw) return;
       for (const [key, times] of Object.entries(raw?.failures ?? {})) {
         if (Array.isArray(times)) loginFailures.set(key, times.map(Number).filter((n) => Number.isFinite(n)));
       }
@@ -3391,7 +3498,7 @@ async function startServer() {
     try {
       const failures: Record<string, number[]> = {};
       for (const [k, v] of loginFailures) failures[k] = v;
-      fsSync.writeFileSync(LOGIN_ATTEMPTS_FILE, JSON.stringify({ version: 1, savedAt: Date.now(), failures }), "utf-8");
+      writeStoreSync(LOGIN_ATTEMPTS_FILE, { version: 1, savedAt: Date.now(), failures });
     } catch (err: any) {
       console.error("[Security] 登录失败计数落盘失败:", err?.message ?? err);
     }
@@ -3478,7 +3585,7 @@ async function startServer() {
     }
 
     try {
-      const users = await safeReadJSON<any[]>(USERS_FILE, []);
+      const users = await readStore(USERS_FILE, []);
       const user = users.find((u: any) => u.username === username);
       
       if (!user) {
@@ -3504,12 +3611,12 @@ async function startServer() {
         try {
           const upgradedHash = await hashPassword(password || "");
           await withFileLock(USERS_FILE, async () => {
-            const all = await safeReadJSON<any[]>(USERS_FILE, []);
+            const all = await readStore(USERS_FILE, []);
             const idx = all.findIndex((u: any) => u.username === username);
             if (idx !== -1) {
               all[idx].passwordHash = upgradedHash;
               delete all[idx].password;
-              await safeWriteJSON(USERS_FILE, all);
+              await writeStore(USERS_FILE, all);
             }
           });
           console.log(`[Security] 已将账号 ${username} 的明文口令升级为 bcrypt 哈希`);
@@ -3548,7 +3655,7 @@ async function startServer() {
       let currentVersion = 0;
 
       await withFileLock(ACTIVE_SESSIONS_FILE, async () => {
-        const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
+        const sessions = await readStore(ACTIVE_SESSIONS_FILE, {});
         if (!sessions[username]) sessions[username] = {};
 
         const existingSession = sessions[username][cleanDeviceType];
@@ -3590,7 +3697,7 @@ async function startServer() {
           // 每次通过的登录都把版本 +1；客户端拿它当下一轮的 baseVersion
           version: slotVersion + 1,
         };
-        await safeWriteJSON(ACTIVE_SESSIONS_FILE, sessions);
+        await writeStore(ACTIVE_SESSIONS_FILE, sessions);
       });
 
       // ⚠️ CAS 冲突：客户端看到的 version 已经不是槽位里那个了。
@@ -3722,7 +3829,7 @@ async function startServer() {
     }
 
     try {
-      const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
+      const sessions = await readStore(ACTIVE_SESSIONS_FILE, {});
       const active = sessions[userId]?.[deviceType];
 
       if (active && active.clientSessionId && active.clientSessionId !== clientSessionId) {
@@ -3782,12 +3889,12 @@ async function startServer() {
         if (now - last > 60_000) {
           try {
             await withFileLock(ACTIVE_SESSIONS_FILE, async () => {
-              const fresh = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
+              const fresh = await readStore(ACTIVE_SESSIONS_FILE, {});
               const slot = fresh[userId]?.[deviceType];
               // 锁内重新读一次再写：期间可能刚发生过登录换号，不能拿旧副本覆盖
               if (slot && slot.clientSessionId === clientSessionId) {
                 slot.lastActive = now;
-                await safeWriteJSON(ACTIVE_SESSIONS_FILE, fresh);
+                await writeStore(ACTIVE_SESSIONS_FILE, fresh);
               }
             });
           } catch (writeErr) {
@@ -3970,10 +4077,10 @@ async function startServer() {
     if (targetUser) {
       try {
         await withFileLock(ACTIVE_SESSIONS_FILE, async () => {
-          const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
+          const sessions = await readStore(ACTIVE_SESSIONS_FILE, {});
           if (sessions[targetUser]?.[cleanDeviceType]?.clientSessionId === clientSessionId) {
             delete sessions[targetUser][cleanDeviceType];
-            await safeWriteJSON(ACTIVE_SESSIONS_FILE, sessions);
+            await writeStore(ACTIVE_SESSIONS_FILE, sessions);
           }
         });
       } catch (e) {
@@ -4225,7 +4332,7 @@ async function startServer() {
     const userId = (req.params.userId || "").trim();
     if (!(await verifyUserIdentity(req, res, userId, "读取删除信号"))) return;
     try {
-      const all = await safeReadJSON<Record<string, any[]>>(DELETION_SIGNALS_FILE, {});
+      const all = await readStore(DELETION_SIGNALS_FILE, {});
       const now = Date.now();
       const sinceRaw = parseInt(String(req.query.since ?? ""), 10);
       const since = Number.isFinite(sinceRaw) ? sinceRaw : 0;
@@ -4878,7 +4985,7 @@ async function startServer() {
   app.get("/api/model-limits", async (req, res) => {
     try {
       await ensureModelLimitsInitialized();
-      const limits = await safeReadJSON<Record<string, number>>(MODEL_LIMITS_FILE, {});
+      const limits = await readStore(MODEL_LIMITS_FILE, {});
       res.json({ success: true, limits });
     } catch (error) {
       console.error("Failed to read model limits:", error);
@@ -4926,7 +5033,7 @@ async function startServer() {
       const { limits } = req.body || {};
       if (limits && typeof limits === 'object' && !Array.isArray(limits)) {
         await withFileLock(MODEL_LIMITS_FILE, async () => {
-          await safeWriteJSON(MODEL_LIMITS_FILE, limits);
+          await writeStore(MODEL_LIMITS_FILE, limits);
         });
         return res.json({ success: true, message: "Model limits updated successfully" });
       }
@@ -4962,7 +5069,7 @@ async function startServer() {
     try {
       // bcrypt 比对是异步的，不能放进同步的文件锁回调里，
       // 因此先读取校验，再在锁内落盘（并在锁内复查用户仍存在）。
-      const snapshot = await safeReadJSON<any[]>(USERS_FILE, []);
+      const snapshot = await readStore(USERS_FILE, []);
       const snapshotUser = snapshot.find(matchUser);
       if (!snapshotUser) {
         return res.status(401).json({ error: "原密码错误" });
@@ -4976,14 +5083,14 @@ async function startServer() {
       const newHash = await hashPassword(newPassword || "");
       let success = false;
       await withFileLock(USERS_FILE, async () => {
-        const users = await safeReadJSON<any[]>(USERS_FILE, []);
+        const users = await readStore(USERS_FILE, []);
         const userIndex = users.findIndex(matchUser);
         if (userIndex === -1) {
           return;
         }
         users[userIndex].passwordHash = newHash;
         delete users[userIndex].password; // 清除可能残留的明文字段
-        await safeWriteJSON(USERS_FILE, users);
+        await writeStore(USERS_FILE, users);
         success = true;
       });
 
@@ -5004,10 +5111,10 @@ async function startServer() {
         const uname = String(snapshotUser.username ?? "").trim();
         if (uname) {
           await withFileLock(ACTIVE_SESSIONS_FILE, async () => {
-            const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
+            const sessions = await readStore(ACTIVE_SESSIONS_FILE, {});
             if (sessions && typeof sessions === "object" && sessions[uname]) {
               delete sessions[uname];
-              await safeWriteJSON(ACTIVE_SESSIONS_FILE, sessions);
+              await writeStore(ACTIVE_SESSIONS_FILE, sessions);
             }
           });
         }
@@ -6633,12 +6740,12 @@ if %errorlevel% neq 0 (
         const { token: _dropped, ...rest } = item as any;
         return rest;
       };
-      fsSync.writeFileSync(PENDING_STORE_FILE, JSON.stringify({
+      writeStoreSync(PENDING_STORE_FILE, {
         version: 1,
         savedAt: Date.now(),
         questions: [...pendingQuestions.values()].map(stripToken),
         approvals: [...pendingApprovals.values()].map(stripToken),
-      }), "utf-8");
+      });
     } catch (err: any) {
       console.error("[Pending] 待办落盘失败:", err?.message ?? err);
     }
@@ -6658,8 +6765,8 @@ if %errorlevel% neq 0 (
   /** 启动时恢复上次没处理完的待办。 */
   const loadPendingDecisions = () => {
     try {
-      if (!fsSync.existsSync(PENDING_STORE_FILE)) return;
-      const raw = JSON.parse(fsSync.readFileSync(PENDING_STORE_FILE, "utf-8"));
+      const raw = readStoreSync(PENDING_STORE_FILE, null);
+      if (!raw) return;
       for (const item of raw?.questions ?? []) {
         if (item?.questionId) pendingQuestions.set(item.questionId, item);
       }
@@ -7003,7 +7110,7 @@ if %errorlevel% neq 0 (
       if (!(await verifyUserIdentity(req, res, userId, "换发桥接凭证"))) return;
 
       // 校验账号真实存在，避免为任意字符串凭空造 token
-      const allUsers = await safeReadJSON<any[]>(USERS_FILE, []);
+      const allUsers = await readStore(USERS_FILE, []);
       const user = allUsers.find((u: any) => u.username === userId || u.id === userId);
       if (!user) {
         return res.status(401).json({ error: "账号无效，请重新登录" });
@@ -7154,7 +7261,7 @@ if %errorlevel% neq 0 (
        * 所以换发之前先确认 `users.json` 里还有这个人；没有就当场把这份凭证也删掉
        * （自愈，不留垃圾），并明确回 401。
        */
-      const allUsersForCheck = await safeReadJSON<any[]>(USERS_FILE, []);
+      const allUsersForCheck = await readStore(USERS_FILE, []);
       const accountStillExists = allUsersForCheck.some(
         (u: any) => u?.username === record.userId || String(u?.id) === String(record.userId),
       );
@@ -7455,7 +7562,7 @@ if %errorlevel% neq 0 (
       if (!(await verifyUserIdentity(req, res, scannerUserId, "扫码配对"))) return;
 
       // 校验账号真实存在，防止伪造 userId 把二维码绑到他人账号
-      const allUsers = await safeReadJSON<any[]>(USERS_FILE, []);
+      const allUsers = await readStore(USERS_FILE, []);
       const scanner = allUsers.find((u: any) => u.username === scannerUserId || u.id === scannerUserId);
       if (!scanner) {
         return res.status(401).json({ success: false, error: "扫码账号无效，请重新登录" });
@@ -7703,7 +7810,7 @@ if %errorlevel% neq 0 (
       }
 
       // 与 check-session 同一套单点互斥校验：被顶下线的设备不允许再挂长连接
-      const sessions = await safeReadJSON<Record<string, Record<string, DeviceSession>>>(ACTIVE_SESSIONS_FILE, {});
+      const sessions = await readStore(ACTIVE_SESSIONS_FILE, {});
       const active = sessions[userId]?.[deviceType === "mobile" ? "mobile" : "desktop"];
 
       // 【关键】槽位完全不存在 = 服务端从来不认识这个凭证（被清空 / 数据回滚 / 换了服务器）。
@@ -8642,7 +8749,7 @@ if %errorlevel% neq 0 (
     if (!requireAdmin(req, res)) return;
     try {
       const settingsAll = await loadSettingsFile().catch(() => ({}) as any);
-      const sessionsRaw = await safeReadJSON<any>(ACTIVE_SESSIONS_FILE, {}).catch(() => ({}) as any);
+      const sessionsRaw = await readStore(ACTIVE_SESSIONS_FILE, {}).catch(() => ({}) as any);
       const msgs = await loadMessages().catch(() => ({}) as any);
 
 
