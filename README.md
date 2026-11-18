@@ -131,7 +131,10 @@ flutter build windows --release
 # 产物：build/windows/x64/runner/Release/LxAI.exe（整个 Release 目录一起分发）
 ```
 
-### 4.2 打包成 Windows 安装程序（推荐分发方式）
+### 4.2 打包成 Windows 安装程序（**旧 Inno 版，仅留档**）
+
+> ⚠️ **新版安装器已迁到独立仓库** [`lx00924-lx/lxai-setup-flutter`](https://github.com/lx00924-lx/lxai-setup-flutter)
+> （C++ + WebView2 单文件）。下面这段是旧的 Inno Setup 版，仍能独立构建、但已不再迭代。
 
 直接分发 Release 目录，用户还得自己准备 Python 环境才能跑本地 Bridge。用安装器分发则
 **用户无需任何 Python 环境**：它把 Flutter 产物与一份**私有 Python 运行时**
@@ -140,7 +143,7 @@ flutter build windows --release
 
 ```powershell
 cd installer
-pwsh -File build-installer.ps1
+powershell -ExecutionPolicy Bypass -File build-installer.ps1
 # 产物：installer/output/LxAI-Setup-<版本>.exe（约 22 MB，版本号自动读 pubspec.yaml）
 ```
 
@@ -362,7 +365,7 @@ python lxai_bridge.py ... --insecure          # 等价于环境变量 LXAI_INSEC
 > 2026-10-02 已统一为"默认校验、显式降级"。用 App 启动桥接时它不传 `--insecure`，
 > 需要放开的话设系统环境变量 `LXAI_INSECURE_TLS=1`。
 
-**③ 端口填哪个 —— 取决于你用的是哪种 DSH**
+**④ 端口填哪个 —— 取决于你用的是哪种 DSH**
 
 桥接连的是本机 DSH 的 HTTP 服务，**端口随 DSH 形态而变**：
 

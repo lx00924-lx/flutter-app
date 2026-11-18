@@ -15,7 +15,11 @@
 > | `/api/bridge/current-token` 漏 Token | ✅ 要 `deviceToken`，无则 401 |
 > | Socket.IO 房间未鉴权 | ✅ 两条推送通道**都不是裸连**（`server.ts` L5400 / L5492）：<br>`/ws/agent` 要 Agent Token，缺失或占位值直接 `close(4001)`；<br>`/ws/app` 要 `userId` + `clientSessionId`，并按单点互斥槽位校验 —— 槽位被别的 sessionId 占着就 `close(4002)` 踢掉，所以拿不到对方 clientSessionId 就连不上 |
 >
-> ⚠️ **唯一仍未保护的一条**：`GET /api/messages/:userId`（`server.ts` 约 2745 行）
+> ✅ **已修复（2026-11-17 安全审计）**：`GET /api/messages/:userId` 现在走
+> `verifyUserIdentity()`，无凭据返回 403。下面这段是**当时的记录**，保留是为了说明
+> 它曾漏成什么样 —— 不要读成「现在仍然这样」。
+>
+> 当时的问题：`GET /api/messages/:userId`（`server.ts` 约 2745 行）
 > 仅凭用户名就能读走该用户**全部聊天记录**。它是**读**接口，且不涉及密钥。
 > 将来要收紧的话，从这一条入手即可 —— 不必再上整套会话令牌。
 
