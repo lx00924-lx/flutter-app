@@ -106,10 +106,12 @@ cp .env.example .env
 ```
 
 > **注销会删什么、不删什么**（页面完成时会如实回显实际删除项）：
-> `users.json`（账号本体）、`messages_v2.json`（聊天记录）、`settings.json`（云端设置）、
-> `active_sessions.json`（登录槽位）里该账号的部分会被删除；
-> **`messages_media/` 里的图片 / 语音等媒体文件不删** —— 那些文件名是随机生成的、不含用户信息，
-> 无法可靠判定归属，宁可少删也不误删他人的文件。要支持得先把上传改成"按 userId 建子目录"。
+> 会删：账号本体（`users`，在 `messages_data/lxai.db` 的 kv 表里）、设备凭证（`device_tokens.json`）。
+> ⚠️ **聊天记录 / 会话 / 云端设置 / 登录槽位已迁进 `lxai.db`，注销目前清的是原 JSON 文件、库里的行仍在**
+> （已知待修）；`settings_media/` 里的设置图片同样不删。
+> **媒体文件一律不删**：`messages_media/` 里的图片 / 语音、`messages_data/settings_media/` 里的
+> 背景与头像 —— 文件名是随机名或内容哈希、不含用户信息，无法可靠判定归属，
+> 宁可少删也不误删他人的文件。要支持得先把上传改成"按 userId 建子目录"。
 >
 > 另外，注册功能上线前创建的**老账号没有绑定邮箱**，无法邮箱验证自助注销，接口会返回 409 并说明原因。
 
@@ -187,7 +189,7 @@ storeFile=AI.jks
 ```bash
 flutter build apk     --release --dart-define=SERVER_BASE_URL=https://your-domain.com
 flutter build windows --release --dart-define=SERVER_BASE_URL=https://your-domain.com
-flutter run                                 --dart-define=SERVER_BASE_URL=http://192.168.1.10:3000
+flutter run                                 --dart-define=SERVER_BASE_URL=http://127.0.0.1:3000   # 中继只监听回环
 ```
 
 该参数会统一作用于 App 的**全部**中继通信与本地 Bridge 启动命令：登录、消息同步、
@@ -444,8 +446,8 @@ Windows 端首次构建需要 VS C++ 工具链；Android 端需要 SDK 与 JDK�
 - **`<部署目录>/.secrets/master.key` 是全部用户密钥的总钥匙。** 丢了 → 用户填的 API Key / Agent Token 永久解不开；泄露 → 等于泄露所有用户的密钥。要单独备份，**且不要和 `messages_data/` 放在同一个备份里**（那正是这一层设计要防的场景）。
 - **别关掉桥接的 TLS 证书校验。** `--insecure` / `LXAI_INSECURE_TLS=1` 只给自签名中继与企业代理用；开着它时，同网络里能做中间人的人可以冒充中继拿到配对 Token（= 直接驱动你电脑上的 Agent）。见 §六 ③。
 - **公网部署时，反代必须"覆盖"而不是"追加" `X-Forwarded-For`**，否则客户端能伪造 IP 绕过注册限流、或把限流栽赃到别人 IP 上。见 §5.1。
-- 服务端数据落盘在 `messages_data/`、媒体在 `messages_media/`，两者均已在 `.gitignore` 中，不会误提交用户数据。
-- 公网部署请自行配置 HTTPS 反向代理，并妥善保管 `messages_data/settings.json`（内含各用户的 API Key）。
+- 服务端数据落盘在 `messages_data/`（SQLite `lxai.db`；**备份要连 `lxai.db-wal` 一起**，只备 `.db` 会丢最近写入）、媒体在 `messages_media/` 与 `messages_data/settings_media/`，均在 `.gitignore` 中，不会误提交用户数据。首次启动会把老 JSON 迁进库（日志打 `[DB] 已把 N 个…`，幂等；**原 JSON 保留、别删**，它是迁移源与回滚依据）。
+- 公网部署请自行配置 HTTPS 反向代理，并妥善保管 `messages_data/lxai.db`（内含各用户加密后的 API Key）与 `.secrets/master.key`：**两者要分开备份**。
 
 ---
 

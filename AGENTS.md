@@ -11,7 +11,7 @@
 ## 2. 绝对受保护文件与目录（严禁删除、重构破坏或提议删除）
 - `lxai_bridge.py`：电脑端反向长连接守护进程（用于解决无公网 IP 电脑连接云端中继、与 Harness 本地通信），属于核心生产力资产，**绝不可删除或废弃**！
 - `flutter_app/`：整个 Flutter 纯原生跨端多平台工程，包含所有 Dart 源码、状态管理（Provider）、本地持久化、云端增量漫游与 Android/Windows 打包配置，**绝不可破坏或删除**！
-- `server.ts`：包含 Harness 反向中继信道、Token 调度分配、消息持久化落盘、用户设置云端漫游（`messages_data/settings.json`）与单点登录互斥控制，**绝不可破坏核心逻辑**！
+- `server.ts`：包含 Harness 反向中继信道、Token 调度分配、消息持久化落盘、用户设置云端漫游（`messages_data/lxai.db`）与单点登录互斥控制，**绝不可破坏核心逻辑**！
 - `src/`：已精简的 LxAI 官网介绍与下载门户（Navbar / Hero / Features / Architecture / Downloads / ContactFooter），通过 GitHub Releases API 展示并分发多端安装包。
 
 ## 3. 云端同步与持久化规范
@@ -20,8 +20,8 @@
 - **账号注册与注销只在官网**（2026-10-02 起，别再往 App 里加注册）：
   - **注册**：官网 `POST /api/register` 要求 `{username, password, email, code}` —— 邮箱验证码 + Cloudflare Turnstile + **一邮一号**。App 登录页**已无注册入口**（`login_screen.dart` 只留「还没有账号？点击前往官网注册」跳转，用 `UrlLauncherHelper.openUrl(AppConfig.normalizedServerBaseUrl)`）。
     ⚠️ `SyncService.registerWithServer` / `SettingsProvider.registerWithServer` 已标 `@Deprecated`，只发 `username`+`password`，**调用必定被 400 打回**。
-  - **注销**：`POST /api/account/delete-code`（发码）+ `POST /api/account/delete`（执行）。验证码**只发给服务端从 `users.json` 查出的绑定邮箱**，前端不提供"接收验证码的邮箱"输入框 —— 否则填别人的账号名 + 自己的邮箱就能注销别人的账号。
-  - **删除范围**：`users.json`（数组，按用户名过滤）、`messages_v2.json` / `settings.json` / `active_sessions.json`（按用户名整键移除），各自在 `withFileLock` 内完成。
+  - **注销**：`POST /api/account/delete-code`（发码）+ `POST /api/account/delete`（执行）。验证码**只发给服务端从账号表 `users`（`lxai.db` 的 kv 表）查出的绑定邮箱**，前端不提供"接收验证码的邮箱"输入框 —— 否则填别人的账号名 + 自己的邮箱就能注销别人的账号。
+  - **删除范围**：账号本体 `users`（kv 表，按用户名过滤）、`device_tokens.json`，以及按用户名整键移除的消息 / 会话 / 设置 / 登录槽位（现都在 `lxai.db`），各自在 `withFileLock` 内完成。
     ⚠️ **`messages_media/` 刻意不删**：文件名是 multer 随机生成的、不含用户信息，无法可靠判定归属，宁可少删也不误删他人文件。要支持得先把上传改成"按 userId 建子目录"。
   - 前置配置：`.env` 里的 SMTP（用授权码，不是登录密码；`SMTP_SECURE` 语义是"连上就立刻 TLS"，465 填 1、587 必须填 0）与 `TURNSTILE_SECRET` / `VITE_TURNSTILE_SITE_KEY`（后者是**构建期**注入，改完要 `npm run build`）。未配置时接口**明确返回 503/拒绝**，不静默失败。
   - 回归测试脚本在**独立于本仓库的本地沙箱**里（起真实 `dist/server.cjs` + 自建 SMTP 接收器，
@@ -252,12 +252,12 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 
 ## 4. 单点互斥 `clientSessionId` 的语义（改登录 / 会话逻辑前必读）
 
-服务端 `messages_data/active_sessions.json` 按「1 手机 + 1 电脑」分槽记录，判定时**严格相等**比对：
+服务端 `active_sessions`（`lxai.db` 的 kv 表）按「1 手机 + 1 电脑」分槽记录，判定时**严格相等**比对：
 
 1. 登录**成功之后**才把新 id 落盘（`settings_provider.loginWithServer`）。先改本地再发请求，
-   一旦请求失败（中继重启/断网）并走"离线登录"兜底，就会留下一个**服务端从没见过的新 id**，
+   一旦请求失败（中继重启/断网）就会留下一个**服务端从没见过的新 id**，
    之后每次握手/轮询都被判"已在另一台设备登录" —— 即"每次重启 App 都弹账号已下线"的假顶号。
-2. 离线登录必须**沿用旧 id**。
+2. **不要再加"离线登录"兜底**（2026-11-13 已删）：中继不可达就如实报错，密码只用一次、不落盘。
 3. 服务端 `canTakeover` 只在「该槽位 3 分钟无活跃」时下发，这是分叉的自愈通道；
    真在用的设备槽位始终新鲜，拿不到它，所以不会两台机器互抢。
 4. `lastActive` **必须落盘**（60 秒节流）：只改内存副本会让活跃槽位三分钟后被误判过期。
@@ -345,7 +345,7 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 
 ### 8.3 排查判据速查
 
-- **中继重启后**桥接恢复分两段：**注册**（归属反查要读 6.6 MB 的 settings.json，
+- **中继重启后**桥接恢复分两段：**注册**（归属反查要读整份设置 `lxai.db`，
   启动期查不到 → 返回 503 可重试，而非 403）与**切回 WebSocket**（冷却 15s / 60s）。
 - **桥接注册成功 → 推出第一份目录约 4 秒**，此间 `/api/agent/sessions` 是
   `online=true` + 空数组 —— 不是故障。
@@ -408,16 +408,15 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 
 - `AGENT_TASK_TIMEOUT_MS` 默认 **30 分钟**（同名环境变量可覆盖）；等用户拍板时**再顺延一个完整窗口**。
   历史值是 5 分钟 —— 会把 9 分钟就能成功的任务判死，而 DSH 那边还在跑（用户看到"执行超时"却发现过程还在长）。
-- 设置负载 **2 MB 硬上限**（超了 413，`server.ts` 的 `settingsPayloadGuard`）。所以图像字段必须先在客户端压进预算：
-  头像 512px/128KB、聊天背景 **1920px/640KB**、启动图 **1440px/400KB**（2026-09-29 调整，原为 1440/480 与 1080/320）。
+- 设置负载 **2 MB 硬上限**（超了 413，`server.ts` 的 `settingsPayloadGuard`）。所以图要压进预算（2026-11-18 起三张图拆成 `messages_data/settings_media/` 独立文件、设置里只存 `media:v1:` 引用，取图走 `GET /api/settings/media/...`；但新选的图仍是 base64 随写入上来，`splashImage` 未拆、始终在负载里）：
+  头像 512px/128KB、聊天背景 **1920px/640KB**、启动图 **1440px/400KB**。
   ⚠️ **这几个数是受 2 MB 上限反推出来的**：base64 长度 = 字节数 × 4/3，四者之和 × 4/3 + 其余字段必须 < 2 MB
-  （即四者之和 ≤ 约 1.5 MB）。**要调大任何一项前先重算总和**，否则整次设置推送会被 413 打回、图片再也同步不上去；
+  （即四者之和 ≤ 约 1.5 MB）。**要调大任何一项前先重算总和**，否则整次设置推送会被 413 打回；
   推导过程写在 `settings_provider.dart` 的 `_mediaBudgetBytes` 注释里。
 - 图像字段**内容没变就不重传**（`omitMediaOnCloudPush` + FNV-1a 指纹），且**该判断跨 App 重启依然有效** ——
   推送成功时记指纹，另外 `pullCloudSettings()` 会用云端实际返回的内容重新校准（2026-09-29 修：此前指纹是
-  实例字段，冷启动后的第一次推送会把四个字段全量重传，实测 525 KB，占云端设置 99.6%）；
-  启动时会把历史遗留的超大图像**就地压缩**（实测把一个 6.14 MB 的头像压到 52 KB，
-  云端设置从 6.59 MB 降到 0.50 MB）。
+  实例字段，冷启动后第一次推送会把四个字段全量重传）；
+  启动时会把历史遗留的超大图像**就地压缩**。
 
 ### 9.6 中文思考 = 用户 preset（不用改代码）
 
@@ -455,7 +454,7 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
   `prompt_payload["images"]`。
   ⚠️ **绝不能往 `content_list` 塞图片块** —— 那是「原生 WebSocket RPC 通道」的 payload，
   只认纯文本块；它位于候选循环**之前、最先尝试**，一挂就整轮降级，把正常的文字消息与
-  预设切换一起牵连（2026-10-01 为此整体回退过图片功能）。
+  预设切换一起牵连。
 - ⚠️ **插件不要自己调 `ctx.attachments.admitPromptContent()`**。`sessions().prompt()`
   内部的 admit 路径**本来就会受理**（`dsh-api-session-controller` 的 `admit()`）。
   先受理一次的话，传下去的是 `{type:'image', attachment:{...}}`，宿主再受理时读不到
@@ -470,8 +469,7 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 - **诊断手法**（这次就是靠它定位的）：拿安装目录的私有 Python 直接调端点做对照实验 ——
   `dsh_headers()` 可以复用桥接自己的签名逻辑。同一提示词**不带图 200 / 带一张 1×1 PNG
   就失败**，一步就把范围从"整条链路"缩到"图片专属分支"。比反复在 App 里试点快得多。
-- **手机端要单独重打 APK**：`LxAI-1.0.1.apk`（09-29 上传）比发图代码（10-01）还早，
-  那份 App **根本没有发图功能**。
+- **手机端要单独重打 APK**：旧包可能比发图代码早，那份 App 根本没有发图功能。
 
 ## 10. PowerShell 脚本必须带 UTF-8 BOM（本机只有 PS 5.1）
 
@@ -529,7 +527,7 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 ### 12.1 身份与授权
 
 - **身份一律走 `verifyUserIdentity()`**：认 `x-client-session-id`（登录时服务端签发、写进
-  `messages_data/active_sessions.json` 槽位的 UUID v4），**不要**把 URL/body 里的 `userId`
+  `active_sessions` 槽位的 UUID v4，存 `lxai.db` 的 kv 表），**不要**把 URL/body 里的 `userId`
   当身份 —— 它是公开可猜的（本项目就是顺序数字 / 手机号）。
   新加接口时先问一句：「**不传任何凭据时它返回什么？**」
 - **列表类接口必须强制按 `userId` 过滤，且失败方向是拒绝**：
@@ -575,7 +573,7 @@ flutter build windows --release --dart-define=SERVER_BASE_URL=https://你的域�
 往里堆过程细节有三个实际代价：
 
 1. **挤爆预算**：工作区指令有 65536 字节上限，超了会被**静默截断** ——
-   截断之后文件**末尾内容读不到**，比"少写点"严重得多（本项目一度涨到 67310 字节）。
+   截断之后文件**末尾内容读不到**，比"少写点"严重得多。
 2. **等于附赠排查清单**：把"哪里缺过校验、怎么利用、错误码叫什么、验证脚本在哪"
    写在这里，读者就不只是协作者了。**修复本身在代码里看得见，但没必要再写一份说明书。**
    这类内容放提交信息或内部文档。
