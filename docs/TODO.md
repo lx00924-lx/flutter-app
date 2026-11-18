@@ -328,6 +328,45 @@ M5 的原始定义在**同一层的研究目录** `lxai-installer-research`（�
 ⚠️ **别再犯的坑**：修这个时容易顺手"登录时清空本地库" —— 那会连带清掉
 **还没同步上云的消息**（离线期间发的）。正确做法是**按 userId 分库/分键**，不是"登录时清空"。
 
+## 11. 数据库迁移第三期（2026-11-18，**等用户拍板才做**）
+
+第一、二期已上线并验证（提交 `499dc2f` / `cbab4c0` / `f57ef24`）：
+`settings` / `sessions` / `messages` 三张表已经在 `messages_data/lxai.db` 里。
+详细记录见 `docs/数据库迁移-2026-11-18复核.md` §7 与 §9。
+
+**第三期剩两件事**（来自那份文档 §4）：
+
+### 11.1 图片从设置里拆成静态文件
+
+`customBackground` 416 KB / `userAvatar` 47 KB / `aiAvatar` 25 KB，
+现在整份 base64 存在 `settings.data` 这个 JSON 列里，占设置表体积的 99.5%。
+
+拆法：落盘成静态文件、设置里只存路径。
+⚠️ **这会改到 App 端**（`settings` 字段从 base64 变路径）—— 不是纯服务端改动，
+属于跨端协议变更，得两端一起改、一起验。
+
+### 11.2 剩余 6 个小文件迁进库
+
+| 文件 | 大小 | 注意 |
+| :--- | ---: | :--- |
+| `users.json` | 372 B | 用户表，注销流程依赖它 |
+| `active_sessions.json` | 659 B | ⚠️ **单点登录互斥的真相来源**：`version` 做 CAS、`lastActive` 60 秒节流落盘 —— 语义一个都不能丢 |
+| `deletion_signals.json` | 755 B | 删除信号，App 靠它收敛 |
+| `model_limits.json` | 1.5 KB | 全局配置，无用户数据，最好迁 |
+| `pending-decisions.json` | 67 B | 全是空结构 |
+| `login_attempts.json` | 51 B | 登录失败计数，必须落盘（重启清零就会被绕过） |
+
+**建议顺序**：先迁 `model_limits` / `pending-decisions` / `login_attempts`（无用户数据、风险最低），
+再迁 `users` / `deletion_signals`，**`active_sessions` 放最后**（它是互斥的真相来源，要单独设计验证）。
+
+### 11.3 还有一条没实测
+
+**真实发消息的写入路径**：`saveMessages`（整份覆盖那套）从上线起还没被真实消息触发过 ——
+迁移用的是 `migrateMessagesJsonToDb()` 里另一段 INSERT。
+
+该写入路径外层有 try/catch 并会打 `Socket error saving message`，不会静默丢数据。
+但**没验过就是没验过**，下次 App 发消息后看一眼日志就能确认。
+
 ## 记录格式（沿用即可）
 
 每条至少写清四件事，否则下次还得重新摸一遍代码：
