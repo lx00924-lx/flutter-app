@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import bcrypt from "bcryptjs";
 import nodemailer, { type Transporter } from "nodemailer";
-import { randomBytes, randomUUID, randomInt, createCipheriv, createDecipheriv, timingSafeEqual } from "crypto";
+import { randomBytes, randomUUID, randomInt, createCipheriv, createDecipheriv, createHash, timingSafeEqual } from "crypto";
 import FormData from "form-data";
 import { createServer, request as httpRequest } from "http";
 import { request as httpsRequest } from "https";
@@ -484,7 +484,7 @@ const loadSettingsFile = async (): Promise<Record<string, any>> => {
   const out: Record<string, any> = {};
   for (const r of rows) {
     try {
-      out[r.user_id] = mapSettingsSecrets(JSON.parse(r.data || "{}"), "dec");
+      out[r.user_id] = joinSettingsMedia(mapSettingsSecrets(JSON.parse(r.data || "{}"), "dec"));
     } catch (err: any) {
       // 单条坏数据不该让所有人读不到设置
       console.error(`[DB] 账号 ${r.user_id} 的设置解不开（已跳过）:`, err?.message ?? err);
@@ -502,7 +502,7 @@ const saveSettingsFile = async (allSettings: Record<string, any>): Promise<void>
   db.exec("BEGIN");
   try {
     for (const [uid, record] of entries) {
-      stmt.run(uid, JSON.stringify(mapSettingsSecrets(record, "enc")), now);
+      stmt.run(uid, JSON.stringify(mapSettingsSecrets(splitSettingsMedia(record), "enc")), now);
     }
     // 保持原 JSON 版的"整份覆盖"语义：不在本次写入里的账号要删掉，
     // 否则注销账号后它的设置会永远留在库里。
@@ -518,6 +518,126 @@ const saveSettingsFile = async (allSettings: Record<string, any>): Promise<void>
     try { db.exec("ROLLBACK"); } catch { /* 已经回滚了 */ }
     throw err;
   }
+};
+
+// ==================== 设置里的三张图拆成静态文件（第三期 11.1 第一步） ====================
+//
+// 为什么拆：customBackground(416 KB) + userAvatar(47 KB) + aiAvatar(25 KB)，
+// 三个 base64 字段占整份设置的 99.6%（实测 487749 / 489548 字符）。
+//
+// 这一步**只做服务端**：落盘成文件、库里存 `media:v1:<hash>.<ext>`，
+// 读设置时再拼回 `data:image/...;base64,...` —— **对 App 完全透明，一个字不用改**。
+//
+// ⚠️ 性能收益这一步拿不到（读设置仍要读那 487 KB 文件），但**结构问题解决了**；
+// 真正的收益要等 App 改成"按 id 取图"（下一步，要打包）。
+//
+// ⚠️ 内容寻址：文件名 = sha256 前 16 位 + 扩展名，同一张图只存一份。
+// 现在不做清理 —— 宁可多留文件，也不误删用户自己设的背景和头像。
+const SETTINGS_MEDIA_DIR = path.join(DATA_DIR, "settings_media");
+const MEDIA_REF_PREFIX = "media:v1:";
+const MEDIA_FIELDS = ["customBackground", "userAvatar", "aiAvatar"] as const;
+
+/** `data:image/jpeg;base64,...` → 扩展名。认不出就 bin。 */
+const mediaExtOf = (dataUri: string): string => {
+  const m = /^data:image\/([a-z0-9.+-]+);base64,/i.exec(dataUri);
+  if (!m) return "bin";
+  const t = m[1].toLowerCase();
+  if (t === "jpeg") return "jpg";
+  if (t === "svg+xml") return "svg";
+  return t.replace(/[^a-z0-9]/g, "") || "bin";
+};
+
+/** 扩展名 → 回填 data URI 时用的 MIME 子类型。 */
+const mediaMimeOf = (ext: string): string => (ext === "jpg" ? "jpeg" : ext);
+
+/** 把一张 `data:image/...;base64,...` 落盘，返回引用。失败返回 null（调用方保留原值）。 */
+const persistMediaField = (dataUri: string): string | null => {
+  try {
+    const commaAt = dataUri.indexOf(",");
+    if (commaAt < 0) return null;
+    const buf = Buffer.from(dataUri.slice(commaAt + 1), "base64");
+    if (buf.length === 0) return null;
+    const hash = createHash("sha256").update(buf).digest("hex").slice(0, 16);
+    const fileName = `${hash}.${mediaExtOf(dataUri)}`;
+    fsSync.mkdirSync(SETTINGS_MEDIA_DIR, { recursive: true });
+    const full = path.join(SETTINGS_MEDIA_DIR, fileName);
+    if (!fsSync.existsSync(full)) {
+      // 先写临时文件再改名：中途断电不会留下半张图
+      const tmp = `${full}.tmp.${Math.random().toString(36).slice(2, 8)}`;
+      fsSync.writeFileSync(tmp, buf);
+      fsSync.renameSync(tmp, full);
+    }
+    return `${MEDIA_REF_PREFIX}${fileName}`;
+  } catch (err: any) {
+    console.error("[Settings] 图片落盘失败（保留 base64 原值）:", err?.message ?? err);
+    return null;
+  }
+};
+
+/** 把引用还原成 `data:image/...;base64,...`。文件缺失返回 null（保留引用，等文件回来）。 */
+const resolveMediaField = (ref: string): string | null => {
+  try {
+    const fileName = ref.slice(MEDIA_REF_PREFIX.length);
+    // 防路径穿越：只认 <hex>.<ext>
+    if (!/^[a-f0-9]+\.[a-z0-9]+$/i.test(fileName)) return null;
+    const full = path.join(SETTINGS_MEDIA_DIR, fileName);
+    if (!fsSync.existsSync(full)) return null;
+    const buf = fsSync.readFileSync(full);
+    const ext = fileName.split(".").pop() ?? "bin";
+    return `data:image/${mediaMimeOf(ext)};base64,${buf.toString("base64")}`;
+  } catch (err: any) {
+    console.error("[Settings] 图片还原失败:", err?.message ?? err);
+    return null;
+  }
+};
+
+/** 写设置前：三张图从 base64 换成引用（返回新对象，不动调用方的）。 */
+const splitSettingsMedia = (record: any): any => {
+  if (record === null || typeof record !== "object") return record;
+  const copy: any = { ...record };
+  for (const field of MEDIA_FIELDS) {
+    const v = copy[field];
+    if (typeof v !== "string" || v.length === 0) continue;
+    if (v.startsWith(MEDIA_REF_PREFIX)) continue;   // 已经是引用
+    if (!v.startsWith("data:image/")) continue;      // 不是内嵌图（可能是本地路径）
+    const ref = persistMediaField(v);
+    if (ref) copy[field] = ref;
+  }
+  return copy;
+};
+
+/** 读设置后：引用还原成 base64（App 读到的和以前一模一样）。 */
+const joinSettingsMedia = (record: any): any => {
+  if (record === null || typeof record !== "object") return record;
+  const copy: any = { ...record };
+  for (const field of MEDIA_FIELDS) {
+    const v = copy[field];
+    if (typeof v !== "string" || !v.startsWith(MEDIA_REF_PREFIX)) continue;
+    const dataUri = resolveMediaField(v);
+    if (dataUri) copy[field] = dataUri;
+  }
+  return copy;
+};
+
+/**
+ * 一次性迁移：把库里已经存在的三张 base64 图拆成文件。
+ *
+ * 已经是引用就跳过 → 可以反复调用。**不删任何原有文件**（JSON 备份里那份 base64 还在）。
+ */
+const migrateSettingsMediaToFiles = async (): Promise<number> => {
+  const db = getDb();
+  const rows = db.prepare("SELECT user_id, data FROM settings").all() as Array<{ user_id: string; data: string }>;
+  const stmt = db.prepare("INSERT OR REPLACE INTO settings (user_id, data, updated_at) VALUES (?, ?, ?)");
+  let moved = 0;
+  for (const r of rows) {
+    let record: any;
+    try { record = JSON.parse(r.data || "{}"); } catch { continue; }
+    const next = splitSettingsMedia(record);
+    if (JSON.stringify(next) === JSON.stringify(record)) continue;   // 没变
+    stmt.run(r.user_id, JSON.stringify(next), Date.now());
+    moved++;
+  }
+  return moved;
 };
 
 // ==================== 消息 / 会话的统一读写入口（第二期） ====================
@@ -2853,6 +2973,11 @@ async function ensureDirs() {
       const migratedSmall = await migrateSmallFilesToDb();
       if (migratedSmall.length > 0) {
         console.log(`[DB] 已把 ${migratedSmall.length} 个小文件迁入 kv 表：${migratedSmall.join(", ")}`);
+      }
+      // 第三期 11.1 第一步：把设置里的三张 base64 图拆成独立文件（读时再拼回，App 无感）
+      const movedMedia = await migrateSettingsMediaToFiles();
+      if (movedMedia > 0) {
+        console.log(`[DB] 已把 ${movedMedia} 个账号的设置图片拆成独立文件（settings_media/）`);
       }
     } catch (err: any) {
       // ⚠️ 迁移失败不能静默吞掉：此时库里可能还是空的，用户会看到"设置全没了"。
