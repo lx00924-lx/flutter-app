@@ -21,6 +21,9 @@ import 'sync_debug.dart';
 /// 发不出去（没网、电脑端没登录等）。
 enum BridgeCommandResult { ok, busy, failed }
 
+/// 设置编辑锁的获取结果；只有服务端明确报告冲突时才视为被其他设备占用。
+enum SettingsLockResult { acquired, lockedByOther, unreachable }
+
 /// 账号级「桥接状态切换中」标记（服务端下发，手机与电脑共用同一份真相）。
 ///
 /// 任一端发起启停/重置后，服务端登记一条标记并通过会话轮询下发给**所有**设备；
@@ -1560,20 +1563,21 @@ class SyncService {
     }
   }
 
-  /// 抢设置编辑锁。返回 true = 拿到（或本来就是我持有），false = 另一台正占着。
+  /// 抢设置编辑锁，并区分成功、明确冲突与请求不可用。
   ///
   /// 为什么需要：设置是整份推送的（54 个字段一次），两端同时改会互相覆盖 ——
   /// 在 A 上刚调好字体，B 改个头像整份推上去，字体又变回去。时间戳只能裁决
   /// 「先后」，裁决不了「同时」。
   ///
-  /// 失败一律当作「拿不到」（返回 false），不抛异常：调用方只需要知道能不能编辑，
-  /// 网络错误和被人占着在用户体验上是同一件事（这次先不能改）。
-  Future<bool> acquireSettingsLock({
+  /// 网络错误或无法识别的响应返回 [SettingsLockResult.unreachable]，不误报为被占用。
+  Future<SettingsLockResult> acquireSettingsLock({
     required String userId,
     String? clientSessionId,
   }) async {
     final cleanUserId = userId.trim();
-    if (cleanUserId.isEmpty || cleanUserId == 'guest') return true;
+    if (cleanUserId.isEmpty || cleanUserId == 'guest') {
+      return SettingsLockResult.acquired;
+    }
     try {
       final url = '$serverBaseUrl/api/settings-lock/acquire';
       final resp = await _dio.post(
@@ -1581,12 +1585,18 @@ class SyncService {
         data: {'userId': cleanUserId},
         options: _createOptions(userId: cleanUserId, clientSessionId: clientSessionId),
       );
-      if (resp.statusCode != 200) return false;
+      if (resp.statusCode != 200) return SettingsLockResult.unreachable;
       final data = resp.data;
-      return data is Map && data['ok'] == true;
+      if (data is Map && data['ok'] == true) {
+        return SettingsLockResult.acquired;
+      }
+      if (data is Map && data['reason'] == 'locked_by_other') {
+        return SettingsLockResult.lockedByOther;
+      }
+      return SettingsLockResult.unreachable;
     } catch (e) {
       debugPrint('[SyncService] acquireSettingsLock 失败: $e');
-      return false;
+      return SettingsLockResult.unreachable;
     }
   }
 

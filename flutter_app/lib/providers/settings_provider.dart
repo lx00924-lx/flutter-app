@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:hive/hive.dart';
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import '../models/app_settings.dart';
@@ -36,8 +37,33 @@ class SettingsProvider extends ChangeNotifier {
   String _decodedBackgroundSrc = '';
   String _decodedSplashSrc = '';
 
+  /// 账号箱还没有设置时（新账号第一次登录）的起点：默认值 + 机器级字段 + 登录态。
+  ///
+  /// ⚠️ 只继承 `customDataPath` / `harnessServiceUrl`（本机配置，不属于账号），
+  /// 以及登录态那几个字段（丢了会掉登录）。**其余一律默认值** ——
+  /// 头像、背景、启动图、API 卡片、模型列表都不该从上一个账号继承。
+  static AppSettings _defaultsForCurrentAccount(AppSettings? auth) {
+    final base = AppSettings();
+    if (auth == null) return base;
+    base
+      ..customDataPath = auth.customDataPath
+      ..harnessServiceUrl = auth.harnessServiceUrl
+      ..isLoggedIn = auth.isLoggedIn
+      ..loginAccount = auth.loginAccount
+      ..clientSessionId = auth.clientSessionId
+      ..sessionVersion = auth.sessionVersion;
+    return base;
+  }
+
   SettingsProvider() {
-    _settings = StorageService.instance.loadSettings();
+    final authBox = Hive.box('auth_box');
+    final authSettings = StorageService.instance.loadSettingsFromBox(authBox);
+    // 优先用「当前账号箱」里的设置。`auth_box` 里那份是上一次 `logout()` 存进去的，
+    // 换账号之后没人替换它 —— 拿它兜底会把上一个账号（A）的设置带进当前账号（B）。
+    // 账号箱为空（新账号第一次登录）时走 `_defaultsForCurrentAccount`：
+    // 默认值 + 几个机器级字段 + 登录态，绝不复制上一个账号的账号设置。
+    _settings = StorageService.instance.loadSettingsFromCurrentScope() ??
+        _defaultsForCurrentAccount(authSettings);
     _updateImageCache();
     StoragePathService.instance.setCustomPath(_settings.customDataPath);
     // 上次的缓存迁移可能没跑完（App 被强杀 / 电脑断电）→ 这里接手：
@@ -738,6 +764,21 @@ class SettingsProvider extends ChangeNotifier {
       // 以前这里写 `_settings.accountPassword = password`，是为了「离线登录」兜底，
       // 而那条兜底已删除 —— 它同时是本地明文密码的唯一理由。
       _settings.isLoggedIn = true;
+      final previousSettings = _settings;
+      await StorageService.instance.openAccountScope(cleanAccount);
+      final scopedSettings = StorageService.instance.loadSettingsFromBox(
+        Hive.box('settings_box_${StorageService.scopeForAccount(cleanAccount)}'),
+      );
+      _settings = scopedSettings ?? (AppSettings()
+        ..customDataPath = previousSettings.customDataPath
+        ..harnessServiceUrl = previousSettings.harnessServiceUrl);
+      _settings
+        ..loginAccount = cleanAccount
+        ..clientSessionId = newSessionId
+        ..isLoggedIn = true
+        ..sessionVersion = res['version'] is int
+            ? res['version'] as int
+            : _settings.sessionVersion;
       _save(pushToCloud: false);
 
       // 启动心跳多端互斥监听
@@ -844,7 +885,9 @@ class SettingsProvider extends ChangeNotifier {
     KeepAliveService.stop();
 
     _settings.isLoggedIn = false;
-    _save();
+    StorageService.instance.saveAuthSettings(_settings);
+    unawaited(StorageService.instance.closeAccountScope());
+    notifyListeners();
   }
 
   /// 更新 Agent 执行配置

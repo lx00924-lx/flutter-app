@@ -406,11 +406,9 @@ A 的数据在 box 里，B 登录后读的还是同一批 box，所以 B 看到�
 验收：三张图拼回来与拆之前**逐字符一致**（416431 / 46551 / 24767）；
 取图接口三个文件全部 200 + `image/jpeg` + 字节数对得上；不带身份头取图 **403**。
 
-⚠️ **`splashImage`（启动图）不在拆图名单里** —— 它仍以 base64 随设置写入上传，
-所以客户端 128 / 640 / 400 KB 的预算**照旧必须守**（`settingsPayloadGuard` 判的是请求体）。
-⚠️ **`settings_media/` 目前没有保留期清理**（90 天那套只扫 `messages_media/`）。
-背景和头像是用户正在用的，**不能按时间删**；要做只能做标记清除（扫全部设置引用、
-删掉已无人引用的文件）—— **未做**。
+`splashImage` 现已纳入 `MEDIA_FIELDS`，与 `customBackground` / `userAvatar` / `aiAvatar` 一起拆为静态文件；App 启动页改用 `SettingsProvider.splashImageBytes`，不再直接解码 base64。客户端 128 / 640 / 400 KB 的预算常量仍保留，拆图只缩小上传体积，没有改变预算判断。
+
+`settings_media/` 已新增标记清除 `cleanupOrphanSettingsMedia({dryRun})`：扫描 `MEDIA_FIELDS` 中的 `media:v1:` 引用，识别无人引用的文件，并跳过最近新增的文件（24 小时缓冲）。目前仅在启动 60 秒后运行一次 dry-run 并写 `[SettingsMedia]` 日志，尚未执行实际删除；先观察候选清单再决定是否启用删除。
 
 ### 11.2 剩余 6 个小文件迁进库 ✅ 已完成（2026-11-18 18:00）
 

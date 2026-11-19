@@ -22,6 +22,8 @@ import 'harness_settings_screen.dart';
 import 'storage_settings_screen.dart';
 import 'log_console_screen.dart';
 
+enum _SettingsLockUiState { acquiring, acquired, lockedByOther, unreachable }
+
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
 
@@ -30,14 +32,14 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  /// 另一台设备正在改设置时，本页**只读**。
+  /// 获取设置编辑锁的状态，区分其他设备占用与服务器不可达。
   ///
   /// 为什么要有这块：设置是整份推送的（54 个字段一次），两端同时改会互相覆盖 ——
   /// 在 A 上刚调好字体，B 改个头像整份推上去，字体又变回去。时间戳只能裁决
   /// 「先后」，裁决不了「同时」，所以进这一页先抢一把锁（服务端 90 秒过期）。
   ///
-  /// 只读而不是"不让进"：至少让人看得见当前值在变，不会一脸茫然。
-  bool _lockedByOther = false;
+  /// 被其他设备占用时仍可查看当前值；服务器不可达时单独提示原因。
+  _SettingsLockUiState _lockUiState = _SettingsLockUiState.acquiring;
 
   /// 只读时盯着锁的定时器。
   ///
@@ -69,15 +71,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _acquireSettingsLock() async {
-    final sp = context.read<SettingsProvider>();
-    final ok = await SyncService.instance.acquireSettingsLock(
-      userId: sp.syncUserId,
-      clientSessionId: sp.clientSessionId,
+    _lockWatchTimer?.cancel();
+    _lockWatchTimer = null;
+    if (mounted) {
+      setState(() => _lockUiState = _SettingsLockUiState.acquiring);
+    }
+    final result = await SyncService.instance.acquireSettingsLock(
+      userId: _settingsProv.syncUserId,
+      clientSessionId: _settingsProv.clientSessionId,
     );
     if (!mounted) return;
-    if (!ok) {
-      setState(() => _lockedByOther = true);
+    setState(() => _lockUiState = _toLockUiState(result));
+    if (result == SettingsLockResult.lockedByOther) {
       _startLockWatch();
+    }
+  }
+
+  _SettingsLockUiState _toLockUiState(SettingsLockResult result) {
+    switch (result) {
+      case SettingsLockResult.acquired:
+        return _SettingsLockUiState.acquired;
+      case SettingsLockResult.lockedByOther:
+        return _SettingsLockUiState.lockedByOther;
+      case SettingsLockResult.unreachable:
+        return _SettingsLockUiState.unreachable;
     }
   }
 
@@ -85,7 +102,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   void _startLockWatch() {
     _lockWatchTimer?.cancel();
     _lockWatchTimer = Timer.periodic(const Duration(seconds: 3), (timer) async {
-      final sp = context.read<SettingsProvider>();
+      final sp = _settingsProv;
       final stillLocked = await SyncService.instance.isSettingsLockedByOther(
         userId: sp.syncUserId,
         clientSessionId: sp.clientSessionId,
@@ -95,17 +112,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         return;
       }
       if (stillLocked) return;
-      // 锁没了：停轮询、去掉只读态，并顺手把锁拿回自己手里（否则这 3 秒里
-      // 可能又被别的设备抢走，界面短暂可编辑却推不上去）。
+      // 查询显示锁已释放：重新获取，确认成功前仍保持交互禁用。
       timer.cancel();
       _lockWatchTimer = null;
-      final gotIt = await SyncService.instance.acquireSettingsLock(
-        userId: sp.syncUserId,
-        clientSessionId: sp.clientSessionId,
-      );
-      if (!mounted) return;
-      setState(() => _lockedByOther = !gotIt);
-      if (!gotIt) _startLockWatch();
+      await _acquireSettingsLock();
     });
   }
 
@@ -130,11 +140,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
       ),
       body: Column(
         children: [
-          // 另一台正在改设置 → 一条常驻提示 + 整页只读。
+          // 只有服务端明确报告另一台设备占用时，才显示「被占用」。
           //
           // 常驻而不是"弹一下"：弹窗会被划掉，划掉之后用户就会去点、
           // 改、然后被覆盖，接着开始怀疑"设置存不住"。
-          if (_lockedByOther)
+          if (_lockUiState == _SettingsLockUiState.acquiring)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: const Row(
+                children: [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                  SizedBox(width: 8),
+                  Text('正在连接服务器确认设置编辑状态…'),
+                ],
+              ),
+            ),
+          if (_lockUiState == _SettingsLockUiState.lockedByOther)
             Container(
               width: double.infinity,
               color: isDark ? const Color(0xFF3A2A12) : const Color(0xFFFFF4E5),
@@ -153,10 +179,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   TextButton(
-                    onPressed: () {
-                      setState(() => _lockedByOther = false);
-                      _acquireSettingsLock();
-                    },
+                    onPressed: _acquireSettingsLock,
+                    child: const Text('重试', style: TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
+            ),
+          if (_lockUiState == _SettingsLockUiState.unreachable)
+            Container(
+              width: double.infinity,
+              color: isDark ? const Color(0xFF1E293B) : const Color(0xFFEFF6FF),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  const Icon(Icons.cloud_off_outlined, size: 18, color: Color(0xFF3B82F6)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '无法连接服务器，暂时不能修改设置',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: isDark ? const Color(0xFFBFDBFE) : const Color(0xFF1E40AF),
+                      ),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: _acquireSettingsLock,
                     child: const Text('重试', style: TextStyle(fontSize: 12)),
                   ),
                 ],
@@ -188,9 +236,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           Expanded(
-            // 只读时挡住所有点击/滑动，避免"看着能点、点了白改"。
+            // 未确认拿到锁时禁用设置项；「被占用」和「服务器不可达」分别显示原因。
             child: AbsorbPointer(
-              absorbing: _lockedByOther,
+              absorbing: _lockUiState != _SettingsLockUiState.acquired,
               child: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         children: [

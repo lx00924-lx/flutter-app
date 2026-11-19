@@ -45,6 +45,7 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   final SettingsProvider settingsProvider;
   final ApiService _apiService = ApiService();
   final StorageService _storage = StorageService.instance;
+  String _loadedAccountScope = '';
 
   List<ChatSession> _sessions = [];
   ChatSession? _currentSession;
@@ -1431,6 +1432,15 @@ class ChatProvider extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void loadSessions() {
+    final scope = settingsProvider.settings.isLoggedIn
+        ? StorageService.scopeForAccount(settingsProvider.settings.loginAccount)
+        : '';
+    if (scope != _loadedAccountScope) {
+      _loadedAccountScope = scope;
+      _currentSession = null;
+      _messages = [];
+      _sessions = [];
+    }
     _sessions = _storage.getAllSessions();
     // 会话被误删之后，聊天记录有可能还躺在本地 messages box 里。
     // 没有会话指向它，界面上就一条都看不见 —— 用户看到的就是"数据全没了"。

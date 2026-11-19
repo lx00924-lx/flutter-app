@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/settings_provider.dart';
-import '../utils/image_picker_helper.dart';
 import 'chat_screen.dart';
 import 'login_screen.dart';
 
@@ -61,9 +60,10 @@ class _SplashScreenState extends State<SplashScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final settings = context.watch<SettingsProvider>().settings;
+    final sp = context.watch<SettingsProvider>();
+    final settings = sp.settings;
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final splashImageBytes = ImagePickerHelper.decodeBase64Image(settings.splashImage);
+    final splashImageBytes = sp.splashImageBytes;
 
     return Scaffold(
       backgroundColor: isDark ? const Color(0xFF0F172A) : Colors.white,

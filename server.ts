@@ -535,7 +535,9 @@ const saveSettingsFile = async (allSettings: Record<string, any>): Promise<void>
 // 现在不做清理 —— 宁可多留文件，也不误删用户自己设的背景和头像。
 const SETTINGS_MEDIA_DIR = path.join(DATA_DIR, "settings_media");
 const MEDIA_REF_PREFIX = "media:v1:";
-const MEDIA_FIELDS = ["customBackground", "userAvatar", "aiAvatar"] as const;
+const MEDIA_FIELDS = ["customBackground", "userAvatar", "aiAvatar", "splashImage"] as const;
+/** 刚写入的设置图片留出缓冲时间，避免上传与设置保存之间的短暂间隙造成误删。 */
+const SETTINGS_MEDIA_ORPHAN_GRACE_MS = 24 * 60 * 60 * 1000;
 
 /** `data:image/jpeg;base64,...` → 扩展名。认不出就 bin。 */
 const mediaExtOf = (dataUri: string): string => {
@@ -617,6 +619,65 @@ const joinSettingsMedia = (record: any): any => {
     if (dataUri) copy[field] = dataUri;
   }
   return copy;
+};
+
+/**
+ * 清理 settings_media 中已无任何设置引用的孤儿文件。
+ * 默认 dry-run；只有显式传入 { dryRun: false } 才会删除文件。
+ */
+const cleanupOrphanSettingsMedia = async (
+  options: { dryRun?: boolean } = {},
+): Promise<{ dryRun: boolean; referenced: number; candidates: string[]; deleted: string[]; skippedRecent: number }> => {
+  const dryRun = options.dryRun !== false;
+  const allSettings = await loadSettingsFile();
+  const referenced = new Set<string>();
+  for (const record of Object.values(allSettings)) {
+    if (!record || typeof record !== "object") continue;
+    for (const field of MEDIA_FIELDS) {
+      const value = (record as any)[field];
+      if (typeof value !== "string" || !value.startsWith(MEDIA_REF_PREFIX)) continue;
+      const fileName = value.slice(MEDIA_REF_PREFIX.length);
+      if (/^[a-f0-9]+\.[a-z0-9]+$/i.test(fileName)) referenced.add(fileName);
+    }
+  }
+
+  const candidates: string[] = [];
+  const deleted: string[] = [];
+  let skippedRecent = 0;
+  const entries = await fs.readdir(SETTINGS_MEDIA_DIR).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === "ENOENT") return [];
+    throw err;
+  });
+  const cutoff = Date.now() - SETTINGS_MEDIA_ORPHAN_GRACE_MS;
+  for (const fileName of entries) {
+    if (!/^[a-f0-9]+\.[a-z0-9]+$/i.test(fileName) || referenced.has(fileName)) continue;
+    const fullPath = path.join(SETTINGS_MEDIA_DIR, fileName);
+    let stat;
+    try { stat = await fs.lstat(fullPath); } catch { continue; }
+    if (!stat.isFile()) continue;
+    if (stat.mtimeMs > cutoff) { skippedRecent++; continue; }
+    candidates.push(fileName);
+    if (!dryRun) {
+      try {
+        await fs.unlink(fullPath);
+        deleted.push(fileName);
+      } catch (err: any) {
+        if (err?.code !== "ENOENT") throw err;
+      }
+    }
+  }
+  return { dryRun, referenced: referenced.size, candidates, deleted, skippedRecent };
+};
+
+/** 可调用的清理入口；调用方需显式选择是否实际删除。 */
+const runSettingsMediaCleanup = async (dryRun = true): Promise<void> => {
+  try {
+    const result = await cleanupOrphanSettingsMedia({ dryRun });
+    console.log(`[SettingsMedia] ${result.dryRun ? "dry-run" : "删除完成"}: 引用 ${result.referenced} 个，候选 ${result.candidates.length} 个，跳过最近新增 ${result.skippedRecent} 个`);
+    if (result.candidates.length > 0) console.log(`[SettingsMedia] 孤儿文件: ${result.candidates.join(", ")}`);
+  } catch (err: any) {
+    console.error("[SettingsMedia] 孤儿文件清理失败:", err?.message ?? err);
+  }
 };
 
 /**
@@ -1004,6 +1065,9 @@ const startRetentionSweeper = (): void => {
       `媒体 ${mediaDays > 0 ? `${mediaDays} 天` : "永久"}` +
       `（可用 MESSAGE_RETENTION_DAYS / MEDIA_RETENTION_DAYS 调整，0 = 永久）`,
   );
+  setTimeout(() => {
+    void runSettingsMediaCleanup(true);
+  }, 60_000);
   setTimeout(() => {
     void retentionSweep();
   }, 60_000);

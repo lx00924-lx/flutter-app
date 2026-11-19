@@ -1,4 +1,5 @@
 import 'package:hive/hive.dart';
+import 'dart:convert';
 import 'sync_debug.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
@@ -8,9 +9,79 @@ class StorageService {
   static final StorageService instance = StorageService._();
   StorageService._();
 
-  Box? get _sessionsBox => Hive.isBoxOpen('sessions_box') ? Hive.box('sessions_box') : null;
-  Box? get _messagesBox => Hive.isBoxOpen('messages_box') ? Hive.box('messages_box') : null;
-  Box? get _settingsBox => Hive.isBoxOpen('settings_box') ? Hive.box('settings_box') : null;
+  String? _scope;
+  String get _scopeSuffix => _scope == null ? '' : '_$_scope';
+  String get _sessionsBoxName => 'sessions_box$_scopeSuffix';
+  String get _messagesBoxName => 'messages_box$_scopeSuffix';
+  String get _settingsBoxName => 'settings_box$_scopeSuffix';
+
+  Box? get _sessionsBox => Hive.isBoxOpen(_sessionsBoxName) ? Hive.box(_sessionsBoxName) : null;
+  Box? get _messagesBox => Hive.isBoxOpen(_messagesBoxName) ? Hive.box(_messagesBoxName) : null;
+  Box? get _settingsBox => Hive.isBoxOpen(_settingsBoxName) ? Hive.box(_settingsBoxName) : null;
+
+  static String scopeForAccount(String account) {
+    // Account names are normalized to lowercase for case-insensitive login identity.
+    // UTF-8 hex is reversible and Hive-name safe; distinct normalized accounts cannot collide.
+    final bytes = utf8.encode(account.trim().toLowerCase());
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  }
+
+  Future<void> openAccountScope(String account) async {
+    final nextScope = scopeForAccount(account);
+    if (nextScope.isEmpty || nextScope == _scope) return;
+    await closeAccountScope();
+
+    final oldNames = ['sessions_box', 'messages_box', 'settings_box'];
+    final newNames = [
+      'sessions_box_$nextScope',
+      'messages_box_$nextScope',
+      'settings_box_$nextScope',
+    ];
+    await Future.wait([
+      for (final name in newNames)
+        if (!Hive.isBoxOpen(name)) Hive.openBox(name),
+    ]);
+
+    // The pre-scope boxes belong to the sole historical user of this installation.
+    // Persist each copied key in the destination box before marking it migrated. If
+    // interrupted, the next run idempotently repeats puts by key, never duplicates data.
+    const migrationMarker = 'box_scope_migrated_v1';
+    final authBox = Hive.isBoxOpen('auth_box') ? Hive.box('auth_box') : null;
+    final migrationAlreadyDone = authBox?.get(migrationMarker) == true;
+    var legacyKeyCount = 0;
+    var copiedKeyCount = 0;
+    if (!migrationAlreadyDone) {
+      for (var i = 0; i < oldNames.length; i++) {
+        final oldName = oldNames[i];
+        if (!await Hive.boxExists(oldName)) continue;
+        final source = Hive.isBoxOpen(oldName) ? Hive.box(oldName) : await Hive.openBox(oldName);
+        final destination = Hive.box(newNames[i]);
+        final keys = source.keys.toList();
+        legacyKeyCount += keys.length;
+        for (final key in keys) {
+          if (!destination.containsKey(key)) {
+            await destination.put(key, source.get(key));
+            copiedKeyCount++;
+          }
+        }
+      }
+      await authBox?.put(migrationMarker, true);
+    }
+    _scope = nextScope;
+    final migrationStatus = migrationAlreadyDone ? 'already-done' : 'completed';
+    SyncDebug.log(
+      'openAccountScope: scope=$nextScope, migration=$migrationStatus, '
+      'legacyKeys=$legacyKeyCount, copiedKeys=$copiedKeyCount',
+    );
+  }
+
+  Future<void> closeAccountScope() async {
+    final names = [_sessionsBoxName, _messagesBoxName, _settingsBoxName];
+    for (final name in names) {
+      if (Hive.isBoxOpen(name)) await Hive.box(name).close();
+    }
+    _scope = null;
+  }
 
   // --- 会话相关 ---
   List<ChatSession> getAllSessions() {
@@ -434,12 +505,40 @@ class StorageService {
     return AppSettings();
   }
 
+  AppSettings? loadSettingsFromBox(Box box) {
+    try {
+      final val = box.get('app_settings');
+      if (val is Map) return AppSettings.fromMap(val);
+    } catch (_) {}
+    return null;
+  }
+
+  /// 读**当前已打开 scope** 的账号设置；没开 scope、或那个箱里还没有设置时返回 null。
+  ///
+  /// 为什么不能用 `auth_box` 顶替：`auth_box` 存的是「最后一次登录时的整份设置」，
+  /// 换账号之后那份还是**上一个账号**的。启动流程里 `openAccountScope()` 只负责
+  /// 打开箱，不会替换 `SettingsProvider._settings` —— 所以启动时必须优先读这里。
+  AppSettings? loadSettingsFromCurrentScope() {
+    final box = _settingsBox;
+    if (box == null) return null;
+    return loadSettingsFromBox(box);
+  }
+
+  Future<void> saveAuthSettings(AppSettings settings) async {
+    try {
+      if (Hive.isBoxOpen('auth_box')) {
+        await Hive.box('auth_box').put('app_settings', settings.toMap());
+      }
+    } catch (_) {}
+  }
+
   Future<void> saveSettings(AppSettings settings) async {
     try {
       final box = _settingsBox;
       if (box != null) {
         await box.put('app_settings', settings.toMap());
       }
+      await saveAuthSettings(settings);
     } catch (_) {}
   }
 }

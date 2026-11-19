@@ -11,6 +11,7 @@ import 'providers/settings_provider.dart';
 import 'screens/log_console_screen.dart';
 import 'screens/splash_screen.dart';
 import 'services/notification_service.dart';
+import 'services/storage_service.dart';
 import 'services/tray_service.dart';
 
 /// 全局导航 Key，供服务层在收到顶号通知时安全弹窗与跳转
@@ -40,25 +41,27 @@ void main() async {
   try {
     await Hive.initFlutter();
     await Future.wait([
-      Hive.openBox('sessions_box'),
-      Hive.openBox('messages_box'),
-      Hive.openBox('settings_box'),
+      Hive.openBox('auth_box'),
     ]);
   } catch (e, stack) {
     debugPrint('Hive init warning: $e\n$stack');
     try {
       await Future.wait([
-        Hive.deleteBoxFromDisk('sessions_box'),
-        Hive.deleteBoxFromDisk('messages_box'),
-        Hive.deleteBoxFromDisk('settings_box'),
-      ]);
-      await Future.wait([
-        Hive.openBox('sessions_box'),
-        Hive.openBox('messages_box'),
-        Hive.openBox('settings_box'),
+        Hive.openBox('auth_box'),
       ]);
     } catch (fallbackError) {
       debugPrint('Hive fallback failed: $fallbackError');
+    }
+  }
+
+  if (Hive.isBoxOpen('auth_box')) {
+    final storedSettings = Hive.box('auth_box').get('app_settings');
+    if (storedSettings is Map && storedSettings['isLoggedIn'] == true) {
+      final loginAccount =
+          storedSettings['loginAccount']?.toString().trim() ?? '';
+      if (loginAccount.isNotEmpty) {
+        await StorageService.instance.openAccountScope(loginAccount);
+      }
     }
   }
 
